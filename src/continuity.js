@@ -12,10 +12,12 @@
 
 import {
   DEFAULT_MODELS,
+  DEFAULT_SCORING_POLICY,
   MODEL_ALIASES,
   canonicalModel,
   resolveModelSpec,
 } from "./catalog.js";
+import { isModelQuotaExhausted } from "./quota.js";
 
 export const CACHE_WORTH_TOKENS = 1024;
 export const CACHE_COLD_MS = 5 * 60 * 1000;
@@ -862,6 +864,29 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     return {
       shouldHold: false,
       why: "provider_unhealthy",
+      previousModel: currentModel,
+      previousEffort: sessionState.effort,
+      within: Boolean(facts.within),
+      turn: facts.turn || 1,
+    };
+  }
+
+  // 3b. Check subscription quota exhaustion (`spent` in Magpie `affinity.go`):
+  // If all accounts serving the sticky session's model/provider have exhausted their binding
+  // subscription window (`remaining <= safety_margin_pct`), switch to an eligible provider!
+  if (
+    options.quotas &&
+    isModelQuotaExhausted(
+      sessionState.model || currentModel,
+      options.quotas,
+      options.policy || DEFAULT_SCORING_POLICY,
+      now,
+      sessionState.provider
+    )
+  ) {
+    return {
+      shouldHold: false,
+      why: "quota_exhausted",
       previousModel: currentModel,
       previousEffort: sessionState.effort,
       within: Boolean(facts.within),

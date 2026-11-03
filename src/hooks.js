@@ -30,6 +30,7 @@ import {
   keepsEffort,
 } from "./continuity.js";
 import { extractRequestFacts } from "./profiler-core.js";
+import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
@@ -78,12 +79,15 @@ export async function onRequest(body, ctx = {}) {
   const sessionKey = facts.sessionKey || computeSessionKey(body, ctx);
   const sessionState = sessionKey ? store.get(sessionKey, now) : null;
   const candidateModels = options.candidateModels || options.allowedModels;
+  const liveQuotas = loadLiveQuotas(options, now);
 
   const cont = evaluateProviderContinuation(facts, sessionState, {
     now,
     affinityMode: options.affinityMode || options.affinity || "cache",
     availableModels: candidateModels,
     unhealthyModels: options.unhealthyModels,
+    quotas: liveQuotas,
+    policy: options.catalog?.policy,
     store,
     coldAfterMs: options.coldAfterMs,
     cacheTtl: options.cacheTtl,
@@ -219,6 +223,9 @@ export async function onRequest(body, ctx = {}) {
     catalog: options.catalog,
     unhealthyModels,
     minContextTokens,
+    quotas: liveQuotas,
+    meteredOk: options.meteredOk,
+    now,
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -227,12 +234,13 @@ export async function onRequest(body, ctx = {}) {
     },
   });
 
-  // Graceful fallback if all candidates were filtered out by temporary unhealthy/context constraints
-  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0)) {
+  // Graceful fallback if all candidates were filtered out by temporary unhealthy/context/quota constraints
+  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || liveQuotas)) {
     decision = selectBestRoute(profile, {
       objective: facts.objective,
       candidateModels,
       catalog: options.catalog,
+      now,
     });
   }
 
@@ -283,6 +291,8 @@ export async function onRequest(body, ctx = {}) {
     canonicalModel: decision.canonicalModel,
     targetEffort: finalEffort,
     modelWithEffort: `${decision.targetModel}:${finalEffort}`,
+    selectedAccount: decision.selectedAccount || null,
+    quota: decision.quota || null,
     workKind: decision.workKind,
     difficulty: decision.difficulty,
     requiredAbility: decision.requiredAbility,

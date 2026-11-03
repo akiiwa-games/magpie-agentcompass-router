@@ -31,6 +31,7 @@ import {
   keepsEffort,
 } from "./continuity.js";
 import { extractRequestFacts, inferTaskProfile } from "./profiler-core.js";
+import { orderSeatsByQuotaEconomics } from "./quota.js";
 
 const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -151,6 +152,8 @@ export function onRequest(body, ctx = {}) {
       affinityMode: options.affinityMode || options.affinity || "cache",
       availableModels: candidateModels,
       unhealthyModels: options.unhealthyModels,
+      quotas: options.quotas,
+      policy: options.catalog?.policy,
       store,
       coldAfterMs: options.coldAfterMs,
       cacheTtl: options.cacheTtl,
@@ -221,6 +224,9 @@ export function onRequest(body, ctx = {}) {
         catalog: options.catalog,
         unhealthyModels,
         minContextTokens,
+        quotas: options.quotas,
+        meteredOk: options.meteredOk,
+        now,
         continuity: {
           previousModel: cont.previousModel || null,
           previousEffort: cont.previousEffort || null,
@@ -229,11 +235,12 @@ export function onRequest(body, ctx = {}) {
         },
       });
 
-      if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0)) {
+      if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || options.quotas)) {
         decision = selectBestRoute(profile, {
           objective: facts.objective,
           candidateModels,
           catalog: options.catalog,
+          now,
         });
       }
 
@@ -353,29 +360,13 @@ export function onAccount(account, ctx = {}) {
 }
 
 /**
- * Optional pool seat-ordering strategy (`agentcompass/agentcompass` and `agentcompass/agentcompass-pure`).
- * Prefers non-resting seats with the lowest pace / usage pressure.
+ * Pool seat-ordering strategy (`agentcompass/agentcompass` and `agentcompass/agentcompass-pure`).
+ * Combines Magpie's `Seat` telemetry (`account`, `known`, `learns`, `used`, `soon`, `pace`, `resting`, `tokens`)
+ * with AgentCompass's subscription opportunity-cost and pre-reset surplus sprint economics.
  * Returns seat indexes `[0 .. seats.length - 1]` as required by `internal/middleware/points.go:232`
  * and `magpie-community/plugins/scripts/middleware.mjs:order()`.
  */
-function agentcompassPureStrategy(_pool, seats, _options) {
-  if (!Array.isArray(seats)) return [];
-  if (seats.length <= 1) return seats.map((_, i) => i);
-  return seats
-    .map((_, i) => i)
-    .sort((ia, ib) => {
-      const a = seats[ia] || {};
-      const b = seats[ib] || {};
-      if (Boolean(a.resting) !== Boolean(b.resting)) {
-        return a.resting ? 1 : -1;
-      }
-      const aUsed = typeof a.used === "number" ? a.used : 50;
-      const bUsed = typeof b.used === "number" ? b.used : 50;
-      return aUsed - bUsed || ia - ib;
-    });
-}
-
 export const strategies = {
-  agentcompass: agentcompassPureStrategy,
-  "agentcompass-pure": agentcompassPureStrategy,
+  agentcompass: orderSeatsByQuotaEconomics,
+  "agentcompass-pure": orderSeatsByQuotaEconomics,
 };

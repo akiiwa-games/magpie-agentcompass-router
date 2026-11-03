@@ -33,6 +33,15 @@ import {
   stripAgentNoise,
   userSaidFromText,
 } from "./continuity.js";
+import {
+  computeWindowCost,
+  demandForecast,
+  evaluateModelQuota,
+  isModelQuotaExhausted,
+  normalizeQuotaSnapshot,
+  orderSeatsByQuotaEconomics,
+} from "./quota.js";
+import { clearQuotasCache, loadLiveQuotas, resolveMagpieQuotasFile } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
 export const PROVIDER_ID = "agentcompass";
@@ -369,11 +378,21 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     fetch: pluginOptions.fetch,
   });
 
-  const decision = selectBestRoute(profile, {
+  const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions);
+  let decision = selectBestRoute(profile, {
     objective: turnText,
     candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
     catalog: pluginOptions.catalog,
+    quotas: liveQuotas,
+    meteredOk: pluginOptions.meteredOk,
   });
+  if (!decision.ok && liveQuotas) {
+    decision = selectBestRoute(profile, {
+      objective: turnText,
+      candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
+      catalog: pluginOptions.catalog,
+    });
+  }
 
   const answers = {};
   let matchedChoice = "";
@@ -440,6 +459,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     agentcompass: {
       targetModel: decision.targetModel,
       targetEffort: effectiveEffort,
+      selectedAccount: decision.selectedAccount || null,
+      quota: decision.quota || null,
       workKind: decision.workKind,
       difficulty: decision.difficulty,
       requiredAbility: decision.requiredAbility,
@@ -575,16 +596,25 @@ export {
   CANONICAL_ROUTES,
   SessionContinuityStore,
   analyzeTurnState,
+  clearQuotasCache,
   coldAfterMs,
   computeSessionKey,
+  computeWindowCost,
   defaultContinuityStore,
+  demandForecast,
+  evaluateModelQuota,
   evaluateProviderContinuation,
   firstWords,
   isCompactionText,
+  isModelQuotaExhausted,
   isShortFollowupMessage,
   keepsEffort,
+  loadLiveQuotas,
+  normalizeQuotaSnapshot,
+  orderSeatsByQuotaEconomics,
   rankCandidates,
   ratchetEffort,
+  resolveMagpieQuotasFile,
   selectBestRoute,
   sha256Hex,
   stripAgentNoise,

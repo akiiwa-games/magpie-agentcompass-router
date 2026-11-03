@@ -24,6 +24,7 @@ import {
   resolveModelSpec,
 } from "./catalog.js";
 import { inferTaskProfile, isReadonlyReviewTask, validateProfile } from "./profiler-core.js";
+import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
 
 export const EFFORT_SCALED_CAPABILITIES = [
   "reasoning",
@@ -374,9 +375,24 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     excluded.push(`ability ${ability.toFixed(2)} below the ${taskCtx.difficulty} floor ${gate.toFixed(2)}`);
   }
 
-  // Routine & Hard work does not unlock xhigh/max unless required_ability exceeds High
+  // Routine work does not unlock xhigh/max
   if ((effort === "xhigh" || effort === "max" || effort === "ultra") && taskCtx.difficulty === "routine") {
     excluded.push(`effort ${effort} is over-provisioned for routine work`);
+  }
+
+  // Subscription quota, safety margin, opportunity cost & pre-reset sprint evaluation
+  const quotaEval = taskCtx.quotas
+    ? evaluateModelQuota(
+        rawModel,
+        effort,
+        taskCtx,
+        taskCtx.quotas,
+        catalog,
+        taskCtx.now
+      )
+    : null;
+  if (quotaEval && !quotaEval.eligible) {
+    excluded.push(...(quotaEval.excluded || [`${rawModel}: subscription quota exhausted`]));
   }
 
   let fit = fitScore(taskCtx.kind, canonical, catalog);
@@ -416,10 +432,30 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     }
   }
 
+  const sunkWeight = Number(quotaEval?.reset_sunk_weight ?? 0.0);
+  const sprintSunk = taskCtx.difficulty === "routine" ? 0.0 : sunkWeight;
   const effortScale = burnScale(policy, curves, effort);
-  const effortPenalty = round4((policy.extra_effort_penalty ?? 0.025) * Math.max(0.0, effortScale - 1.0));
+  const effortPenalty = round4(
+    (policy.extra_effort_penalty ?? 0.025) *
+      Math.max(0.0, effortScale - 1.0) *
+      (1.0 - sprintSunk)
+  );
   const effortGain = Math.max(0.0, ability - highAbility);
-  const credited = Math.min(ability, Math.max(highAbility, target));
+  const saturationSpan = Number(policy.profile?.saturation_span ?? 0.3);
+  const sprintQuality =
+    sprintSunk > 0 && effortGain > 0
+      ? round4(
+          Number(policy.demand?.sprint_effort_weight ?? 0.06) *
+            sprintSunk *
+            clamp(effortGain / saturationSpan, 0, 1)
+        )
+      : 0.0;
+  // During a pre-reset surplus sprint (`sprintSunk > 0`), higher effort (`xhigh`/`max`) earns ability credit
+  // up to `ability` so expiring quota can be converted into deeper reasoning quality.
+  const credited =
+    sprintSunk > 0
+      ? Math.min(ability, Math.max(highAbility, target) + sprintSunk * (ability - Math.max(highAbility, target)))
+      : Math.min(ability, Math.max(highAbility, target));
   const shortfall = Math.max(0.0, target - ability);
   const shortfallPenalty = round4((policy.demand?.shortfall_weight ?? 0.35) * shortfall);
 
@@ -450,7 +486,9 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     if (((gui && guiCapable) || taskCtx.kind === "frontend_implementation") && (taskCtx.profile?.reasoning_depth ?? 1) >= 2) {
       price = 0.0;
     }
-    overqualification = round4(Number(pCfg.overqualification_weight ?? 0.08) * excess * price);
+    overqualification = round4(
+      Number(pCfg.overqualification_weight ?? 0.08) * excess * price * (1.0 - sprintSunk)
+    );
   }
 
   if (taskCtx.difficulty !== "routine" && ability < highAbility) {
@@ -492,11 +530,17 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     }
   }
 
+  const resetBonus = Number(quotaEval?.reset_bonus ?? 0.0);
+  const opportunityCost = Number(quotaEval?.opportunity_cost ?? 0.0);
+
   const totalScore = round4(
     weights.fit * fit +
       weights.ability * abilityScore +
       continuityBonus +
-      qualityBonus -
+      qualityBonus +
+      resetBonus +
+      sprintQuality -
+      opportunityCost -
       effortPenalty -
       overqualification -
       shortfallPenalty,
@@ -510,6 +554,18 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     excluded,
     eligible: excluded.length === 0,
     score: excluded.length === 0 ? totalScore : null,
+    quota: quotaEval
+      ? {
+          account: quotaEval.account,
+          provider: quotaEval.provider,
+          kind: quotaEval.kind,
+          opportunity_cost: opportunityCost,
+          reset_bonus: resetBonus,
+          reset_sunk_weight: sunkWeight,
+          shortage_probability: quotaEval.shortage_probability ?? 0.0,
+          binding_window: quotaEval.binding_window || null,
+        }
+      : null,
     components: {
       fit: round3(fit),
       route_fit: round3(routeFitRaw),
@@ -520,6 +576,9 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       required_ability: round3(target),
       continuity: continuityBonus,
       quality_bonus: qualityBonus,
+      reset_bonus: resetBonus,
+      sprint_quality: sprintQuality,
+      opportunity_cost: opportunityCost,
       effort_penalty: effortPenalty,
       overqualification,
       shortfall: shortfallPenalty,
@@ -536,6 +595,7 @@ export function rankCandidates(profileInput, options = {}) {
   const routes = catalog.routes || CANONICAL_ROUTES;
   const models = catalog.models || DEFAULT_MODELS;
   const aliases = catalog.aliases || MODEL_ALIASES;
+  const nowMs = Number.isFinite(options.now) ? Number(options.now) : Date.now();
 
   const profile = profileInput?.reasoning_depth
     ? validateProfile(profileInput)
@@ -574,6 +634,12 @@ export function rankCandidates(profileInput, options = {}) {
         }
       : null);
 
+  const normalizedQuotas = options.quotas
+    ? Array.isArray(options.quotas._normalized)
+      ? options.quotas
+      : { _normalized: normalizeQuotaSnapshot(options.quotas, nowMs, policy) }
+    : null;
+
   const taskCtx = {
     profile,
     kind,
@@ -588,6 +654,10 @@ export function rankCandidates(profileInput, options = {}) {
     unhealthy_models: unhealthySet,
     min_context_tokens: Number(options.minContextTokens || 0),
     continuity,
+    quotas: normalizedQuotas,
+    hours: options.hours,
+    metered_ok: options.meteredOk,
+    now: nowMs,
   };
 
   // Build candidate list from user-configured pool or default catalog
@@ -657,6 +727,8 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     canonicalModel: top ? top.canonicalModel : null,
     targetEffort: top ? top.effort : "high",
     modelWithEffort: top ? `${top.model}:${top.effort}` : null,
+    selectedAccount: top?.quota?.account || null,
+    quota: top?.quota || null,
     workKind: result.task.kind,
     difficulty: result.task.difficulty,
     requiredAbility: result.task.required_ability,
@@ -668,6 +740,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
       model: r.model,
       effort: r.effort,
       score: r.score,
+      quota: r.quota || null,
       components: r.components,
     })),
   };

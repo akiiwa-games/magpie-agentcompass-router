@@ -1,8 +1,8 @@
 # magpie-agentcompass-router
 
-> **Pure Intent & Capability Routing Plugin for [Magpie](https://github.com/yetone/magpie), powered by the core routing algorithm of [AgentCompass](https://github.com/akiiwa-games/AgentCompass).**
+> **Intent, Multi-Dimensional Capability, Subscription Quota Opportunity-Cost & Session-Affinity Routing Plugin for [Magpie](https://github.com/yetone/magpie), powered by [AgentCompass](https://github.com/akiiwa-games/AgentCompass).**
 >
-> 为 [Magpie](https://github.com/yetone/magpie) 打造的**纯意图与能力矩阵路由插件**——突破 Magpie 同步插件 20ms/250ms 时间预算限制，拿到 **10s–60s** 充裕推理预算，直接运行 **[AgentCompass](https://github.com/akiiwa-games/AgentCompass)** 本体的 **10 维任务画像 + 7 维模型能力向量 + 3 维主观禀赋（Model DNA）+ 思考档位投入曲线** 核心算法。
+> 为 [Magpie](https://github.com/yetone/magpie) 打造的**意图 × 能力矩阵 × 订阅配额机会成本 × 会话粘性路由插件**——突破 Magpie 同步插件 20ms/250ms 时间预算限制，拿到 **10s–60s** 充裕推理预算，完整运行 **[AgentCompass](https://github.com/akiiwa-games/AgentCompass)** 本体的 **10 维任务画像 + 6 维客观能力向量 + 3 维主观禀赋（Model DNA）+ 5h/7d 订阅窗口机会成本精算与临期余量冲刺（Pre-Reset Sprint）+ 思考档位投入曲线** 核心算法。
 
 ---
 
@@ -124,6 +124,19 @@ $$\text{pure\_intent\_score}(m, e) = \text{fit\_score}(m, e) - \text{overqual\_p
   4. `why: "outgrown"` — 当前输入超出模型 `context_window` 的 **95%**（如 200k 窗口达到 >190k），自动升级至 400k / 1M 大窗口模型；
   5. `why: "worn"` — 遵循 AgentCompass 2M 累计未压缩上下文防失忆规则（`compactedTokens + tokens >= 2,000,000`）；
   6. `why: "cold"` / `why: "compacted"` — 闲置超过缓存 TTL 或刚执行 `/compact`（Token 骤降 >50%），重新评估并允许在简单日常任务上顺滑降档省钱。
+
+### 4. 5h / 7d 订阅配额机会成本、临期余量冲刺（Pre-Reset Sprint）与账号池排序（[`src/quota.js`](./src/quota.js) & [`src/quota-loader.js`](./src/quota-loader.js)）
+本插件不仅匹配模型能力，还完整移植了 AgentCompass `allocator.py` 的**订阅窗口经济学模型**，并与 Magpie 的实时配额遥测（`quotas.json`、`/v1/magpie/quotas` 及 `strategies` 的 `Seat` 结构）深度打通：
+- **自动读取 Magpie 实时配额（`quotas.json`）**：在 Bun 阶段自动发现并读取 Magpie 配置目录下的 `quotas.json`（带 5s `mtime` 缓存，零额外 I/O 开销），支持 `<provider>/<account>` 多账号、多窗口（`5h` / `7d` / `monthly`）与专属模型窗口（`opus` / `sonnet` / `gemini-weekly` / `3p-weekly`）。
+- **安全水位硬门禁（Safety Margin & Short-Window Floor）**：
+  - 当某个订阅窗口剩余配额低于安全底线（默认长窗口 `safety_margin_pct = 5%`、短窗口 `short_window_floor_pct = 10%`）或已触发 `rate_limited` 时，自动剔除该候选，切换到配额健康的 Provider。
+  - 若当前粘性会话所在 Provider 耗尽配额，即使 KV 缓存仍温热也会立即触发 `why: "quota_exhausted"`（对齐 Magpie `affinity.go` 的 `spent`），无缝故障转移至有余量的订阅。
+- **正态需求预测与边际短缺机会成本（`demandForecast` & `computeWindowCost`）**：
+  - 根据窗口剩余百分比 `remaining`、距重置小时数 `reset_hours` 与消耗速率预测未来需求 $D \sim \mathcal{N}(\mu, \sigma^2)$，计算本次请求挤占未来高优工作的期望短缺量 $\mathbb{E}[(D - \text{remaining})^+] \times \text{capacity\_usd} \times \text{score\_per\_displaced\_usd}$，并在余量低于 `45%` 时叠加稀缺惩罚（`scarcity_cost`），在额度见底前主动分流。
+- **重置前临期余量冲刺（Pre-Reset Surplus Sprint：`reset_bonus` & `sprint_sunk`）**：
+  - 当订阅窗口进入重置倒计时（默认 `reset_horizon_hours = 36h` 内）且剩余额度高于重置前预测需求（`surplus_pct > 0`）时，自动赋予最高 `+1.2` 的 `reset_bonus` 奖励，并在非日常任务上按 `sprint_sunk` 比例豁免高思考档位惩罚（`effort_penalty`）与高配模型惩罚（`overqualification`），在额度过期作废前自动切给顶配模型并解锁 `xhigh` / `max` 深度思考！
+- **订阅优先于按量 API Key & 账号池排序策略（`strategies.agentcompass`）**：
+  - 在同池多账号排序（`routings: agentcompass/agentcompass`）中，综合 `Seat` 的 `learns`、`account`（订阅优先于按量付费钱包）、`used`、`soon`（重置时间戳）与 `pace`（每小时可用余量），按 `待探测新号 (learns) -> 临期富余冲刺号 (sprint) -> 低机会成本健康订阅 -> 按量 API Key -> 低余量储备号 (>=90%) -> 冷却/耗尽号` 返回最优槽位排列 `[0 .. seats.length - 1]`。
 
 ---
 

@@ -1,7 +1,7 @@
 {
   "name": "agentcompass",
   "version": "0.1.0",
-  "description": "Pure intent and multi-dimensional capability routing plugin for Magpie, powered by AgentCompass's System-One 10-field task profiler and Model DNA allocator.",
+  "description": "Intent, multi-dimensional capability, Model DNA, subscription quota opportunity-cost, and session-affinity routing plugin for Magpie, powered by AgentCompass.",
   "type": "module",
   "main": "./src/index.js",
   "exports": {
@@ -11,6 +11,7 @@
     "./middleware": "./src/middleware.js",
     "./allocator": "./src/allocator.js",
     "./continuity": "./src/continuity.js",
+    "./quota": "./src/quota.js",
     "./profiler": "./src/profiler-core.js",
     "./catalog": "./src/catalog.js"
   },

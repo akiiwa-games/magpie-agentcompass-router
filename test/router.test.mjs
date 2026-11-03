@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -30,8 +31,13 @@ import {
   AgentCompassRouterPlugin,
   DECISION_MODEL_ID,
   PROVIDER_ID,
+  clearQuotasCache,
   evaluateLevelsProbe,
+  evaluateModelQuota,
   handleSystemOneRequest,
+  loadLiveQuotas,
+  normalizeQuotaSnapshot,
+  orderSeatsByQuotaEconomics,
 } from "../src/index.js";
 import {
   onAccount as mwOnAccount,
@@ -1012,4 +1018,306 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(store.isModelHealthy(fallbackModel, t0 + 3500), false);
   });
 });
+
+test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, Pre-Reset Sprint & Seat Ordering", async (t) => {
+  await t.test("1. Exhausted subscription window (< 5% safety margin or < 10% short-window floor) excludes provider and routes to healthy subscription", () => {
+    const t0 = 1_700_000_000_000;
+    const implProfile = {
+      work_kind: "general_implementation",
+      reasoning_depth: 2,
+      code_complexity: 2,
+      context_scale: 1,
+      divergence: 1,
+      hallucination_risk: 2,
+      error_cost: 2,
+      needs_visual: false,
+      needs_gui: false,
+      local_only: true,
+      interaction_style: "engineering",
+      expected_hours: 0.5,
+    };
+
+    // Without quota constraints, `gpt-6.1-sol` (`gpt-5.3-codex`) wins `general_implementation`
+    const baseline = selectBestRoute(implProfile, {
+      candidateModels: ["gpt-5.3-codex", "claude-sonnet-4-6"],
+      now: t0,
+    });
+    assert.equal(baseline.targetModel, "gpt-5.3-codex");
+
+    // When `codex` has only 3% remaining on its 7d window (< 5% safety_margin_pct), it is excluded
+    // and `claude-sonnet-4-6` (with 80% remaining) wins automatically!
+    const withExhaustedCodex = selectBestRoute(implProfile, {
+      candidateModels: ["gpt-5.3-codex", "claude-sonnet-4-6"],
+      now: t0,
+      quotas: {
+        "codex/work@example.com": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              { name: "7d", used: 97, remaining: 3, resetsAt: new Date(t0 + 48 * 3600 * 1000).toISOString() },
+            ],
+          },
+        },
+        "claude/pro@example.com": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              { name: "7d", used: 20, remaining: 80, resetsAt: new Date(t0 + 72 * 3600 * 1000).toISOString() },
+            ],
+          },
+        },
+      },
+    });
+    assert.equal(withExhaustedCodex.targetModel, "claude-sonnet-4-6");
+    assert.equal(withExhaustedCodex.selectedAccount, "claude/pro@example.com");
+  });
+
+  await t.test("2. High opportunity cost / scarcity on over-burned subscription shifts routing to well-funded subscription before hitting 0%", () => {
+    const t0 = 1_700_000_000_000;
+    const implProfile = {
+      work_kind: "general_implementation",
+      reasoning_depth: 2,
+      code_complexity: 2,
+      context_scale: 2,
+      divergence: 1,
+      hallucination_risk: 2,
+      error_cost: 2,
+      needs_visual: false,
+      needs_gui: false,
+      local_only: true,
+      interaction_style: "engineering",
+      expected_hours: 1.5,
+    };
+
+    // Codex has 14% left with 130h (5.4 days) remaining in its 168h week (burning 2.3%/h, high shortage probability & scarcity).
+    // Claude has 92% left with 48h remaining in its week.
+    const decision = selectBestRoute(implProfile, {
+      candidateModels: ["gpt-5.3-codex", "claude-sonnet-4-6"],
+      now: t0,
+      quotas: {
+        "codex/scarce@example.com": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              {
+                name: "7d",
+                used: 86,
+                remaining: 14,
+                resetsAt: new Date(t0 + 130 * 3600 * 1000).toISOString(),
+                pct_per_hour_24h: 2.2,
+              },
+            ],
+          },
+        },
+        "claude/plentiful@example.com": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              {
+                name: "7d",
+                used: 8,
+                remaining: 92,
+                resetsAt: new Date(t0 + 48 * 3600 * 1000).toISOString(),
+              },
+            ],
+          },
+        },
+      },
+    });
+    assert.equal(
+      decision.targetModel,
+      "claude-sonnet-4-6",
+      "High opportunity cost + scarcity on Codex should shift routing to plentiful Claude subscription"
+    );
+    assert.ok(decision.components.reset_bonus >= 0);
+  });
+
+  await t.test("3. Pre-reset surplus sprint (`reset_bonus` & `sprint_sunk`): harvests expiring subscription quota and unlocks higher effort", () => {
+    const t0 = 1_700_000_000_000;
+    const hardProfile = {
+      work_kind: "general_implementation",
+      reasoning_depth: 2,
+      code_complexity: 2,
+      context_scale: 2,
+      divergence: 1,
+      hallucination_risk: 2,
+      error_cost: 2,
+      needs_visual: false,
+      needs_gui: false,
+      local_only: true,
+      interaction_style: "engineering",
+      expected_hours: 1.0,
+    };
+
+    // Normally on `general_implementation` (depth 2), `claude-opus-4-6` pays an overqualification penalty
+    // and `gpt-5.3-codex:high` wins.
+    // Now give `claude` 65% remaining quota resetting in just 3 hours (`resetHours = 3 <= 36h horizon`)!
+    const sprintDecision = selectBestRoute(hardProfile, {
+      candidateModels: ["gpt-5.3-codex", "claude-opus-4-6"],
+      now: t0,
+      quotas: {
+        "codex/normal@example.com": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              {
+                name: "7d",
+                used: 45,
+                remaining: 55,
+                resetsAt: new Date(t0 + 100 * 3600 * 1000).toISOString(),
+              },
+            ],
+          },
+        },
+        "claude/expiring-soon@example.com": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              {
+                name: "7d",
+                used: 35,
+                remaining: 65,
+                resetsAt: new Date(t0 + 3 * 3600 * 1000).toISOString(),
+              },
+            ],
+          },
+        },
+      },
+    });
+
+    assert.equal(
+      sprintDecision.targetModel,
+      "claude-opus-4-6",
+      "Expiring Claude subscription with 65% surplus resetting in 3h must win via reset_bonus"
+    );
+    assert.ok(
+      sprintDecision.components.reset_bonus > 0.8,
+      `Expected reset_bonus > 0.8, got ${sprintDecision.components.reset_bonus}`
+    );
+    assert.equal(
+      sprintDecision.targetEffort,
+      "max",
+      "Pre-reset surplus sprint on non-routine work should waive effort penalty and unlock max effort"
+    );
+  });
+
+  await t.test("4. Sticky session failover on quota exhaustion (`why: quota_exhausted`) & automatic `quotas.json` file discovery", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+
+    // Create a temporary Magpie config directory with `quotas.json` and `providers.json`
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-quotas-test-"));
+    const quotasFile = path.join(tmpDir, "quotas.json");
+    fs.writeFileSync(path.join(tmpDir, "providers.json"), "{}", "utf8");
+    fs.writeFileSync(
+      quotasFile,
+      JSON.stringify({
+        "codex/acct1": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              {
+                name: "7d",
+                used: 98,
+                remaining: 2,
+                resetsAt: new Date(t0 + 48 * 3600 * 1000).toISOString(),
+              },
+            ],
+          },
+        },
+        "claude/acct1": {
+          kind: "subscription",
+          quota: {
+            windows: [
+              {
+                name: "7d",
+                used: 15,
+                remaining: 85,
+                resetsAt: new Date(t0 + 72 * 3600 * 1000).toISOString(),
+              },
+            ],
+          },
+        },
+      }),
+      "utf8"
+    );
+    clearQuotasCache();
+
+    try {
+      const loaded = loadLiveQuotas({ magpieConfigDir: tmpDir }, t0);
+      assert.ok(loaded && loaded["codex/acct1"]);
+
+      const req = {
+        model: "agentcompass/auto",
+        messages: [
+          {
+            role: "user",
+            content: "Implement the next pagination helper method in the user service.",
+          },
+        ],
+      };
+      const sessKey = computeSessionKey(req, { headers: { "x-session-id": "sess-quota-spent" } });
+      // Session was previously holding `gpt-5.3-codex` with warm KV cache
+      store.set(
+        sessKey,
+        {
+          model: "gpt-5.3-codex",
+          effort: "high",
+          provider: "codex",
+          tokens: 12_000,
+          cached: true,
+          healthy: true,
+          turn: 2,
+        },
+        t0
+      );
+
+      const hooked = await hookOnRequest(req, {
+        protocol: "chat",
+        headers: { "x-session-id": "sess-quota-spent" },
+        options: {
+          continuityStore: store,
+          magpieConfigDir: tmpDir,
+          candidateModels: ["gpt-5.3-codex", "claude-sonnet-4-6"],
+          now: t0 + 15_000,
+          prefer_local_heuristic: true,
+        },
+      });
+
+      assert.equal(hooked[ROUTE_CARRIER_KEY].continuation.held, false);
+      assert.equal(hooked[ROUTE_CARRIER_KEY].continuation.why, "quota_exhausted");
+      assert.equal(hooked[ROUTE_CARRIER_KEY].targetModel, "claude-sonnet-4-6");
+      assert.equal(hooked[ROUTE_CARRIER_KEY].selectedAccount, "claude/acct1");
+    } finally {
+      clearQuotasCache();
+      fs.rmSync(tmpDir, { recursive: true, force: true });
+    }
+  });
+
+  await t.test("5. `strategies.agentcompass` pool seat ordering: `learns` -> pre-reset sprint -> healthy subscription -> API key -> low reserve -> resting/spent", () => {
+    const t0 = 1_700_000_000_000;
+    const seats = [
+      // Index 0: Resting seat
+      { key: "claude/resting", account: true, known: true, learns: false, used: 20, soon: [t0 + 48 * 3600_000], pace: 1.6, resting: true, tokens: 0 },
+      // Index 1: Low-reserve seat (94% used >= 90% keepPercent)
+      { key: "claude/low-reserve", account: true, known: true, learns: false, used: 94, soon: [t0 + 24 * 3600_000], pace: 0.25, resting: false, tokens: 100 },
+      // Index 2: Unshared pay-as-you-go API key (`account: false`, `soon: []`)
+      { key: "claude/api-key", account: false, known: false, learns: false, used: 0, soon: [], pace: 0, resting: false, tokens: 0 },
+      // Index 3: Normal healthy subscription (50% used, 100h left)
+      { key: "claude/normal-sub", account: true, known: true, learns: false, used: 50, soon: [t0 + 100 * 3600_000], pace: 0.5, resting: false, tokens: 500 },
+      // Index 4: Pre-reset surplus sprint subscription (30% used = 70% left, renewing in 3 hours!)
+      { key: "claude/sprint-sub", account: true, known: true, learns: false, used: 30, soon: [t0 + 3 * 3600_000], pace: 23.3, resting: false, tokens: 1000 },
+      // Index 5: Unknown subscription that `learns` on its first response
+      { key: "claude/learns-sub", account: true, known: false, learns: true, used: 0, soon: [], pace: 0, resting: false, tokens: 0 },
+    ];
+
+    const order = strategies.agentcompass("claude", seats, { now: t0 });
+    assert.deepEqual(
+      order,
+      [5, 4, 3, 2, 1, 0],
+      `Expected [learns(5), sprint(4), normalSub(3), apiKey(2), lowReserve(1), resting(0)], got [${order.join(", ")}]`
+    );
+  });
+});
+
 
