@@ -52,8 +52,7 @@ import { SCORER_SYSTEM_PROMPT, clearProfileCache, parseJevScorerAnswer, scoreTas
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation", async (t) => {
-  await t.test("Routine bounded bulk work selects lightweight model (gemini-3.8-flash-high) and penalizes expensive overqualification", () => {
+test("1.1 Routine bounded bulk work selects lightweight model (gemini-3.8-flash-high) and penalizes expensive overqualification", () => {
     const profile = inferTaskProfile({
       objective: "Perform a mechanical batch rename of `foo_bar` to `fooBar` across the JSON fixtures using a uniform rule.",
     });
@@ -73,7 +72,7 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     assert.ok(astraHigh.components.overqualification > 0, "gpt-6-astra:high should pay overqualification penalty on routine work");
   });
 
-  await t.test("Convergent single-module production coding selects gpt-6.1-sol via module_precision DNA", () => {
+test("1.2 Convergent single-module production coding selects gpt-6.1-sol via module_precision DNA", () => {
     const profile = inferTaskProfile({
       objective: "Implement a standalone self-contained LRU cache algorithm module in TypeScript with unit tests.",
     });
@@ -83,7 +82,7 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     assert.equal(decision.targetEffort, "high");
   });
 
-  await t.test("Coupled cross-module deadlock & invariant audit selects claude-opus-5-5 via global_rigor + anti_hallucination", () => {
+test("1.3 Coupled cross-module deadlock & invariant audit selects claude-opus-5-5 via global_rigor + anti_hallucination", () => {
     const profile = inferTaskProfile({
       objective:
         "Conduct a read-only security audit and cross-module deadlock / race condition root-cause review across the gateway subsystem.",
@@ -98,7 +97,7 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     assert.ok(["high", "xhigh", "max"].includes(decision.targetEffort));
   });
 
-  await t.test("Open-ended divergent architecture ideation selects gemini-4-argon-high via divergence DNA (0.96)", () => {
+test("1.4 Open-ended divergent architecture ideation selects gemini-4-argon-high via divergence DNA (0.96)", () => {
     const profile = inferTaskProfile({
       objective:
         "Brainstorm and formulate a novel creative gameplay scheme and first-principles roadmap for an AI agent simulation game.",
@@ -112,7 +111,7 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     assert.equal(decision.canonicalModel, "gemini-4-argon-high");
   });
 
-  await t.test("Frontier mathematical proof (reasoning_depth=4, floor=4.2) selects claude-opus-5-5", () => {
+test("1.5 Frontier mathematical proof (reasoning_depth=4, floor=4.2) selects claude-opus-5-5", () => {
     const profile = inferTaskProfile({
       objective: "Provide a formal mathematical proof or refute the optimal-stopping theorem bound for this Markov chain.",
     });
@@ -122,7 +121,7 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     assert.equal(decision.canonicalModel, "claude-opus-5-5");
   });
 
-  await t.test("GUI computer-use task routes to gpt-6-astra (#1 GUI grounding) and excludes text-only models", () => {
+test("1.6 GUI computer-use task routes to gpt-6-astra (#1 GUI grounding) and excludes text-only models", () => {
     const profile = inferTaskProfile({
       objective: "Operate the desktop app GUI: click the Settings button, take a screenshot, and toggle the proxy switch.",
     });
@@ -134,7 +133,6 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     const grok = ranked.allCandidates.find((c) => c.canonicalModel === "grok-4.7");
     assert.ok(grok.excluded.includes("task needs visual input"), "text-only grok-4.7 must be excluded on visual/GUI work");
     assert.equal(ranked.selected.canonicalModel, "gpt-6-astra");
-  });
 });
 
 test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moejs` 250ms]) bypasses `host.js:1411` model rollback", async () => {
@@ -208,10 +206,8 @@ test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moe
   assert.deepEqual(skipRes, { skip: true });
 });
 
-test("3. Live System-One Scorer (`openai_compatible` and `jev`) with LRU Cache & Deadline Fallback", async (t) => {
+test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches it", async () => {
   clearProfileCache();
-
-  await t.test("Live OpenAI-compatible scorer parses 10-field JSON profile and caches it", async () => {
     let fetchCalls = 0;
     const mockFetch = async (_url, init) => {
       fetchCalls++;
@@ -271,7 +267,7 @@ test("3. Live System-One Scorer (`openai_compatible` and `jev`) with LRU Cache &
     assert.equal(fetchCalls, 1);
   });
 
-  await t.test("Timeout or HTTP failure gracefully falls back to deterministic twin without failing closed", async () => {
+test("3.2 Timeout or HTTP failure gracefully falls back to deterministic twin without failing closed", async () => {
     clearProfileCache();
     const failingFetch = async () => {
       throw new Error("Simulated timeout");
@@ -282,7 +278,6 @@ test("3. Live System-One Scorer (`openai_compatible` and `jev`) with LRU Cache &
     );
     assert.equal(res.meta.source, "heuristic_fallback");
     assert.equal(res.profile.work_kind, "debug_review");
-  });
 });
 
 test("4. Native Magpie `/v1/systemone` Decision Provider (`decide: true` / `decides: true`)", async () => {
@@ -375,7 +370,7 @@ test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting l
 test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`, `icon`, `options`, `registry.json`)", async () => {
   assert.equal(profileTask, inferTaskProfile);
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
-  assert.equal(pkg.name, "agentcompass");
+  assert.ok(["agentcompass", "@magpie-community/gateway-agentcompass"].includes(pkg.name));
   assert.equal(pkg.magpie.name, "AgentCompass");
   assert.equal(pkg.magpie.hooks, "./src/hooks.js");
   assert.equal(pkg.magpie.middleware, "./src/middleware.js");
@@ -403,16 +398,27 @@ test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`,
     assert.match(key, /^[a-z0-9_-]{1,40}$/);
   }
 
-  const listing = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "docs", "magpie-community-registry-entry.json"), "utf8"));
-  assert.equal(listing.package, "agentcompass");
-  assert.equal(listing.name, "AgentCompass");
-  assert.deepEqual(listing.providers, ["agentcompass"]);
-  assert.equal(listing.kind, "middleware");
-  assert.ok(listing.summary?.en && listing.summary?.zh);
+  const standaloneListingPath = path.join(REPO_ROOT, "docs", "magpie-community-registry-entry.json");
+  const monorepoRegistryPath = path.resolve(REPO_ROOT, "..", "..", "registry.json");
+  if (fs.existsSync(standaloneListingPath)) {
+    const listing = JSON.parse(fs.readFileSync(standaloneListingPath, "utf8"));
+    assert.ok(["agentcompass", "@magpie-community/gateway-agentcompass"].includes(listing.package));
+    assert.equal(listing.name, "AgentCompass");
+    assert.equal(listing.kind, "middleware");
+    assert.ok(listing.summary?.en && listing.summary?.zh);
+  }
+  if (fs.existsSync(monorepoRegistryPath)) {
+    const reg = JSON.parse(fs.readFileSync(monorepoRegistryPath, "utf8"));
+    const entry = reg.plugins.find((p) => p.package === pkg.name);
+    assert.ok(entry, `registry.json must include an entry for ${pkg.name}`);
+    assert.equal(entry.name, "AgentCompass");
+    assert.equal(entry.kind, "middleware");
+    assert.equal(entry.community, true);
+    assert.ok(entry.summary?.en && entry.summary?.zh);
+  }
 });
 
-test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold & Switching (`src/continuity.js`)", async (t) => {
-  await t.test("Scenario 1 (`why: first` & subagent isolation): New session runs intent routing and isolates `x-claude-code-agent-id` subagents", async () => {
+test("7.1 Scenario 1 (`why: first` & subagent isolation): New session runs intent routing and isolates `x-claude-code-agent-id` subagents", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
     let scorerCalls = 0;
@@ -519,7 +525,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(store.get(mainKey, t0 + 1000).model, "claude-opus-5-5");
   });
 
-  await t.test("Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected `<system-reminder>` lock Provider/Model with 0 scorer calls", async () => {
+test("7.2 Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected `<system-reminder>` lock Provider/Model with 0 scorer calls", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
     let scorerCalls = 0;
@@ -619,7 +625,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(hooked2b[ROUTE_CARRIER_KEY].continuation.why, "turn");
   });
 
-  await t.test("Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV cache and short follow-up nudges hold model and ratchet effort", async () => {
+test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV cache and short follow-up nudges hold model and ratchet effort", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
     let scorerCalls = 0;
@@ -743,7 +749,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(coldAfterMs("deepseek-v4.1-flash-free"), CHATGPT_CODEX_COLD_MS);
   });
 
-  await t.test("Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modality, tier escalation, 95% context window, and 2M wear trigger re-routing", async () => {
+test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modality, tier escalation, 95% context window, and 2M wear trigger re-routing", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
 
@@ -879,7 +885,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(wornCheck.why, "worn");
   });
 
-  await t.test("Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/compact` re-evaluates and cleanly downshifts on routine work", async () => {
+test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/compact` re-evaluates and cleanly downshifts on routine work", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
 
@@ -962,7 +968,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(store.get(sessKey, t0 + 11 * 60 * 1000).compactedTokens, 20_000);
   });
 
-  await t.test("Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onResponse` or `onUsage` marks model unhealthy and fails over", async () => {
+test("7.6 Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onResponse` or `onUsage` marks model unhealthy and fails over", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
 
@@ -1018,10 +1024,8 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     );
     assert.equal(store.isModelHealthy(fallbackModel, t0 + 3500), false);
   });
-});
 
-test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, Pre-Reset Sprint & Seat Ordering", async (t) => {
-  await t.test("1. Exhausted subscription window (< 5% safety margin or < 10% short-window floor) excludes provider and routes to healthy subscription", () => {
+test("8.1 Exhausted subscription window (< 5% safety margin or < 10% short-window floor) excludes provider and routes to healthy subscription", () => {
     const t0 = 1_700_000_000_000;
     const implProfile = {
       work_kind: "general_implementation",
@@ -1073,7 +1077,7 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
     assert.equal(withExhaustedCodex.selectedAccount, "claude/pro@example.com");
   });
 
-  await t.test("2. High opportunity cost / scarcity on over-burned subscription shifts routing to well-funded subscription before hitting 0%", () => {
+test("8.2 High opportunity cost / scarcity on over-burned subscription shifts routing to well-funded subscription before hitting 0%", () => {
     const t0 = 1_700_000_000_000;
     const implProfile = {
       work_kind: "general_implementation",
@@ -1133,7 +1137,7 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
     assert.ok(decision.components.reset_bonus >= 0);
   });
 
-  await t.test("3. Pre-reset surplus sprint (`reset_bonus` & `sprint_sunk`): harvests expiring subscription quota and unlocks higher effort", () => {
+test("8.3 Pre-reset surplus sprint (`reset_bonus` & `sprint_sunk`): harvests expiring subscription quota and unlocks higher effort", () => {
     const t0 = 1_700_000_000_000;
     const hardProfile = {
       work_kind: "general_implementation",
@@ -1201,7 +1205,7 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
     );
   });
 
-  await t.test("4. Sticky session failover on quota exhaustion (`why: quota_exhausted`) & automatic `quotas.json` file discovery", async () => {
+test("8.4 Sticky session failover on quota exhaustion (`why: quota_exhausted`) & automatic `quotas.json` file discovery", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
 
@@ -1294,7 +1298,7 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
     }
   });
 
-  await t.test("5. `strategies.agentcompass` pool seat ordering: `learns` -> pre-reset sprint -> healthy subscription -> API key -> low reserve -> resting/spent", () => {
+test("8.5 `strategies.agentcompass` pool seat ordering: `learns` -> pre-reset sprint -> healthy subscription -> API key -> low reserve -> resting/spent", () => {
     const t0 = 1_700_000_000_000;
     const seats = [
       // Index 0: Resting seat
@@ -1319,7 +1323,7 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
     );
   });
 
-  await t.test("6. Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-accounts.json` invariants)", () => {
+test("8.6 Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-accounts.json` invariants)", () => {
     // Verify calibrated subjective blend weights (0.49 / 0.34 / 0.17) and default_hours (0.4 / 1.0 / 2.0 / 3.5)
     assert.deepEqual(DEFAULT_SCORING_POLICY.profile.subjective, {
       weight: 0.49,
@@ -1404,6 +1408,5 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
     assert.equal(unlimitedDec.targetModel, "gpt-6.1-sol");
     assert.equal(unlimitedDec.components.free_usage, 0.18);
   });
-});
 
 
