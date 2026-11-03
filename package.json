@@ -14,6 +14,7 @@
     "./catalog": "./src/catalog.js"
   },
   "magpie": {
+    "name": "AgentCompass",
     "hooks": "./src/hooks.js",
     "middleware": "./src/middleware.js"
   },
