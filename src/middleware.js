@@ -42,6 +42,16 @@ const DEFAULT_VIRTUAL_MODELS = [
   "agentcompass/system-one-0.5",
 ];
 
+export const DEFAULT_GATEWAY_CANDIDATES = [
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5",
+  "gpt-5.4",
+  "gpt-5.3-codex",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+];
+
 function stripEffortSuffix(rawModel) {
   if (!rawModel || typeof rawModel !== "string") return "";
   const trimmed = rawModel.trim();
@@ -99,8 +109,6 @@ function resolveCandidateModels(body, ctx = {}, options = {}) {
     extractModelList(options.models) ||
     extractModelList(ctx?.models) ||
     extractModelList(ctx?.availableModels) ||
-    extractModelList(body?.available_models) ||
-    extractModelList(ctx?.provider?.models) ||
     extractModelList(options.modelMap);
 
   if (explicit) {
@@ -124,6 +132,14 @@ function resolveCandidateModels(body, ctx = {}, options = {}) {
   if (fallback) {
     return {
       candidateModels: [fallback],
+      hasExplicitCandidates: false,
+      canRewriteModel: true,
+    };
+  }
+
+  if (rawModel && isVirtualModelName(rawModel, options)) {
+    return {
+      candidateModels: DEFAULT_GATEWAY_CANDIDATES,
       hasExplicitCandidates: false,
       canRewriteModel: true,
     };
@@ -196,13 +212,13 @@ export function applyRoutedModelAndEffort(body, decision, ctx = {}) {
 }
 
 export function onRequest(body, ctx = {}) {
-  let carrierFromBody = null;
+  let rawCarrier = null;
   try {
     if (body && typeof body === "object" && !Array.isArray(body)) {
-      if (body[ROUTE_CARRIER_KEY] && typeof body[ROUTE_CARRIER_KEY] === "object") {
-        carrierFromBody = body[ROUTE_CARRIER_KEY];
-      }
       if (ROUTE_CARRIER_KEY in body) {
+        if (body[ROUTE_CARRIER_KEY] && typeof body[ROUTE_CARRIER_KEY] === "object") {
+          rawCarrier = body[ROUTE_CARRIER_KEY];
+        }
         delete body[ROUTE_CARRIER_KEY];
       }
     }
@@ -212,6 +228,27 @@ export function onRequest(body, ctx = {}) {
     }
 
     const options = ctx.options || {};
+    const isClaimedModel = shouldRoute(body.model, options);
+
+    // Only trust `body.__agentcompass_route` when `useRouteCarrier === true` AND the model is claimed by the plugin
+    const carrierFromBody =
+      options.useRouteCarrier === true &&
+      isClaimedModel &&
+      rawCarrier &&
+      typeof rawCarrier.targetModel === "string" &&
+      rawCarrier.targetModel.trim()
+        ? rawCarrier
+        : null;
+
+    const stateRouteFromCtx =
+      isClaimedModel && ctx?.state?.route && typeof ctx.state.route === "object"
+        ? ctx.state.route
+        : null;
+
+    if (!isClaimedModel && !stateRouteFromCtx) {
+      return undefined;
+    }
+
     const store = options.continuityStore || defaultContinuityStore;
     const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
     const { candidateModels, hasExplicitCandidates, canRewriteModel } = resolveCandidateModels(
@@ -221,64 +258,69 @@ export function onRequest(body, ctx = {}) {
     );
     let decision = null;
 
-    // 1. Check if Stage 1 (`src/hooks.js`) or shared `ctx.state` provided a pre-computed decision
-    const stateRoute =
-      carrierFromBody ||
-      (ctx?.state?.route && typeof ctx.state.route === "object" ? ctx.state.route : null);
+    // 1. Check if opt-in Stage 1 (`useRouteCarrier: true`) or shared `ctx.state` provided a pre-computed decision
+    const stateRoute = carrierFromBody || stateRouteFromCtx;
 
     if (stateRoute) {
       decision = stateRoute;
-      // If `middleware` has explicit candidateModels that `hooks` did not have, re-select within `candidateModels`
       if (
         hasExplicitCandidates &&
-        !decision.hasExplicitCandidates &&
-        decision.profile &&
         Array.isArray(candidateModels) &&
         !candidateModels.includes(decision.targetModel)
       ) {
-        const constrained = selectBestRoute(decision.profile, {
-          objective: "",
-          candidateModels,
-          catalog: options.catalog,
-          quotas: options.quotas,
-          meteredOk: options.meteredOk,
-          now,
-        });
-        if (constrained.ok && constrained.targetModel) {
-          decision = {
-            ...decision,
-            targetModel: constrained.targetModel,
-            canonicalModel: constrained.canonicalModel,
-            targetEffort: constrained.targetEffort || decision.targetEffort,
-            modelWithEffort: `${constrained.targetModel}:${constrained.targetEffort || decision.targetEffort}`,
-            canRewriteModel: true,
-            hasExplicitCandidates: true,
-          };
+        if (decision.profile && typeof decision.profile === "object") {
+          const constrained = selectBestRoute(decision.profile, {
+            objective: "",
+            candidateModels,
+            catalog: options.catalog,
+            quotas: options.quotas,
+            meteredOk: options.meteredOk,
+            now,
+          });
+          if (constrained.ok && constrained.targetModel) {
+            decision = {
+              ...decision,
+              targetModel: constrained.targetModel,
+              canonicalModel: constrained.canonicalModel,
+              targetEffort: constrained.targetEffort || decision.targetEffort,
+              modelWithEffort: `${constrained.targetModel}:${constrained.targetEffort || decision.targetEffort}`,
+              canRewriteModel: true,
+              hasExplicitCandidates: true,
+            };
+          } else {
+            decision = null;
+          }
+        } else {
+          decision = null;
         }
       }
 
-      const sessionKey =
-        decision.continuation?.sessionKey || computeSessionKey(body, ctx);
-      if (sessionKey && decision.targetModel) {
+      if (decision && decision.targetModel) {
         const facts = extractRequestFacts(body, ctx);
-        store.recordRequest(
-          sessionKey,
-          {
-            model: decision.targetModel,
-            effort: decision.targetEffort || "high",
-            workKind: decision.workKind || "general_implementation",
-            difficulty: decision.difficulty || "routine",
-            why: decision.continuation?.why || "first",
-            held: Boolean(decision.continuation?.held),
-          },
-          facts,
-          now
-        );
+        const sessionKey =
+          decision.continuation?.sessionKey || facts.sessionKey || computeSessionKey(body, ctx, facts.firstWords);
+        if (sessionKey) {
+          store.recordRequest(
+            sessionKey,
+            {
+              model: decision.targetModel,
+              effort: decision.targetEffort || "high",
+              workKind: decision.workKind || "general_implementation",
+              difficulty: decision.difficulty || "routine",
+              why: decision.continuation?.why || "first",
+              held: Boolean(decision.continuation?.held),
+            },
+            facts,
+            now
+          );
+        }
       }
-    } else if (shouldRoute(body.model, options)) {
-      // 2. Zero-latency (< 1 ms) synchronous execution inside `moejs`
+    }
+
+    if (!decision && isClaimedModel) {
+      // 2. Zero-latency (< 2 ms) synchronous execution inside `moejs`
       const facts = extractRequestFacts(body, ctx);
-      const sessionKey = facts.sessionKey || computeSessionKey(body, ctx);
+      const sessionKey = facts.sessionKey || computeSessionKey(body, ctx, facts.firstWords);
       const sessionState = sessionKey ? store.get(sessionKey, now) : null;
 
       const cont = evaluateProviderContinuation(facts, sessionState, {
@@ -433,7 +475,7 @@ export function onRequest(body, ctx = {}) {
     }
 
     if (!decision || !decision.targetModel) {
-      return carrierFromBody ? body : undefined;
+      return undefined;
     }
 
     ctx.state = ctx.state || {};
@@ -465,8 +507,9 @@ export function onRequest(body, ctx = {}) {
 
 /**
  * Middleware `onProvider(body, ctx)` hook (`internal/middleware/run.go:Tried`):
- * When `ctx.provider` exposes a provider's available `models` (or `options.modelsByProvider[provider.id]`),
- * selects the best model within that provider's catalog and ensures `__agentcompass_route` never leaks.
+ * Magpie passes `ctx.provider = { id, name, account, model }`.
+ * Supports optional per-provider model lists via `options.modelsByProvider[provider.id]`
+ * or fallback to `ctx.provider.model` if `body.model` is still a virtual model name.
  */
 export function onProvider(body, ctx = {}) {
   try {
@@ -480,7 +523,6 @@ export function onProvider(body, ctx = {}) {
     const options = ctx?.options || {};
     const prov = ctx?.provider && typeof ctx.provider === "object" ? ctx.provider : null;
     const providerModels =
-      extractModelList(prov?.models) ||
       extractModelList(options.modelsByProvider?.[prov?.id]) ||
       extractModelList(options.modelsByProvider?.[prov?.name]);
 
@@ -489,6 +531,8 @@ export function onProvider(body, ctx = {}) {
       const needProviderRoute =
         isVirtualModelName(body.model, options) ||
         prevDecision.canRewriteModel === false ||
+        prevDecision.hasExplicitCandidates === false ||
+        !providerModels.includes(prevDecision.targetModel) ||
         options.routePerProvider === true;
 
       if (needProviderRoute) {
@@ -518,6 +562,21 @@ export function onProvider(body, ctx = {}) {
         }
       }
     }
+
+    if (
+      isVirtualModelName(body.model, options) &&
+      typeof prov?.model === "string" &&
+      prov.model.trim()
+    ) {
+      const fallbackDecision = {
+        ...(prevDecision || {}),
+        targetModel: prov.model.trim(),
+        targetEffort: prevDecision?.targetEffort || "high",
+      };
+      applyRoutedModelAndEffort(body, fallbackDecision, ctx);
+      return body;
+    }
+
     return undefined;
   } finally {
     if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
@@ -528,7 +587,8 @@ export function onProvider(body, ctx = {}) {
 
 /**
  * Middleware `onResponse(body, ctx)` hook (`internal/middleware/run.go`):
- * Updates token/cache watermarks on success and marks `healthy = false` on upstream error.
+ * Shares the pooled request runtime with `onRequest`. Updates token/cache watermarks
+ * on success and marks `healthy = false` on upstream error (`status >= 400`).
  */
 export function onResponse(body, ctx = {}) {
   try {
@@ -560,17 +620,6 @@ export function onResponse(body, ctx = {}) {
       delete body[ROUTE_CARRIER_KEY];
     }
   }
-}
-
-/**
- * Middleware `onUsage(row, options)` hook (`internal/middleware/run.go:349`):
- * Receives Magpie's per-request usage/status telemetry (`rejected`, `status`, `input_tokens`, `cache_read`, etc.).
- */
-export function onUsage(row, options = {}) {
-  if (!row || typeof row !== "object") return;
-  const store = options?.continuityStore || defaultContinuityStore;
-  const now = Number.isFinite(options?.now) ? Number(options.now) : Date.now();
-  store.recordUsage(row, now);
 }
 
 /**

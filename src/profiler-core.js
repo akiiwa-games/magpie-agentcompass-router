@@ -107,8 +107,21 @@ const LOCAL_MACHINE_RE =
 const MULTI_TASK_MARK_RE =
   /(?:^|\n)\s*(?:#{1,4}\s*)?(?:task|deliverable|part|module|workstream|任务|交付物|模块|工作线)\s*(?:[1-9a-d]|[一二三四五六])\s*[.:：\-—]/gi;
 
+const MAX_PROFILE_CHARS = 4000;
+
+function capProfileText(text, maxChars = MAX_PROFILE_CHARS) {
+  if (!text || typeof text !== "string") return "";
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars * 0.625);
+  const tail = maxChars - head;
+  return `${text.slice(0, head)}\n${text.slice(-tail)}`;
+}
+
+const TRIVIAL_MECHANICAL_EDIT_RE =
+  /\b(?:rename\s+(?:the\s+|a\s+|all\s+)?(?:variable|var|function|fn|method|field|property|prop|constant|const|parameter|param|arg|argument|symbol|identifier|ident|class|type|struct|column|key)s?\b|\brename\s+[`'"\w.-]{1,64}\s+to\s+[`'"\w.-]{1,64}\b|(?:fix|correct)\s+(?:a\s+|the\s+)?(?:typo|spelling|whitespace|indentation)\b|(?:remove|delete)\s+unused\s+imports?\b|(?:bump|update)\s+(?:the\s+)?version\s+(?:number|string|in)\b)/i;
+
 export function multiTaskMarks(objective) {
-  return String(objective || "").match(MULTI_TASK_MARK_RE) || [];
+  return capProfileText(objective).match(MULTI_TASK_MARK_RE) || [];
 }
 
 const COUPLED_SIGNALS = [
@@ -147,47 +160,42 @@ const FRONTIER_SIGNALS = [
   "定理推导",
 ];
 
-/**
- * Extract text and visual indicators from an arbitrary message content payload
- * across OpenAI Chat, OpenAI Responses, Anthropic Messages, and Gemini GenerateContent.
- */
-function extractPartContent(content) {
-  let text = "";
-  let hasImage = false;
-  if (typeof content === "string") {
-    return { text: content, hasImage: false };
+function extractSystemSummary(rawSystem, maxPreviewChars = 2000) {
+  if (!rawSystem) return { preview: "", totalChars: 0 };
+  if (typeof rawSystem === "string") {
+    return {
+      preview: rawSystem.slice(0, maxPreviewChars),
+      totalChars: rawSystem.length,
+    };
   }
-  if (!Array.isArray(content)) {
-    return { text: "", hasImage: false };
-  }
-  for (const part of content) {
-    if (!part || typeof part !== "object") continue;
-    const type = String(part.type || "").toLowerCase();
-    if (
-      type === "image" ||
-      type === "image_url" ||
-      type === "input_image" ||
-      part.inlineData ||
-      part.inline_data ||
-      part.fileData ||
-      part.file_data
-    ) {
-      hasImage = true;
-    }
-    if (typeof part.text === "string") {
-      text += (text ? "\n" : "") + part.text;
-    } else if (typeof part.input_text === "string") {
-      text += (text ? "\n" : "") + part.input_text;
-    } else if (typeof part.content === "string") {
-      text += (text ? "\n" : "") + part.content;
+  if (!Array.isArray(rawSystem)) return { preview: "", totalChars: 0 };
+  let preview = "";
+  let totalChars = 0;
+  for (const part of rawSystem) {
+    if (!part) continue;
+    const t =
+      typeof part === "string"
+        ? part
+        : typeof part.text === "string"
+          ? part.text
+          : typeof part.input_text === "string"
+            ? part.input_text
+            : typeof part.content === "string"
+              ? part.content
+              : "";
+    if (t) {
+      totalChars += t.length;
+      if (preview.length < maxPreviewChars) {
+        preview += (preview ? "\n" : "") + t.slice(0, maxPreviewChars - preview.length);
+      }
     }
   }
-  return { text, hasImage };
+  return { preview, totalChars };
 }
 
 /**
  * Parse a Magpie request body (`chat`, `responses`, `anthropic`, or `gemini`)
- * into a normalized routing evidence envelope.
+ * into a normalized routing evidence envelope in a single bounded O(N) pass.
  */
 export function extractRequestFacts(body, ctx = {}) {
   if (!body || typeof body !== "object") {
@@ -220,68 +228,21 @@ export function extractRequestFacts(body, ctx = {}) {
   }
 
   const model = typeof body.model === "string" ? body.model : "";
-  let systemText = "";
-  if (typeof body.system === "string") {
-    systemText = body.system;
-  } else if (Array.isArray(body.system)) {
-    systemText = extractPartContent(body.system).text;
-  } else if (typeof body.instructions === "string") {
-    systemText = body.instructions;
-  } else if (body.systemInstruction?.parts) {
-    systemText = extractPartContent(body.systemInstruction.parts).text;
-  }
-
-  const rawMessages = Array.isArray(body.messages)
-    ? body.messages
-    : Array.isArray(body.input)
-      ? body.input
-      : Array.isArray(body.contents)
-        ? body.contents
-        : typeof body.input === "string"
-          ? [{ role: "user", content: body.input }]
-          : [];
-
-  let latestUserText = "";
-  let previousUserText = "";
-  let hasVisualInput = false;
-  let isToolFollowup = false;
-  let totalChars = systemText.length;
-
-  for (let i = 0; i < rawMessages.length; i++) {
-    const msg = rawMessages[i];
-    if (!msg || typeof msg !== "object") continue;
-    const role = String(msg.role || msg.type || "").toLowerCase();
-    const rawContent = msg.content ?? msg.parts ?? (typeof msg.text === "string" ? msg.text : "");
-    const { text, hasImage } = extractPartContent(rawContent);
-    totalChars += text.length;
-    if (hasImage) hasVisualInput = true;
-
-    if (i === rawMessages.length - 1) {
-      if (
-        role === "tool" ||
-        role === "function_call_output" ||
-        (Array.isArray(rawContent) &&
-          rawContent.some((p) => p && (p.type === "tool_result" || p.type === "function_call_output" || p.functionResponse)))
-      ) {
-        isToolFollowup = true;
-      }
-    }
-
-    if (role === "user" && text.trim()) {
-      previousUserText = latestUserText;
-      latestUserText = text.trim();
-    } else if (role === "developer" && !systemText && text.trim()) {
-      systemText = text.trim();
-    }
-  }
+  const sysSource =
+    body.system !== undefined
+      ? body.system
+      : body.instructions !== undefined
+        ? body.instructions
+        : body.systemInstruction?.parts;
+  const { preview: systemText, totalChars: sysChars } = extractSystemSummary(sysSource, 2000);
 
   const turnState = analyzeTurnState(body, ctx);
-  const effectiveObjective = turnState.lastUserText || latestUserText;
-  const effectivePrevUser = turnState.previousUserText || previousUserText;
-  const hasVisual = Boolean(hasVisualInput || turnState.hasAnyVisual);
-  const hasComputerUse = GUI_WORDS.some((w) =>
-    ` ${String(effectiveObjective || "").toLowerCase()} `.includes(w)
-  );
+  const effectiveObjective = turnState.lastUserText || "";
+  const effectivePrevUser = turnState.previousUserText || "";
+  const hasVisual = Boolean(turnState.hasAnyVisual);
+  const lowerObj = ` ${String(effectiveObjective || "").toLowerCase()} `;
+  const hasComputerUse = GUI_WORDS.some((w) => lowerObj.includes(w));
+  const totalChars = sysChars + (turnState.totalChars || 0);
   const hasExplicitEstimatedTokens =
     Number.isFinite(body?.estimated_input_tokens) ||
     Number.isFinite(ctx?.estimated_input_tokens);
@@ -301,13 +262,13 @@ export function extractRequestFacts(body, ctx = {}) {
     previousUser: effectivePrevUser,
     previousUserText: effectivePrevUser,
     previousAssistantText: turnState.previousAssistantText || "",
-    systemText: systemText.slice(0, 2000),
+    systemText,
     hasVisualInput: hasVisual,
     hasVisual,
     hasCurrentTurnVisual: Boolean(turnState.hasCurrentTurnVisual),
     hasComputerUse,
-    isToolFollowup: Boolean(isToolFollowup || turnState.within),
-    within: Boolean(turnState.within || isToolFollowup),
+    isToolFollowup: Boolean(turnState.isToolFollowup || turnState.within),
+    within: Boolean(turnState.within || turnState.isToolFollowup),
     turn: turnState.turn,
     isShortFollowup: Boolean(turnState.isShortFollowup),
     isCompacting: Boolean(turnState.isCompacting),
@@ -323,9 +284,19 @@ export function extractRequestFacts(body, ctx = {}) {
 }
 
 export function inferKindFromObjective(objective) {
-  const text = ` ${String(objective || "").toLowerCase()} `;
+  const capped = capProfileText(objective);
+  const text = ` ${capped.toLowerCase()} `;
   if (GUI_WORDS.some((w) => text.includes(w))) {
     return "computer_use";
+  }
+  if (
+    TRIVIAL_MECHANICAL_EDIT_RE.test(capped) &&
+    !COUPLED_SIGNALS.some((w) => text.includes(w)) &&
+    !FRONTIER_SIGNALS.some((w) => text.includes(w)) &&
+    !DIVERGENT_WORDS.some((w) => text.includes(w)) &&
+    !READONLY_REVIEW_PHRASES.some((w) => text.includes(w))
+  ) {
+    return "bounded_bulk_work";
   }
   const rules = [
     [
@@ -561,7 +532,7 @@ export function inferKindFromObjective(objective) {
 
 export function isReadonlyReviewTask(objective, profile = null) {
   if (profile && profile.needs_gui) return false;
-  const text = ` ${String(objective || "").toLowerCase()} ${String(profile?.reason || "").toLowerCase()} `;
+  const text = ` ${capProfileText(objective).toLowerCase()} ${String(profile?.reason || "").toLowerCase()} `;
   if (READONLY_REVIEW_PHRASES.some((p) => text.includes(p))) return true;
   return /\bread-only\b[^.]{0,40}\b(?:review|audit|investig|diagnos|inspect|check)\b/i.test(text);
 }
@@ -571,7 +542,7 @@ export function inferDivergence(objective, kind = null, style = null) {
   if (kind === "complex_build_plan" || kind === "direction_reasoning" || style === "advisory") {
     return 3;
   }
-  const text = ` ${String(objective || "").toLowerCase()} `;
+  const text = ` ${capProfileText(objective).toLowerCase()} `;
   if (DIVERGENT_WORDS.some((w) => text.includes(w))) {
     return 3;
   }
@@ -605,7 +576,7 @@ export function inferReasoningDepth(objective, kind, explicitDifficulty = null) 
   if (explicitDifficulty && DEPTH_BY_DIFFICULTY[explicitDifficulty]) {
     return DEPTH_BY_DIFFICULTY[explicitDifficulty];
   }
-  const text = ` ${String(objective || "").toLowerCase()} `;
+  const text = ` ${capProfileText(objective).toLowerCase()} `;
   if (FRONTIER_SIGNALS.some((w) => text.includes(w))) {
     return 4;
   }
@@ -669,7 +640,9 @@ export function validateProfile(raw) {
  * Ported directly from `allocator.py:infer_task_profile`.
  */
 export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
-  const objective = typeof task.objective === "string" ? task.objective : "";
+  const rawObjective = typeof task.objective === "string" ? task.objective : "";
+  const objective = capProfileText(rawObjective);
+  const lowerObj = ` ${objective.toLowerCase()} `;
   let kind = task.work_kind && routes[task.work_kind] ? task.work_kind : inferKindFromObjective(objective);
   const needs = task.needs && typeof task.needs === "object" ? task.needs : {};
   const implies = routes[kind]?.implies || {};
@@ -685,13 +658,13 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
   const gui =
     kind === "computer_use" ||
     Boolean(needs.gui) ||
-    (kind === "other_or_mixed" && GUI_WORDS.some((w) => ` ${objective.toLowerCase()} `.includes(w)));
+    (kind === "other_or_mixed" && GUI_WORDS.some((w) => lowerObj.includes(w)));
 
   if (depth >= 3) {
     context = Math.max(context, 2);
     if (style === "engineering" && code > 0) {
       code = Math.max(code, 2);
-      if (objective.toLowerCase().includes("concurrency") || objective.toLowerCase().includes("protocol") || objective.includes("并发")) {
+      if (lowerObj.includes("concurrency") || lowerObj.includes("protocol") || objective.includes("并发")) {
         code = 3;
       }
     }
@@ -700,7 +673,7 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     cost = 3;
   }
   const divergence = inferDivergence(objective, kind, style);
-  const evidence = `${objective} ${task.context || ""} ${task.cwd || ""}`;
+  const evidence = `${objective} ${capProfileText(task.context || "", 1000)} ${String(task.cwd || "").slice(0, 500)}`;
   const localHit = OBJECTIVE_LOCAL_RUNTIME_RE.test(evidence) || LOCAL_MACHINE_RE.test(evidence);
   const localOnly =
     needs.local_only !== undefined ? Boolean(needs.local_only) : Boolean(localHit || implies.local_only);

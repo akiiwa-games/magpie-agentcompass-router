@@ -368,8 +368,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     pluginOptions.scorer && typeof pluginOptions.scorer === "object" ? pluginOptions.scorer : {};
   const allowExternalScorer =
     pluginOptions.allowExternalScorer === true ||
-    scorerCfg.allowExternalScorer === true ||
-    typeof pluginOptions.fetch === "function";
+    scorerCfg.allowExternalScorer === true;
 
   const { profile, meta } = await scoreTaskLive(taskFacts, {
     allowExternalScorer,

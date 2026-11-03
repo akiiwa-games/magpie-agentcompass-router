@@ -241,6 +241,8 @@ export const CANONICAL_ROUTES = {
     role: "bounded leaf worker",
     preferred: [
       "gemini-3.8-flash-high",
+      "claude-haiku-5-5",
+      "gpt-6-luna",
       "grok-4.7",
       "gpt-6.1-sol",
       "claude-sonnet-5-5",
@@ -527,7 +529,7 @@ export const DEFAULT_MODELS = {
     visual: 0.48,
     usd_per_hour: 0.8,
     context_window: 200000,
-    efforts: ["high"],
+    efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.58,
       coding: 0.65,
@@ -549,7 +551,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 0.8,
     context_window: 272000,
     fast_capable: true,
-    efforts: ["high"],
+    efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.58,
       coding: 0.65,
@@ -1163,33 +1165,78 @@ export const DEFAULT_MODELS = {
 export const MODEL_ALIASES = {
   "claude-haiku-4-5@20251001": "claude-haiku-5-5",
   "claude-haiku-4-5": "claude-haiku-5-5",
+  "claude-3-5-haiku": "claude-haiku-5-5",
+  "claude-3-5-haiku-latest": "claude-haiku-5-5",
+  "claude-3-haiku": "claude-haiku-5-5",
   "claude-opus-5": "claude-opus-5-5",
   "claude-opus-5-5-low": "claude-opus-5-5",
   "claude-opus-5-5-medium": "claude-opus-5-5",
   "claude-opus-5-5-high": "claude-opus-5-5",
   "claude-opus-4-6": "claude-opus-5-5",
   "claude-opus-4-5": "claude-opus-5-5",
+  "claude-opus-4-1": "claude-opus-5-5",
+  "claude-opus-4": "claude-opus-5-5",
+  "claude-3-opus": "claude-opus-5-5",
   "claude-sonnet-5": "claude-sonnet-5-5",
   "claude-sonnet-5-5-low": "claude-sonnet-5-5",
   "claude-sonnet-5-5-medium": "claude-sonnet-5-5",
   "claude-sonnet-5-5-high": "claude-sonnet-5-5",
   "claude-sonnet-4-6": "claude-sonnet-5-5",
   "claude-sonnet-4-5": "claude-sonnet-5-5",
+  "claude-sonnet-4": "claude-sonnet-5-5",
+  "claude-3-7-sonnet": "claude-sonnet-5-5",
+  "claude-3-7-sonnet-latest": "claude-sonnet-5-5",
+  "claude-3-5-sonnet": "claude-sonnet-5-5",
+  "claude-3-5-sonnet-latest": "claude-sonnet-5-5",
   "claude-fable-5": "claude-fable-5-1",
   "gemini-3.8-flash": "gemini-3.8-flash-high",
+  "gemini-3-flash": "gemini-3.8-flash-high",
   "gemini-2.5-flash": "gemini-3.8-flash-high",
+  "gemini-2.5-flash-lite": "gemini-3.8-flash-high",
+  "gemini-2.0-flash": "gemini-3.8-flash-high",
+  "gemini-2.0-flash-lite": "gemini-3.8-flash-high",
   "gemini-4-argon": "gemini-4-argon-high",
   "gemini-4-pro": "gemini-4-argon-high",
+  "gemini-3-pro": "gemini-4-argon-high",
   "gemini-2.5-pro": "gemini-4-argon-high",
   "gemini-4-ultra": "gemini-4-argon-high",
   argon: "gemini-4-argon-high",
   "ChatGPT Pro via chatgpt-pro-consult": "gpt-6-pro",
+  "gpt-5.5": "gpt-6-astra",
+  "gpt-5.5-pro": "gpt-6-pro",
   "gpt-5.4": "gpt-6-astra",
+  "gpt-5.4-pro": "gpt-6-pro",
+  "gpt-5": "gpt-6-astra",
   "gpt-5.3-codex": "gpt-6.1-sol",
+  "gpt-5.2-codex": "gpt-6.1-sol",
+  "gpt-5.1-codex": "gpt-6.1-sol",
+  "gpt-5-codex": "gpt-6.1-sol",
+  "gpt-4.1": "gpt-6.1-sol",
+  "gpt-4o": "gpt-6.1-sol",
   "gpt-5.4-mini": "gpt-6-luna",
+  "gpt-5.4-nano": "gpt-6-luna",
+  "gpt-5.5-mini": "gpt-6-luna",
+  "gpt-5.5-nano": "gpt-6-luna",
+  "gpt-5-mini": "gpt-6-luna",
+  "gpt-5-nano": "gpt-6-luna",
+  "gpt-4.1-mini": "gpt-6-luna",
+  "gpt-4.1-nano": "gpt-6-luna",
+  "gpt-4o-mini": "gpt-6-luna",
   "gpt-5.6-sol-mini": "gpt-6-luna",
+  o3: "gpt-6-astra",
+  "o3-pro": "gpt-6-pro",
+  "o3-mini": "gpt-6.1-sol",
+  "o4-mini": "gpt-6.1-sol",
+  o1: "gpt-6-astra",
+  "o1-pro": "gpt-6-pro",
   "grok-4.7-latest": "grok-4.7",
   "grok-4": "grok-4.7",
+  "grok-3": "grok-4.7",
+  "grok-3-mini": "grok-4.7-build-fast",
+  "deepseek-r1": "deepseek-v4-pro",
+  "deepseek-reasoner": "deepseek-v4-pro",
+  "deepseek-v3": "deepseek-v4-pro",
+  "deepseek-chat": "deepseek-v4.1-flash-free",
   "opencode/deepseek-v4.1-flash-free": "deepseek-v4.1-flash-free",
   "deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
   "deepseek-v4.1-io": "deepseek-v4.1-flash-free",
@@ -1221,6 +1268,10 @@ export const EFFORT_CURVES = {
     ability: { low: -1.1, medium: -0.6, high: 0.0, xhigh: 0.5, max: 0.9 },
     burn: { low: 0.28, medium: 0.38, high: 0.7, xhigh: 1.6, max: 4.34 },
   },
+  "claude-haiku-5-5": {
+    ability: { low: -0.15, medium: 0.0, high: 0.1 },
+    burn: { low: 0.35, medium: 0.5, high: 0.7 },
+  },
   "gpt-6-astra": {
     ability: { low: -0.5, medium: -0.1, high: 0.0, xhigh: 0.1, max: 0.2 },
     burn: { low: 0.33, medium: 0.62, high: 0.7, xhigh: 0.93, max: 1.32 },
@@ -1228,6 +1279,10 @@ export const EFFORT_CURVES = {
   "gpt-6.1-sol": {
     ability: { low: -0.8, medium: -0.2, high: 0.0, xhigh: 0.1, max: 0.2 },
     burn: { low: 0.28, medium: 0.46, high: 0.7, xhigh: 0.85, max: 1.58 },
+  },
+  "gpt-6-luna": {
+    ability: { low: -0.15, medium: 0.0, high: 0.1 },
+    burn: { low: 0.35, medium: 0.5, high: 0.7 },
   },
   "grok-4.7": {
     ability: { low: -0.4, high: 0.0, xhigh: 0.0 },
@@ -1435,7 +1490,7 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
 export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
   const name = canonicalModel(rawModel, aliases);
   if (models[name]) return { canonical: name, spec: models[name] };
-  // Fuzzy family fallback for provider-specific model IDs
+  // Fuzzy family fallback for provider-specific or date-suffixed model IDs
   const lower = name.toLowerCase();
   if (lower.includes("opus")) return { canonical: "claude-opus-5-5", spec: models["claude-opus-5-5"] };
   if (lower.includes("fable")) return { canonical: "claude-fable-5-1", spec: models["claude-fable-5-1"] };
@@ -1444,29 +1499,50 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
   if (lower.includes("argon") || (lower.includes("gemini") && (lower.includes("pro") || lower.includes("ultra")))) {
     return { canonical: "gemini-4-argon-high", spec: models["gemini-4-argon-high"] };
   }
-  if (lower.includes("flash")) return { canonical: "gemini-3.8-flash-high", spec: models["gemini-3.8-flash-high"] };
-  if (lower.includes("astra") || lower.includes("gpt-5.4") || lower.includes("gpt-6-pro")) {
+  if (lower.includes("flash") || lower.includes("lite")) {
+    return { canonical: "gemini-3.8-flash-high", spec: models["gemini-3.8-flash-high"] };
+  }
+  if (lower.includes("luna") || lower.includes("mini") || lower.includes("nano")) {
+    return { canonical: "gpt-6-luna", spec: models["gpt-6-luna"] };
+  }
+  if (
+    lower.includes("astra") ||
+    lower.includes("gpt-5.5") ||
+    lower.includes("gpt-5.4") ||
+    lower.includes("gpt-6-pro") ||
+    /^o[13]\b/.test(lower)
+  ) {
     return { canonical: "gpt-6-astra", spec: models["gpt-6-astra"] };
   }
   if (lower.includes("terra")) return { canonical: "gpt-6.1-terra", spec: models["gpt-6.1-terra"] };
-  if (lower.includes("luna") || lower.includes("mini")) return { canonical: "gpt-6-luna", spec: models["gpt-6-luna"] };
-  if (lower.includes("sol") || lower.includes("codex")) return { canonical: "gpt-6.1-sol", spec: models["gpt-6.1-sol"] };
+  if (
+    lower.includes("sol") ||
+    lower.includes("codex") ||
+    lower.includes("gpt-4.1") ||
+    lower.includes("gpt-4o") ||
+    /^o4\b/.test(lower)
+  ) {
+    return { canonical: "gpt-6.1-sol", spec: models["gpt-6.1-sol"] };
+  }
   if (lower.includes("grok")) return { canonical: "grok-4.7", spec: models["grok-4.7"] };
+  if (lower.includes("deepseek") && (lower.includes("r1") || lower.includes("reasoner") || lower.includes("v3") || lower.includes("pro"))) {
+    return { canonical: "deepseek-v4-pro", spec: models["deepseek-v4-pro"] };
+  }
   if (lower.includes("deepseek")) return { canonical: "deepseek-v4.1-flash-free", spec: models["deepseek-v4.1-flash-free"] };
   return {
     canonical: name || "unknown",
     spec: {
-      tier: 3.4,
+      tier: 3.6,
       cost: 2,
       visual: 0.5,
       usd_per_hour: 3.0,
       context_window: 128000,
       efforts: ["low", "medium", "high"],
       capabilities: {
-        reasoning: 0.65,
-        coding: 0.65,
-        exploration: 0.65,
-        anti_hallucination: 0.65,
+        reasoning: 0.68,
+        coding: 0.68,
+        exploration: 0.68,
+        anti_hallucination: 0.68,
         visual: 0.5,
         gui: 0.4,
       },

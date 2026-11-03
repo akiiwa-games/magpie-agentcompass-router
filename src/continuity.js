@@ -187,14 +187,36 @@ const AGENT_PARAGRAPH_NOISE_PATTERNS = [
   /^\[System note:[\s\S]*\]$/i,
 ];
 
+const MAX_NOISE_STRIP_CHARS = 8000;
+const MAX_USER_TURN_CHARS = 4000;
+const MAX_FIRST_WORDS_HASH_CHARS = 1024;
+const PARAGRAPH_NOISE_FAST_RE = /AGENTS\.md|TodoWrite|Available agent types|\[System note:/i;
+
+function capTextSlice(text, maxChars = MAX_USER_TURN_CHARS) {
+  if (!text || typeof text !== "string") return "";
+  if (text.length <= maxChars) return text;
+  const head = Math.floor(maxChars * 0.625);
+  const tail = maxChars - head;
+  return `${text.slice(0, head)}\n${text.slice(-tail)}`;
+}
+
 /**
  * Strip agent-injected reminder tags and boilerplate blocks (`internal/gateway/classify.go` & `user_said_test.go`).
  */
 export function stripAgentNoise(rawText) {
   if (!rawText || typeof rawText !== "string") return "";
-  let cleaned = rawText;
-  for (const re of AGENT_TAG_NOISE_PATTERNS) {
-    cleaned = cleaned.replace(re, " ");
+  let cleaned =
+    rawText.length > MAX_NOISE_STRIP_CHARS
+      ? `${rawText.slice(0, 5000)}\n\n${rawText.slice(-3000)}`
+      : rawText;
+  const hadTags = cleaned.includes("<");
+  if (hadTags) {
+    for (const re of AGENT_TAG_NOISE_PATTERNS) {
+      cleaned = cleaned.replace(re, " ");
+    }
+  }
+  if (!hadTags && !PARAGRAPH_NOISE_FAST_RE.test(cleaned)) {
+    return cleaned.trim();
   }
   const blocks = cleaned
     .split(/\n\s*\n/)
@@ -216,6 +238,7 @@ export function userSaidFromText(rawText) {
  * (e.g. "继续", "好的", "按这个改", "continue", "ok go ahead", "lgtm", "do it").
  */
 export function isShortFollowupMessage(text) {
+  if (!text || typeof text !== "string" || text.length > MAX_NOISE_STRIP_CHARS) return false;
   const cleaned = stripAgentNoise(text).trim();
   if (!cleaned || cleaned.length > 96) return false;
   if (cleaned.includes("```") || cleaned.includes("\n\n")) return false;
@@ -242,12 +265,13 @@ export function isShortFollowupMessage(text) {
  */
 export function isCompactionText(text) {
   if (!text || typeof text !== "string") return false;
+  const sample = text.length > MAX_USER_TURN_CHARS ? capTextSlice(text, MAX_USER_TURN_CHARS) : text;
   return (
-    /(?:^|\s)\/compact(?:\s|$)/i.test(text) ||
-    /<compact_instruction\b/i.test(text) ||
-    /Provide a detailed summary of the conversation so far/i.test(text) ||
-    /Summarize the conversation so far/i.test(text) ||
-    /Your task is to create a detailed summary of the conversation/i.test(text)
+    /(?:^|\s)\/compact(?:\s|$)/i.test(sample) ||
+    /<compact_instruction\b/i.test(sample) ||
+    /Provide a detailed summary of the conversation so far/i.test(sample) ||
+    /Summarize the conversation so far/i.test(sample) ||
+    /Your task is to create a detailed summary of the conversation/i.test(sample)
   );
 }
 
@@ -263,6 +287,20 @@ function extractPartText(part) {
   return "";
 }
 
+function measurePartChars(part) {
+  if (!part) return 0;
+  if (typeof part === "string") return part.length;
+  if (typeof part.text === "string") return part.text.length;
+  if (typeof part.input_text === "string") return part.input_text.length;
+  if (typeof part.content === "string") return part.content.length;
+  if (Array.isArray(part.content)) {
+    let sum = 0;
+    for (const sub of part.content) sum += measurePartChars(sub);
+    return sum;
+  }
+  return 0;
+}
+
 function partHasVisual(part) {
   if (!part || typeof part !== "object") return false;
   const t = String(part.type || "").toLowerCase();
@@ -272,7 +310,9 @@ function partHasVisual(part) {
     t === "input_image" ||
     t === "video" ||
     t === "video_url" ||
-    t === "input_video"
+    t === "input_video" ||
+    part.fileData ||
+    part.file_data
   ) {
     return true;
   }
@@ -293,7 +333,7 @@ function partHasVisual(part) {
  * Parse a single protocol message/item (OpenAI Chat, Responses API, Anthropic, Gemini)
  * into a normalized step record for turn-loop and `firstWords` analysis.
  */
-function inspectMessageItem(item) {
+function inspectMessageItem(item, options = {}) {
   if (!item || typeof item !== "object") {
     return {
       role: "",
@@ -303,9 +343,12 @@ function inspectMessageItem(item) {
       isToolStep: false,
       isAssistantStep: false,
       hasVisual: false,
+      charCount: 0,
     };
   }
 
+  const needFullText = options.needFullText !== false;
+  const needAssistantText = Boolean(options.needAssistantText);
   const role = String(item.role || "").toLowerCase();
   const itemType = String(item.type || "").toLowerCase();
 
@@ -318,10 +361,19 @@ function inspectMessageItem(item) {
     role === "function"
   ) {
     let hasVisual = false;
+    let charCount = typeof item.content === "string" ? item.content.length : 0;
     if (Array.isArray(item.content)) {
-      hasVisual = item.content.some(partHasVisual);
+      for (const p of item.content) {
+        if (partHasVisual(p)) hasVisual = true;
+        charCount += measurePartChars(p);
+      }
     } else if (Array.isArray(item.output)) {
-      hasVisual = item.output.some(partHasVisual);
+      for (const p of item.output) {
+        if (partHasVisual(p)) hasVisual = true;
+        charCount += measurePartChars(p);
+      }
+    } else if (typeof item.output === "string") {
+      charCount += item.output.length;
     }
     return {
       role: "tool",
@@ -331,6 +383,7 @@ function inspectMessageItem(item) {
       isToolStep: true,
       isAssistantStep: false,
       hasVisual,
+      charCount,
     };
   }
 
@@ -340,32 +393,51 @@ function inspectMessageItem(item) {
     itemType === "tool_use" ||
     itemType === "reasoning"
   ) {
+    const summary = typeof item.summary === "string" ? item.summary : "";
     return {
       role: "assistant",
       rawUserText: "",
       userSaid: "",
-      assistantText: typeof item.summary === "string" ? item.summary : "",
+      assistantText: needAssistantText ? summary.slice(0, 1000) : "",
       isToolStep: true,
       isAssistantStep: true,
       hasVisual: false,
+      charCount: summary.length + (typeof item.arguments === "string" ? item.arguments.length : 0),
     };
   }
 
-  const content = item.content !== undefined ? item.content : item.parts;
-  let textParts = [];
+  const content =
+    item.content !== undefined
+      ? item.content
+      : item.parts !== undefined
+        ? item.parts
+        : typeof item.text === "string"
+          ? item.text
+          : "";
+  const collectStrings = role === "user" ? true : needAssistantText;
+  const maxCollectChars = role === "user" ? (needFullText ? MAX_NOISE_STRIP_CHARS : 600) : 1000;
+  let collected = "";
+  let charCount = 0;
   let sawToolResultBlock = false;
   let sawToolUseBlock = false;
   let sawNonToolUserBlock = false;
   let hasVisual = false;
 
   if (typeof content === "string") {
-    textParts.push(content);
+    charCount = content.length;
+    if (collectStrings) {
+      collected =
+        content.length > maxCollectChars ? capTextSlice(content, maxCollectChars) : content;
+    }
     if (role === "user") sawNonToolUserBlock = true;
   } else if (Array.isArray(content)) {
     for (const part of content) {
       if (!part) continue;
       if (typeof part === "string") {
-        textParts.push(part);
+        charCount += part.length;
+        if (collectStrings && collected.length < maxCollectChars) {
+          collected += (collected ? "\n" : "") + part.slice(0, maxCollectChars - collected.length);
+        }
         if (role === "user") sawNonToolUserBlock = true;
         continue;
       }
@@ -380,6 +452,7 @@ function inspectMessageItem(item) {
         part.functionResponse
       ) {
         sawToolResultBlock = true;
+        charCount += measurePartChars(part);
         continue;
       }
       if (
@@ -389,20 +462,32 @@ function inspectMessageItem(item) {
         part.functionCall
       ) {
         sawToolUseBlock = true;
+        charCount += measurePartChars(part);
         continue;
       }
       if (pType === "thinking" || pType === "redacted_thinking") {
+        charCount += typeof part.thinking === "string" ? part.thinking.length : 0;
         continue;
       }
-      const t = extractPartText(part);
-      if (t) {
-        textParts.push(t);
+      const partLen = measurePartChars(part);
+      charCount += partLen;
+      if (partLen > 0) {
         if (role === "user") sawNonToolUserBlock = true;
+        if (collectStrings && collected.length < maxCollectChars) {
+          const t = extractPartText(part);
+          if (t) {
+            const slice =
+              t.length > maxCollectChars - collected.length
+                ? capTextSlice(t, maxCollectChars - collected.length)
+                : t;
+            collected += (collected ? "\n" : "") + slice;
+          }
+        }
       }
     }
   }
 
-  const joinedText = textParts.join("\n").trim();
+  const joinedText = collected.trim();
 
   if (role === "assistant" || role === "model") {
     const hasToolCalls =
@@ -411,10 +496,11 @@ function inspectMessageItem(item) {
       role: "assistant",
       rawUserText: "",
       userSaid: "",
-      assistantText: joinedText,
+      assistantText: needAssistantText ? joinedText : "",
       isToolStep: hasToolCalls,
       isAssistantStep: true,
       hasVisual,
+      charCount,
     };
   }
 
@@ -423,12 +509,13 @@ function inspectMessageItem(item) {
     const isPureToolOrNoise = !said && sawToolResultBlock;
     return {
       role: isPureToolOrNoise ? "tool" : "user",
-      rawUserText: joinedText,
-      userSaid: said,
+      rawUserText: needFullText ? capTextSlice(joinedText, MAX_USER_TURN_CHARS) : "",
+      userSaid: needFullText ? capTextSlice(said, MAX_USER_TURN_CHARS) : said ? "1" : "",
       assistantText: "",
       isToolStep: sawToolResultBlock && !said,
       isAssistantStep: false,
       hasVisual,
+      charCount,
     };
   }
 
@@ -440,6 +527,7 @@ function inspectMessageItem(item) {
     isToolStep: false,
     isAssistantStep: false,
     hasVisual,
+    charCount,
   };
 }
 
@@ -459,14 +547,15 @@ function getNormalizedItems(body) {
 
 /**
  * Compute Magpie's `firstWords` fingerprint (`internal/gateway/rules.go:153`):
- * First 12 bytes (24 hex chars) of SHA-256 over the first genuine user message text.
+ * First 12 bytes (24 hex chars) of SHA-256 over the first genuine user message text
+ * (bounded to the first 1,024 chars so huge initial context blocks stay sub-millisecond).
  */
 export function firstWords(body) {
   const items = getNormalizedItems(body);
   for (const item of items) {
-    const info = inspectMessageItem(item);
+    const info = inspectMessageItem(item, { needFullText: true, needAssistantText: false });
     if (info.userSaid) {
-      return sha256Hex(info.userSaid).slice(0, 24);
+      return sha256Hex(info.userSaid.slice(0, MAX_FIRST_WORDS_HASH_CHARS)).slice(0, 24);
     }
   }
   return "";
@@ -488,7 +577,7 @@ function getHeaderCaseInsensitive(headers, name) {
  * Combines explicit session/conversation ID, `firstWords(body)`, and `x-claude-code-agent-id` so
  * subagents sharing a parent session never clobber the main session's sticky provider/model.
  */
-export function computeSessionKey(body = {}, ctx = {}) {
+export function computeSessionKey(body = {}, ctx = {}, precomputedFirstWords = undefined) {
   const headers = ctx?.headers || body?.headers || {};
   const metadata = body?.metadata || ctx?.metadata || {};
 
@@ -522,7 +611,7 @@ export function computeSessionKey(body = {}, ctx = {}) {
     body?.agent_id ||
     "";
 
-  const fw = firstWords(body);
+  const fw = precomputedFirstWords !== undefined ? precomputedFirstWords : firstWords(body);
   const prevRespId =
     typeof body?.previous_response_id === "string" ? body.previous_response_id.trim() : "";
 
@@ -551,19 +640,46 @@ export function computeSessionKey(body = {}, ctx = {}) {
  */
 export function analyzeTurnState(body = {}, ctx = {}) {
   const items = getNormalizedItems(body);
+  const len = items.length;
+
+  // Find the last index of a potential user turn so we only extract full text on the first user turn
+  // and the last 2 user turns (avoiding expensive string joins & regexes on 40+ middle turns).
+  let recentUserBoundary = Math.max(0, len - 6);
+  let userCandidatesSeenFromEnd = 0;
+  for (let i = len - 1; i >= 0; i--) {
+    const it = items[i];
+    if (it && typeof it === "object" && String(it.role || "").toLowerCase() === "user") {
+      userCandidatesSeenFromEnd += 1;
+      if (userCandidatesSeenFromEnd >= 3) {
+        recentUserBoundary = Math.min(recentUserBoundary, i);
+        break;
+      }
+    }
+  }
+
   let turn = 0;
   let sawStep = false;
   let within = false;
   let hasAnyVisual = false;
   let hasCurrentTurnVisual = false;
+  let totalChars = 0;
+  let isToolFollowup = false;
+  let firstUserSaid = "";
+  let lastUserText = "";
+  let previousUserText = "";
+  let previousAssistantText = "";
 
-  const userTurns = [];
-  const assistantReplies = [];
-
-  for (const item of items) {
-    const info = inspectMessageItem(item);
+  for (let i = 0; i < len; i++) {
+    const item = items[i];
+    const needFullText = !firstUserSaid || i >= recentUserBoundary;
+    const needAssistantText = i >= len - 3;
+    const info = inspectMessageItem(item, { needFullText, needAssistantText });
+    totalChars += info.charCount;
     if (info.hasVisual) {
       hasAnyVisual = true;
+    }
+    if (i === len - 1 && info.isToolStep) {
+      isToolFollowup = true;
     }
 
     if (info.isAssistantStep || info.isToolStep) {
@@ -573,17 +689,20 @@ export function analyzeTurnState(body = {}, ctx = {}) {
         hasCurrentTurnVisual = true;
       }
       if (info.assistantText) {
-        assistantReplies.push(info.assistantText);
+        previousAssistantText = info.assistantText;
       }
       continue;
     }
 
     if (info.userSaid) {
       turn += 1;
-      userTurns.push({
-        text: info.userSaid,
-        hasVisual: info.hasVisual,
-      });
+      if (!firstUserSaid) {
+        firstUserSaid = info.userSaid;
+      }
+      if (needFullText) {
+        previousUserText = lastUserText;
+        lastUserText = info.userSaid;
+      }
       hasCurrentTurnVisual = info.hasVisual;
       if (sawStep) {
         within = false;
@@ -595,21 +714,16 @@ export function analyzeTurnState(body = {}, ctx = {}) {
   if (
     typeof body?.previous_response_id === "string" &&
     body.previous_response_id.trim() &&
-    userTurns.length === 0 &&
-    items.length > 0
+    turn === 0 &&
+    len > 0
   ) {
     within = true;
-    if (turn === 0) turn = 1;
+    turn = 1;
   }
 
   if (ctx?.within === true) {
     within = true;
   }
-
-  const lastUserText = userTurns.length > 0 ? userTurns[userTurns.length - 1].text : "";
-  const previousUserText = userTurns.length > 1 ? userTurns[userTurns.length - 2].text : "";
-  const previousAssistantText =
-    assistantReplies.length > 0 ? assistantReplies[assistantReplies.length - 1] : "";
 
   const isShortFollowup =
     !within &&
@@ -618,10 +732,15 @@ export function analyzeTurnState(body = {}, ctx = {}) {
     isShortFollowupMessage(lastUserText);
 
   const isCompacting = isCompactionText(lastUserText);
+  const fw = firstUserSaid
+    ? sha256Hex(firstUserSaid.slice(0, MAX_FIRST_WORDS_HASH_CHARS)).slice(0, 24)
+    : "";
 
   return {
     turn,
     within,
+    isToolFollowup,
+    totalChars,
     lastUserText,
     previousUserText,
     previousAssistantText,
@@ -629,8 +748,8 @@ export function analyzeTurnState(body = {}, ctx = {}) {
     hasCurrentTurnVisual,
     isShortFollowup,
     isCompacting,
-    firstWords: firstWords(body),
-    sessionKey: computeSessionKey(body, ctx),
+    firstWords: fw,
+    sessionKey: computeSessionKey(body, ctx, fw),
   };
 }
 

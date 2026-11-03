@@ -233,8 +233,7 @@ function extractLastProfileJson(text) {
 /**
  * Score a task using the deterministic in-process `inferTaskProfile` twin by default.
  * External System-One HTTP scoring is strictly opt-in and only runs when the caller
- * explicitly sets `allowExternalScorer: true` (or injects a test `fetch`) AND provides
- * an explicit `scorerBaseUrl` / `jevBaseUrl`.
+ * explicitly sets `allowExternalScorer: true` AND provides an explicit `scorerBaseUrl` / `jevBaseUrl`.
  */
 export async function scoreTaskLive(task, options = {}) {
   const started = Date.now();
@@ -254,8 +253,7 @@ export async function scoreTaskLive(task, options = {}) {
     scorerType === "jev"
       ? String(options.jevBaseUrl || options.scorerBaseUrl || options.scorerUrl || "").trim()
       : String(options.scorerBaseUrl || options.scorerUrl || "").trim();
-  const hasInjectedFetch = typeof options.fetch === "function";
-  const externalAllowed = Boolean(options.allowExternalScorer === true || hasInjectedFetch);
+  const externalAllowed = options.allowExternalScorer === true;
 
   if (scorerType === "heuristic" || !task?.objective?.trim() || !externalAllowed || !rawBaseUrl) {
     const profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);

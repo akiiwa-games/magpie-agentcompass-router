@@ -62,15 +62,15 @@ flowchart TB
 
 我们通过分析 Magpie 的请求管线（`internal/gateway/middleware.go:serveAgent` 与 `internal/gateway/decide.go`），设计了**双模式长预算架构**，无需修改 Magpie 任何一行源码：
 
-#### 模式 A：网关级意图路由与自动 Effort 注入（`magpie.hooks` [Bun] + `magpie.middleware` [`moejs`]）
+#### 模式 A：网关级意图路由与自动 Effort 注入（`magpie.middleware` [`moejs`]）
 在 `internal/gateway/middleware.go:serveAgent` 中：
-1. **第一阶段（`src/hooks.js`，Bun 运行时，最长 `10,000 ms` 预算）**：
-   - 默认使用 `< 1 ms` 零网络调用的本地确定性 10 维画像器（`inferTaskProfile`），仅在用户显式配置 `allowExternalScorer: true` 及 `scorer.baseUrl` 时才发起外部评分请求。
-   - 遵循 Magpie 原生会话粘性契约（`evaluateProviderContinuation`），在轮内工具调用、KV 缓存温热或短追问时保持当前模型与单调思考档位（`keepsEffort`），默认不向请求体注入任何私有字段（通过 `ctx.state` 维护上下文）。
-2. **第二阶段（`src/middleware.js`，`moejs` 运行时，`< 0.2 ms` 完成）**：
+1. **单阶段同步路由（`src/middleware.js`，`moejs` 运行时，单遍 O(N) `< 0.5 ms` 完成）**：
    - 默认仅拦截 `agentcompass` 命名空间请求（`agentcompass`、`agentcompass/auto`、`agentcompass/intent`、`agentcompass/System-One-0.5`），绝不劫持 Magpie 原生 `auto`、`intent` 或 `group/*` 路由组请求。
-   - 在已配置 `candidateModels` / `availableModels` / `allowedModels`（或 `modelMap`）的网关可用模型池内选出最优 `<targetModel>:<targetEffort>`；若未配置可用模型列表且请求为具体模型名，则保持原模型不变、仅自动计算并注入最佳思考档位（`reasoning_effort` / `reasoning.effort` / `output_config.effort`）。
-   - `onAccount` 原生适配 Magpie `internal/middleware/account.go` 的 `{ref, provider, name, kind, model}` 上下文结构。
+   - 使用零网络调用的本地确定性 10 维画像器（`inferTaskProfile`）与会话粘性契约（`evaluateProviderContinuation`），在轮内工具调用、KV 缓存温热或短追问时保持当前模型与单调思考档位（`keepsEffort`），默认不向请求体注入任何私有字段（通过 `ctx.state` 维护上下文）。
+   - 在已配置 `candidateModels` / `availableModels` / `allowedModels`（或 `modelMap`）的网关可用模型池内选出最优 `<targetModel>:<targetEffort>`；当请求虚拟模型 `agentcompass` / `agentcompass/*` 且未显式配置候选列表时，默认在主流网关模型集合（`DEFAULT_GATEWAY_CANDIDATES`）中完成意图选型与重写；若请求为具体模型名且未配置候选列表，则保持原模型不变、仅自动计算并注入最佳思考档位（`reasoning_effort` / `reasoning.effort` / `output_config.effort`）。
+   - `onProvider` 原生适配 Magpie `internal/middleware/hooks.go` 的 `{id, name, account, model}` 上下文结构（支持 `options.modelsByProvider` 细粒度重选），`onAccount` 原生适配 `{ref, provider, name, kind, model}` 结构，`onResponse` 在共享请求池化实例中记录缓存水位与上游健康度。
+2. **可选异步扩展（`src/hooks.js`，Bun 运行时）**：
+   - 仅供显式配置 `allowExternalScorer: true` 及外部评分端点（`scorer.baseUrl`）的高级宿主按需挂载，默认不在 `package.json` 的 `"magpie"` 中注册，避免 Stage 1 + Stage 2 重复执行。
 
 #### 模式 B：原生 Routing Group 决策 Provider（`decide: true` / `/v1/systemone`，8,000 ms – 60,000 ms 预算）
 - `src/index.js` 同时注册了一个拥有 `decide: true` 能力的 Magpie Provider（`agentcompass`，显示名称 `AgentCompass`）及决策模型 `agentcompass-systemone`（`decides: true`）。
@@ -119,7 +119,7 @@ $$\text{pure\_intent\_score}(m, e) = \text{fit\_score}(m, e) - \text{overqual\_p
   - 当会话已建立有效前缀缓存（$\ge 1024$ tokens 或 `cached: true`）且未超过缓存冷化窗口（Anthropic/Gemini 默认 `5m`，ChatGPT/Codex Responses 与 DeepSeek 磁盘缓存 `1h`），或用户发送简短追问（`"继续"`、`"好的，按这个改"`、`"ok go ahead"`、`"lgtm"`），直接保持当前模型且 `keepsEffort` 保证思考档位单调不降级（如 `high/max` 不会掉回 `low`）。
 - **仅在 6 类信号触发时重新执行意图路由**：
   1. `why: "first"` — 新会话首轮请求；
-  2. `why: "provider_unhealthy"` — `onResponse` / `onUsage` 捕获上游报错或限流（`status >= 400` / `rejected: true`），自动剔除故障模型并故障转移；
+  2. `why: "provider_unhealthy"` — 同一池化 `moejs` 运行时实例内的 `onResponse` 捕获上游报错或限流（`status >= 400`），自动标记故障模型并在后续请求故障转移（注：`moejs` 会话与健康状态按池化运行时实例维护）；
   3. `why: "capability_outgrown"` — 新一轮引入图片/截图而当前模型不支持视觉，或轻量级模型（`tier < 3.5`）遭遇跨模块架构重构/深水区死锁排障；
   4. `why: "outgrown"` — 当前输入超出模型 `context_window` 的 **95%**（如 200k 窗口达到 >190k），自动升级至 400k / 1M 大窗口模型；
   5. `why: "worn"` — 遵循 AgentCompass 2M 累计未压缩上下文防失忆规则（`compactedTokens + tokens >= 2,000,000`）；
@@ -199,7 +199,7 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\agentcompass" -Targ
 > **提示**：
 > - 插件默认 100% 使用 `< 1 ms` 零网络请求的本地确定性 10 维启发式画像器（`kind: "heuristic"`），绝不会将用户 Prompt 发送到任何外部地址。
 > - 如需启用外部 System-One 评分接口，必须同时显式配置 `"allowExternalScorer": true` 与 `"scorer": { "kind": "openai_compatible", "baseUrl": "..." }`。
-> - 若未配置 `availableModels` / `candidateModels` / `allowedModels`，插件不会把请求改写为网关中不存在的内置目录模型名：对于具体模型请求仅自动计算并注入思考档位（Effort），对于 `agentcompass/*` 虚拟模型则使用 `defaultModel` / `fallbackModel` 或在 `onProvider` 中按当前 Provider 可用模型选型。
+> - 若未配置 `availableModels` / `candidateModels` / `allowedModels`，对于 `agentcompass` / `agentcompass/*` 虚拟模型请求，插件会在 `onRequest` 中使用 `defaultModel` / `fallbackModel` 或默认主流模型池（`DEFAULT_GATEWAY_CANDIDATES`）完成模型与思考档位改写（若在 `onProvider` 中配置了 `modelsByProvider` 或 `ctx.provider.model`，也可按 Provider 进一步映射）；对于具体模型请求则保持原模型名不变，仅自动计算并注入思考档位（Effort）。
 > - `onAccount(account, ctx)` 原生匹配 Magpie `internal/middleware/account.go` 传入的 `{ref, provider, name, kind, model}` 字段（可通过 `accountsByWorkKind` 按 `ref`、`name`、`provider` 或 `${provider}/${name}` 过滤账号）。
 
 ---
@@ -255,14 +255,14 @@ node --test test/router.test.mjs
 
 ## 📂 仓库目录结构
 
-- [`package.json`](./package.json) — Magpie 插件清单（同时挂载 `main`、`magpie.hooks`、`magpie.middleware`、`./continuity`）
-- [`src/catalog.js`](./src/catalog.js) — 16 类 `work_kind`、13 个核心模型 7D 能力向量 + 3D 主观禀赋（Model DNA）+ `context_window`、Effort 投入曲线与默认策略
+- [`package.json`](./package.json) — Magpie 插件清单（挂载 `main`、`magpie.middleware`、`./continuity` 等导出）
+- [`src/catalog.js`](./src/catalog.js) — 16 类 `work_kind`、核心模型与主流真实模型 ID（Anthropic / OpenAI / Gemini / DeepSeek / xAI）7D 能力向量 + 3D 主观禀赋（Model DNA）+ `context_window`、Effort 投入曲线与默认策略
 - [`src/continuity.js`](./src/continuity.js) — **会话粘性、轮内工具循环锁定（`within`）、KV 缓存温度保持（`cacheCold` / `chatGPTCold` / `deepseekCold`）、单调思考棘轮（`keepsEffort`）与能力/窗口/2M 越界判定引擎**（纯 ES2022，兼容 Bun 与 `moejs`）
-- [`src/profiler-core.js`](./src/profiler-core.js) — 四大协议（Anthropic / OpenAI Responses / Chat / Gemini）请求抽取器 + 确定性 10 维任务画像器
+- [`src/profiler-core.js`](./src/profiler-core.js) — 四大协议（Anthropic / OpenAI Responses / Chat / Gemini）单趟有界请求抽取器 + 确定性 10 维任务画像器
 - [`src/allocator.js`](./src/allocator.js) — AgentCompass 纯意图与能力矩阵选型核心算法实现（含 `continuity` 连续性权重与不健康模型剔除）
-- [`src/scorer-live.js`](./src/scorer-live.js) — 异步 System-One 10 维画像器（支持 Jev `/v1/systemone`、OpenAI 兼容接口、LRU 缓存与超时无损降级）
-- [`src/hooks.js`](./src/hooks.js) — **阶段一（Bun `magpie.hooks`，最长 10s 预算）**：先执行 `evaluateProviderContinuation`，仅在需要选模/换模时调用异步 10D 画像与选型，注入 `body.__agentcompass_route`
-- [`src/middleware.js`](./src/middleware.js) — **阶段二（`moejs` `magpie.middleware`，250ms 预算）**：消费路由结果并改写 `body.model = "<model>:<effort>"`，实现 `onResponse` / `onUsage` 故障与缓存水位追踪，并导出 `agentcompass` / `agentcompass-pure` 账号池策略
+- [`src/scorer-live.js`](./src/scorer-live.js) — 异步 System-One 10 维画像器（支持显式开启 `allowExternalScorer: true` 时的 Jev `/v1/systemone`、OpenAI 兼容接口、LRU 缓存与超时无损降级）
+- [`src/hooks.js`](./src/hooks.js) — **可选异步 Bun Hook（`./hooks`）**：供编程式接入或显式 `useRouteCarrier: true` + `allowExternalScorer: true` 场景使用
+- [`src/middleware.js`](./src/middleware.js) — **默认网关中间件（`moejs` `magpie.middleware`，250ms 预算）**：执行会话续用判定与 10D 意图选型并改写 `body.model = "<model>:<effort>"`，通过同实例 `onResponse` 追踪故障与缓存水位，并导出 `agentcompass` / `agentcompass-pure` 账号池策略
 - [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled`、`jevBody` 与 `previous_message_kind` / `previous_message_reasoning` 短追问续用）
 - [`docs/RESEARCH_AND_SCHEME.md`](./docs/RESEARCH_AND_SCHEME.md) — **深度调研与架构设计报告**（含 Magpie 源码逐文件行号级分析、完整方案推导与 Linux 沙盒实测报告）
 - [`docs/magpie-community-registry-entry.json`](./docs/magpie-community-registry-entry.json) — **`magpie-community/plugins` 标准 `registry.json` 市场条目**

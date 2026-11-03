@@ -99,8 +99,6 @@ export function resolveCandidateModels(body, ctx = {}, options = {}) {
     extractModelList(options.models) ||
     extractModelList(ctx?.models) ||
     extractModelList(ctx?.availableModels) ||
-    extractModelList(body?.available_models) ||
-    extractModelList(ctx?.provider?.models) ||
     extractModelList(options.modelMap);
 
   if (explicit) {
@@ -129,7 +127,7 @@ export function resolveCandidateModels(body, ctx = {}, options = {}) {
     };
   }
 
-  return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: false };
+  return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: true };
 }
 
 /**
@@ -273,8 +271,7 @@ export async function onRequest(body, ctx = {}) {
     options.prefer_local_heuristic === true || scorerCfg.prefer_local_heuristic === true;
   const allowExternalScorer =
     options.allowExternalScorer === true ||
-    scorerCfg.allowExternalScorer === true ||
-    typeof options.fetch === "function";
+    scorerCfg.allowExternalScorer === true;
 
   const { profile, meta } = await scoreTaskLive(facts, {
     allowExternalScorer,

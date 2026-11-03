@@ -467,10 +467,24 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const sunkWeight = Number(quotaEval?.reset_sunk_weight ?? 0.0);
   const sprintSunk = taskCtx.difficulty === "routine" ? 0.0 : sunkWeight;
   const effortScale = burnScale(policy, curves, effort);
+  const routineEffortOverhead =
+    taskCtx.difficulty === "routine" &&
+    taskCtx.minimum_sufficient &&
+    ability >= target &&
+    vfit >= 0.999 &&
+    Array.isArray(info?.efforts) &&
+    info.efforts.includes("low")
+      ? effort === "high"
+        ? 0.004
+        : effort === "medium"
+          ? 0.002
+          : 0.0
+      : 0.0;
   const effortPenalty = round4(
     (policy.extra_effort_penalty ?? 0.025) *
       Math.max(0.0, effortScale - 1.0) *
-      (1.0 - sprintSunk)
+      (1.0 - sprintSunk) +
+      routineEffortOverhead
   );
   const effortGain = Math.max(0.0, ability - highAbility);
   const saturationSpan = Number(policy.profile?.saturation_span ?? 0.3);

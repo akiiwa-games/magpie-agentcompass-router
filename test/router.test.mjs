@@ -41,11 +41,11 @@ import {
   orderSeatsByQuotaEconomics,
 } from "../src/index.js";
 import {
+  DEFAULT_GATEWAY_CANDIDATES,
   onAccount as mwOnAccount,
   onProvider as mwOnProvider,
   onRequest as mwOnRequest,
   onResponse as mwOnResponse,
-  onUsage as mwOnUsage,
   strategies,
 } from "../src/middleware.js";
 import { extractRequestFacts, inferTaskProfile, profileTask } from "../src/profiler-core.js";
@@ -393,7 +393,7 @@ test("6. Magpie Plugin Market & Registry Contract (`package.json`, `icon`, `opti
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
   assert.ok(["agentcompass", "@magpie-community/gateway-agentcompass"].includes(pkg.name));
   assert.equal(pkg.magpie.name, "AgentCompass");
-  assert.equal(pkg.magpie.hooks, "./src/hooks.js");
+  assert.equal(pkg.magpie.hooks, undefined, "magpie.hooks must not be declared alongside magpie.middleware");
   assert.equal(pkg.magpie.middleware, "./src/middleware.js");
   assert.ok(pkg.magpie.icon.startsWith("data:image/svg+xml;base64,"));
   assert.equal(pkg.magpie.icon, AGENTCOMPASS_ICON_DATA_URI);
@@ -1058,16 +1058,25 @@ test("7.6 Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onR
       "Unhealthy model must be excluded on failover"
     );
 
-    // Also verify `mwOnUsage` marking a model unhealthy on `{ rejected: true, status: 503 }`
+    // Also verify `mwOnResponse` marking a model unhealthy on `{ status: 503 }` in the shared pooled request VM
     const fallbackModel = ctx2.state.route.canonicalModel;
-    mwOnUsage(
+    mwOnResponse(
       {
-        session_id: ctx2.state.route.continuation.sessionKey,
-        model: fallbackModel,
-        rejected: true,
-        status: 503,
+        error: { message: "Service unavailable", status: 503 },
       },
-      { continuityStore: store, now: t0 + 3000 }
+      {
+        protocol: "chat",
+        status: 503,
+        model: fallbackModel,
+        state: {
+          agentcompass: {
+            sessionKey: ctx2.state.route.continuation.sessionKey,
+            targetModel: fallbackModel,
+            targetEffort: ctx2.state.route.targetEffort,
+          },
+        },
+        options: { continuityStore: store, now: t0 + 3000 },
+      }
     );
     assert.equal(store.isModelHealthy(fallbackModel, t0 + 3500), false);
   });
@@ -1252,7 +1261,7 @@ test("8.3 Pre-reset surplus sprint (`reset_bonus` & `sprint_sunk`): harvests exp
     );
   });
 
-test("8.4 Sticky session failover on quota exhaustion (`why: quota_exhausted`) & automatic `quotas.json` file discovery", async () => {
+test("8.4 Sticky session failover on quota exhaustion (`why: quota_exhausted`) & explicit `magpieConfigDir` quota loading", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
 
@@ -1527,8 +1536,9 @@ test("9.2 PR #670 Review Guard: `availableModels` / `candidateModels` / `ctx.mod
     `Concrete model must not be rewritten to an unverified catalog model (got ${routedConcrete.model})`
   );
 
-  // 3. When `model: "agentcompass/auto"` is sent WITHOUT `candidateModels` in `onRequest`, `onRequest` does not rewrite to an unverified model,
-  // and `onProvider` selects from `ctx.provider.models` when the provider's model catalog is supplied!
+  // 3. When `model: "agentcompass/auto"` is sent WITHOUT `candidateModels` in `onRequest`, `onRequest` rewrites it using
+  // `DEFAULT_GATEWAY_CANDIDATES` so virtual model IDs never leak upstream; and `onProvider` refines within `options.modelsByProvider`
+  // using Magpie's real `{id, name, account, model}` `ctx.provider` shape!
   const reqVirtual = {
     model: "agentcompass/auto",
     messages: [
@@ -1544,21 +1554,32 @@ test("9.2 PR #670 Review Guard: `availableModels` / `candidateModels` / `ctx.mod
     state: sharedState,
     options: { injectProtocolEffort: true },
   });
-  assert.equal(reqVirtual.model, "agentcompass/auto", "Without candidateModels, onRequest must not rewrite to an unverified catalog model");
+  assert.ok(afterReq, "Virtual model must be rewritten in onRequest even without candidateModels");
+  assert.notEqual(afterReq.model, "agentcompass/auto", "Virtual model must never leak upstream");
+  assert.ok(
+    DEFAULT_GATEWAY_CANDIDATES.some((m) => afterReq.model.startsWith(m)),
+    `Expected model from DEFAULT_GATEWAY_CANDIDATES, got ${afterReq.model}`
+  );
   assert.ok(sharedState.agentcompass?.profile, "Task profile must be saved in ctx.state for onProvider/onAccount");
 
-  const afterProv = mwOnProvider(afterReq || reqVirtual, {
+  const afterProv = mwOnProvider(afterReq, {
     protocol: "chat",
     state: sharedState,
     provider: {
       id: "anthropic",
       name: "Anthropic",
-      models: ["claude-haiku-5-5", "claude-sonnet-5-5"],
+      account: "work",
+      model: afterReq.model,
     },
-    options: { injectProtocolEffort: true },
+    options: {
+      injectProtocolEffort: true,
+      modelsByProvider: {
+        anthropic: ["claude-haiku-4-5", "claude-sonnet-4-6"],
+      },
+    },
   });
   assert.ok(afterProv);
-  assert.match(afterProv.model, /^claude-sonnet-5-5:(medium|high|xhigh)$/);
+  assert.match(afterProv.model, /^claude-sonnet-4-6:(medium|high|xhigh)$/);
 });
 
 test("9.3 PR #670 Review Guard: `__agentcompass_route` carrier is never injected by default and unconditionally stripped in `middleware`", async () => {
@@ -1671,6 +1692,223 @@ test("9.5 PR #670 Review Guard: Zero implicit external scorer calls and zero par
     globalThis.fetch = origFetch;
   }
 });
+
+test("9.6 PR #670 Round 2 Guard: Client body injection (`__agentcompass_route`, `available_models`, `candidate_models`) is rejected", async () => {
+  // 1. Exact reproduction from @yetone: `{"model":"claude-sonnet-4-6","__agentcompass_route":{"targetModel":"evil","modelWithEffort":"evil:max"}}`
+  // with default options MUST delete `__agentcompass_route` and NEVER rewrite `model` to `"evil:high"`!
+  const nonClaimedBody = {
+    model: "claude-sonnet-4-6",
+    messages: [{ role: "user", content: "hello" }],
+    [ROUTE_CARRIER_KEY]: { targetModel: "evil", modelWithEffort: "evil:max" },
+  };
+  const nonClaimedRes = mwOnRequest(nonClaimedBody, { protocol: "chat", state: {}, options: {} });
+  assert.equal(nonClaimedRes, undefined);
+  assert.equal(nonClaimedBody.model, "claude-sonnet-4-6");
+  assert.equal(ROUTE_CARRIER_KEY in nonClaimedBody, false);
+
+  // 2. Even on a claimed model (`"agentcompass"`), when `useRouteCarrier` is off (default),
+  // client-supplied `__agentcompass_route` MUST be ignored and deleted!
+  const claimedSpoofBody = {
+    model: "agentcompass",
+    messages: [{ role: "user", content: "rename the variable foo to bar in utils.go" }],
+    [ROUTE_CARRIER_KEY]: { targetModel: "evil", modelWithEffort: "evil:max" },
+  };
+  const claimedSpoofRes = mwOnRequest(claimedSpoofBody, {
+    protocol: "chat",
+    state: {},
+    options: { candidateModels: ["claude-opus-4-6", "claude-haiku-4-5", "gpt-5.5"] },
+  });
+  assert.ok(claimedSpoofRes);
+  assert.equal(ROUTE_CARRIER_KEY in claimedSpoofRes, false);
+  assert.equal(claimedSpoofRes.model, "claude-haiku-4-5:low");
+
+  // 3. Client-supplied `body.available_models` and `body.candidate_models` MUST NOT influence candidate model selection
+  const bodySpoofCandidates = {
+    model: "claude-sonnet-4-6",
+    available_models: ["evil-model-1", "evil-model-2"],
+    candidate_models: ["evil-model-1", "evil-model-2"],
+    messages: [{ role: "user", content: "rename the variable foo to bar in utils.go" }],
+  };
+  const spoofHookCtx = { protocol: "chat", state: {}, options: { routeAllModels: true } };
+  await hookOnRequest(bodySpoofCandidates, spoofHookCtx);
+  assert.equal(spoofHookCtx.state.route.targetModel, "claude-sonnet-4-6");
+
+  const spoofMwRes = mwOnRequest(structuredClone(bodySpoofCandidates), {
+    protocol: "chat",
+    state: {},
+    options: { routeAllModels: true },
+  });
+  assert.ok(spoofMwRes);
+  assert.match(spoofMwRes.model, /^claude-sonnet-4-6:/);
+});
+
+test("9.7 PR #670 Round 2 Guard: Mainstream real model IDs & trivial single-variable rename routing across all candidate orders", () => {
+  // 1. Built-in catalog (`allowUnconstrainedCatalog: true`) routes "rename the variable foo to bar in utils.go" to `gemini-3.8-flash-high:high`
+  const builtInBody = {
+    model: "agentcompass",
+    messages: [{ role: "user", content: "rename the variable foo to bar in utils.go" }],
+  };
+  const builtInRes = mwOnRequest(builtInBody, {
+    protocol: "chat",
+    state: {},
+    options: { allowUnconstrainedCatalog: true },
+  });
+  assert.ok(builtInRes);
+  assert.equal(builtInRes.model, "gemini-3.8-flash-high:high");
+
+  // 2. Across all 6 permutations of `["claude-opus-4-6", "claude-haiku-4-5", "gpt-5.5"]`:
+  //    - Trivial single-variable rename routes to `"claude-haiku-4-5:low"`
+  //    - Complex multi-module concurrency/deadlock architecture audit routes to `"claude-opus-4-6:high"` or `"claude-opus-4-6:xhigh"`
+  const permutations = [
+    ["claude-opus-4-6", "claude-haiku-4-5", "gpt-5.5"],
+    ["claude-opus-4-6", "gpt-5.5", "claude-haiku-4-5"],
+    ["claude-haiku-4-5", "claude-opus-4-6", "gpt-5.5"],
+    ["claude-haiku-4-5", "gpt-5.5", "claude-opus-4-6"],
+    ["gpt-5.5", "claude-opus-4-6", "claude-haiku-4-5"],
+    ["gpt-5.5", "claude-haiku-4-5", "claude-opus-4-6"],
+  ];
+
+  for (const candidateModels of permutations) {
+    const renameReq = {
+      model: "agentcompass",
+      messages: [{ role: "user", content: "rename the variable foo to bar in utils.go" }],
+    };
+    const renameOut = mwOnRequest(renameReq, {
+      protocol: "chat",
+      state: {},
+      options: { candidateModels, continuityStore: new SessionContinuityStore() },
+    });
+    assert.equal(
+      renameOut.model,
+      "claude-haiku-4-5:low",
+      `Expected claude-haiku-4-5:low for permutation [${candidateModels.join(", ")}], got ${renameOut.model}`
+    );
+
+    const auditReq = {
+      model: "agentcompass",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Conduct a deep cross-module root-cause audit of the intermittent deadlock and lock-ordering race condition across internal/gateway/affinity.go and internal/gateway/decide.go.",
+        },
+      ],
+    };
+    const auditOut = mwOnRequest(auditReq, {
+      protocol: "chat",
+      state: {},
+      options: { candidateModels, continuityStore: new SessionContinuityStore() },
+    });
+    assert.match(
+      auditOut.model,
+      /^claude-opus-4-6:(high|xhigh|max)$/,
+      `Expected claude-opus-4-6:(high|xhigh|max) for permutation [${candidateModels.join(", ")}], got ${auditOut.model}`
+    );
+  }
+});
+
+test("9.8 PR #670 Round 2 Guard: `options.fetch` alone never enables external scorer unless `allowExternalScorer === true`", async () => {
+  clearProfileCache();
+  let fetchCalled = false;
+  const customFetch = async () => {
+    fetchCalled = true;
+    throw new Error("options.fetch must not be called when allowExternalScorer is not true");
+  };
+
+  const scoreRes = await scoreTaskLive(
+    { objective: "Refactor the authentication service." },
+    {
+      scorerType: "openai_compatible",
+      scorerBaseUrl: "http://127.0.0.1:4096",
+      fetch: customFetch,
+      useCache: false,
+    }
+  );
+  assert.equal(fetchCalled, false);
+  assert.equal(scoreRes.meta.source, "heuristic_twin");
+
+  const hookReq = {
+    model: "agentcompass",
+    messages: [{ role: "user", content: "Refactor the authentication service." }],
+  };
+  await hookOnRequest(hookReq, {
+    protocol: "chat",
+    state: {},
+    options: {
+      scorerType: "openai_compatible",
+      scorerBaseUrl: "http://127.0.0.1:4096",
+      fetch: customFetch,
+      candidateModels: ["claude-sonnet-4-6"],
+    },
+  });
+  assert.equal(fetchCalled, false);
+});
+
+test("9.9 PR #670 Round 2 Guard: Single-pass bounded O(N) performance on ~100KB Claude Code request body (< 20ms)", () => {
+  const messages = [];
+  const toolOutputChunk = "x".repeat(2200) + "\n<system-reminder>hook context reminder</system-reminder>\n";
+  for (let i = 0; i < 20; i++) {
+    messages.push({
+      role: "user",
+      content: [
+        {
+          type: "text",
+          text:
+            i === 0
+              ? "<system-reminder>Session initialized</system-reminder>\nImplement the distributed rate limiter middleware."
+              : `Tool output batch ${i}:\n${toolOutputChunk}`,
+        },
+      ],
+    });
+    messages.push({
+      role: "assistant",
+      content: [
+        {
+          type: "text",
+          text: `Completed step ${i}. Reading next file section:\n` + "y".repeat(2200),
+        },
+      ],
+    });
+  }
+  messages.push({
+    role: "user",
+    content: "Now audit the cross-module lock ordering invariants and fix the race condition in internal/gateway/affinity.go.",
+  });
+
+  const rawSize = JSON.stringify(messages).length;
+  assert.ok(rawSize >= 85_000, `Expected synthetic Claude Code payload >= 85KB, got ${rawSize} bytes`);
+
+  const req = {
+    model: "agentcompass",
+    system: "You are Claude Code, Anthropic's official CLI for Claude.\n" + "s".repeat(8000),
+    messages,
+  };
+
+  // Warm up JIT once, then measure
+  mwOnRequest(structuredClone(req), {
+    protocol: "messages",
+    headers: { "x-session-id": "perf-bench-warmup" },
+    state: {},
+    options: { candidateModels: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"] },
+  });
+
+  const tStart = performance.now();
+  const out = mwOnRequest(req, {
+    protocol: "messages",
+    headers: { "x-session-id": "perf-bench-run" },
+    state: {},
+    options: { candidateModels: ["claude-opus-4-6", "claude-sonnet-4-6", "claude-haiku-4-5"] },
+  });
+  const elapsedMs = performance.now() - tStart;
+
+  assert.ok(out);
+  assert.match(out.model, /^claude-opus-4-6:(high|xhigh|max)$/);
+  assert.ok(
+    elapsedMs < 20,
+    `Expected single-pass mwOnRequest on ${(rawSize / 1024).toFixed(1)}KB body to finish in < 20ms, took ${elapsedMs.toFixed(2)}ms`
+  );
+});
+
 
 
 
