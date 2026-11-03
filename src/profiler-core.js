@@ -107,9 +107,9 @@ const LOCAL_MACHINE_RE =
 const MULTI_TASK_MARK_RE =
   /(?:^|\n)\s*(?:#{1,4}\s*)?(?:task|deliverable|part|module|workstream|任务|交付物|模块|工作线)\s*(?:[1-9a-d]|[一二三四五六])\s*[.:：\-—]/gi;
 
-const MAX_PROFILE_CHARS = 4000;
+export const MAX_PROFILE_CHARS = 4000;
 
-function capProfileText(text, maxChars = MAX_PROFILE_CHARS) {
+export function capProfileText(text, maxChars = MAX_PROFILE_CHARS) {
   if (!text || typeof text !== "string") return "";
   if (text.length <= maxChars) return text;
   const head = Math.floor(maxChars * 0.625);
@@ -218,6 +218,8 @@ export function extractRequestFacts(body, ctx = {}) {
       isShortFollowup: false,
       isCompacting: false,
       toolCount: 0,
+      scannedChars: 0,
+      extractedTurns: 0,
       estimatedTokens: 0,
       estimatedInputTokens: 0,
       firstWords: "",
@@ -273,6 +275,8 @@ export function extractRequestFacts(body, ctx = {}) {
     isShortFollowup: Boolean(turnState.isShortFollowup),
     isCompacting: Boolean(turnState.isCompacting),
     toolCount: tools.length,
+    scannedChars: turnState.scannedChars || 0,
+    extractedTurns: turnState.extractedTurns || 0,
     estimatedTokens,
     estimatedInputTokens: estimatedTokens,
     hasExplicitEstimatedTokens,

@@ -1,25 +1,21 @@
 /**
- * Stage 2 of the Two-Stage Tandem Architecture: Sync JS Gateway Middleware (`magpie.middleware`)
+ * Sync JS Gateway Middleware (`magpie.middleware`)
  *
  * Runs inside Magpie's in-process `moejs` VM (`internal/middleware/run.go`, 250 ms budget)
- * immediately after `magpie.hooks` (`src/hooks.js`) and right before `s.serve` resolves the
- * target model and effort (`internal/gateway/middleware.go:42-78`).
+ * right before `s.serve` resolves the target model and effort (`internal/gateway/middleware.go:42-78`).
  *
  * Capabilities in `src/middleware.js`:
- * 1. Consumes and deletes the transient `body.__agentcompass_route` carrier populated by
- *    Stage 1 (`src/hooks.js` in Bun with up to 10,000 ms budget), syncing continuation state
- *    into the `moejs` continuity store.
- * 2. If `magpie.hooks` was not enabled or timed out, runs `evaluateProviderContinuation` first
- *    (holding the current Provider/Model on `within: true` tool loops, warm KV cache, or short
- *    follow-up nudges), and only executes `inferTaskProfile` + `selectBestRoute` when selecting
- *    or switching a Provider/Model is needed!
- * 3. Rewrites `body.model` (using either `<model>:<effort>` which `gateway.go:askedAt` natively
- *    splits, or bare `<model>` plus protocol-specific reasoning effort fields).
- * 4. Implements `onResponse(body, ctx)` and `onUsage(row, options)` (`internal/middleware/run.go:349`)
- *    to update token/cache watermarks and mark a Provider/Model unhealthy (`healthy: false`)
- *    when a request fails or is rejected (`status >= 400`, `rejected: true`).
- * 5. Implements `onAccount(account, ctx)` to optionally filter accounts, and exports a
- *    `strategies["agentcompass-pure"]` seat-ordering strategy.
+ * 1. Evaluates `evaluateProviderContinuation` first (holding the current Provider/Model on
+ *    `within: true` tool loops, warm KV cache, or short follow-up nudges), and only executes
+ *    `inferTaskProfile` + `selectBestRoute` when selecting or switching a Provider/Model is needed.
+ * 2. Rewrites `body.model` (using either `<model>:<effort>` which `gateway.go:askedAt` natively
+ *    splits, or bare `<model>` plus protocol-specific reasoning effort fields) within the
+ *    configured `candidateModels` / `availableModels` / `allowedModels` (or `defaultModel`),
+ *    rejecting unconfigured virtual model calls with HTTP 400 (`ctx.reject`).
+ * 3. Implements `onResponse(body, ctx)` to update token/cache watermarks and mark a Provider/Model
+ *    unhealthy (`healthy: false`) within the pooled runtime instance when a request fails (`status >= 400`).
+ * 4. Implements `onProvider(body, ctx)` and `onAccount(account, ctx)` to refine per-provider models
+ *    and filter accounts, and exports `strategies["agentcompass"]` / `strategies["agentcompass-pure"]`.
  */
 
 import { selectBestRoute } from "./allocator.js";
@@ -40,16 +36,6 @@ const DEFAULT_VIRTUAL_MODELS = [
   "agentcompass/auto",
   "agentcompass/intent",
   "agentcompass/system-one-0.5",
-];
-
-export const DEFAULT_GATEWAY_CANDIDATES = [
-  "claude-opus-4-6",
-  "claude-sonnet-4-6",
-  "claude-haiku-4-5",
-  "gpt-5.4",
-  "gpt-5.3-codex",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
 ];
 
 function stripEffortSuffix(rawModel) {
@@ -137,14 +123,6 @@ function resolveCandidateModels(body, ctx = {}, options = {}) {
     };
   }
 
-  if (rawModel && isVirtualModelName(rawModel, options)) {
-    return {
-      candidateModels: DEFAULT_GATEWAY_CANDIDATES,
-      hasExplicitCandidates: false,
-      canRewriteModel: true,
-    };
-  }
-
   return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: false };
 }
 
@@ -212,41 +190,28 @@ export function applyRoutedModelAndEffort(body, decision, ctx = {}) {
 }
 
 export function onRequest(body, ctx = {}) {
-  let rawCarrier = null;
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return undefined;
+  }
+
+  const options = ctx.options || {};
+  const isClaimedModel = shouldRoute(body.model, options);
+  const stateRoute =
+    isClaimedModel &&
+    ctx?.state?.route &&
+    typeof ctx.state.route === "object" &&
+    typeof ctx.state.route.targetModel === "string" &&
+    ctx.state.route.targetModel.trim()
+      ? ctx.state.route
+      : null;
+
+  if (!isClaimedModel && !stateRoute) {
+    return undefined;
+  }
+
   try {
-    if (body && typeof body === "object" && !Array.isArray(body)) {
-      if (ROUTE_CARRIER_KEY in body) {
-        if (body[ROUTE_CARRIER_KEY] && typeof body[ROUTE_CARRIER_KEY] === "object") {
-          rawCarrier = body[ROUTE_CARRIER_KEY];
-        }
-        delete body[ROUTE_CARRIER_KEY];
-      }
-    }
-
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return undefined;
-    }
-
-    const options = ctx.options || {};
-    const isClaimedModel = shouldRoute(body.model, options);
-
-    // Only trust `body.__agentcompass_route` when `useRouteCarrier === true` AND the model is claimed by the plugin
-    const carrierFromBody =
-      options.useRouteCarrier === true &&
-      isClaimedModel &&
-      rawCarrier &&
-      typeof rawCarrier.targetModel === "string" &&
-      rawCarrier.targetModel.trim()
-        ? rawCarrier
-        : null;
-
-    const stateRouteFromCtx =
-      isClaimedModel && ctx?.state?.route && typeof ctx.state.route === "object"
-        ? ctx.state.route
-        : null;
-
-    if (!isClaimedModel && !stateRouteFromCtx) {
-      return undefined;
+    if (ROUTE_CARRIER_KEY in body) {
+      delete body[ROUTE_CARRIER_KEY];
     }
 
     const store = options.continuityStore || defaultContinuityStore;
@@ -256,43 +221,23 @@ export function onRequest(body, ctx = {}) {
       ctx,
       options
     );
+
+    if (!canRewriteModel && !stateRoute && isVirtualModelName(body.model, options)) {
+      if (typeof ctx?.reject === "function") {
+        return ctx.reject(400, "agentcompass: set candidateModels in the plugin's options");
+      }
+      return undefined;
+    }
+
     let decision = null;
 
-    // 1. Check if opt-in Stage 1 (`useRouteCarrier: true`) or shared `ctx.state` provided a pre-computed decision
-    const stateRoute = carrierFromBody || stateRouteFromCtx;
-
     if (stateRoute) {
-      decision = stateRoute;
       if (
-        hasExplicitCandidates &&
-        Array.isArray(candidateModels) &&
-        !candidateModels.includes(decision.targetModel)
+        !hasExplicitCandidates ||
+        !Array.isArray(candidateModels) ||
+        candidateModels.includes(stateRoute.targetModel)
       ) {
-        if (decision.profile && typeof decision.profile === "object") {
-          const constrained = selectBestRoute(decision.profile, {
-            objective: "",
-            candidateModels,
-            catalog: options.catalog,
-            quotas: options.quotas,
-            meteredOk: options.meteredOk,
-            now,
-          });
-          if (constrained.ok && constrained.targetModel) {
-            decision = {
-              ...decision,
-              targetModel: constrained.targetModel,
-              canonicalModel: constrained.canonicalModel,
-              targetEffort: constrained.targetEffort || decision.targetEffort,
-              modelWithEffort: `${constrained.targetModel}:${constrained.targetEffort || decision.targetEffort}`,
-              canRewriteModel: true,
-              hasExplicitCandidates: true,
-            };
-          } else {
-            decision = null;
-          }
-        } else {
-          decision = null;
-        }
+        decision = stateRoute;
       }
 
       if (decision && decision.targetModel) {
@@ -485,8 +430,7 @@ export function onRequest(body, ctx = {}) {
     const allowModelRewrite =
       canRewriteModel ||
       decision.canRewriteModel === true ||
-      decision.hasExplicitCandidates === true ||
-      Boolean(carrierFromBody);
+      decision.hasExplicitCandidates === true;
 
     if (!allowModelRewrite) {
       if (options.injectProtocolEffort === true) {
@@ -512,77 +456,68 @@ export function onRequest(body, ctx = {}) {
  * or fallback to `ctx.provider.model` if `body.model` is still a virtual model name.
  */
 export function onProvider(body, ctx = {}) {
-  try {
-    if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
-      delete body[ROUTE_CARRIER_KEY];
-    }
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      return undefined;
-    }
+  if (!body || typeof body !== "object" || Array.isArray(body)) {
+    return undefined;
+  }
 
-    const options = ctx?.options || {};
-    const prov = ctx?.provider && typeof ctx.provider === "object" ? ctx.provider : null;
-    const providerModels =
-      extractModelList(options.modelsByProvider?.[prov?.id]) ||
-      extractModelList(options.modelsByProvider?.[prov?.name]);
+  const options = ctx?.options || {};
+  const prov = ctx?.provider && typeof ctx.provider === "object" ? ctx.provider : null;
+  const providerModels =
+    extractModelList(options.modelsByProvider?.[prov?.id]) ||
+    extractModelList(options.modelsByProvider?.[prov?.name]);
 
-    const prevDecision = ctx?.state?.agentcompass || ctx?.state?.route;
-    if (providerModels && providerModels.length > 0 && prevDecision?.profile) {
-      const needProviderRoute =
-        isVirtualModelName(body.model, options) ||
-        prevDecision.canRewriteModel === false ||
-        prevDecision.hasExplicitCandidates === false ||
-        !providerModels.includes(prevDecision.targetModel) ||
-        options.routePerProvider === true;
+  const prevDecision = ctx?.state?.agentcompass || ctx?.state?.route;
+  if (providerModels && providerModels.length > 0 && prevDecision?.profile) {
+    const needProviderRoute =
+      isVirtualModelName(body.model, options) ||
+      prevDecision.canRewriteModel === false ||
+      prevDecision.hasExplicitCandidates === false ||
+      !providerModels.includes(prevDecision.targetModel) ||
+      options.routePerProvider === true;
 
-      if (needProviderRoute) {
-        const routed = selectBestRoute(prevDecision.profile, {
-          objective: "",
-          candidateModels: providerModels,
-          catalog: options.catalog,
-          quotas: options.quotas,
-          meteredOk: options.meteredOk,
-        });
-        if (routed.ok && routed.targetModel) {
-          const updated = {
-            ...prevDecision,
-            targetModel: routed.targetModel,
-            canonicalModel: routed.canonicalModel,
-            targetEffort: routed.targetEffort || prevDecision.targetEffort || "high",
-            modelWithEffort: `${routed.targetModel}:${routed.targetEffort || prevDecision.targetEffort || "high"}`,
-            canRewriteModel: true,
-            hasExplicitCandidates: true,
-          };
-          if (ctx.state && typeof ctx.state === "object") {
-            ctx.state.agentcompass = updated;
-            ctx.state.route = updated;
-          }
-          applyRoutedModelAndEffort(body, updated, ctx);
-          return body;
+    if (needProviderRoute) {
+      const routed = selectBestRoute(prevDecision.profile, {
+        objective: "",
+        candidateModels: providerModels,
+        catalog: options.catalog,
+        quotas: options.quotas,
+        meteredOk: options.meteredOk,
+      });
+      if (routed.ok && routed.targetModel) {
+        const updated = {
+          ...prevDecision,
+          targetModel: routed.targetModel,
+          canonicalModel: routed.canonicalModel,
+          targetEffort: routed.targetEffort || prevDecision.targetEffort || "high",
+          modelWithEffort: `${routed.targetModel}:${routed.targetEffort || prevDecision.targetEffort || "high"}`,
+          canRewriteModel: true,
+          hasExplicitCandidates: true,
+        };
+        if (ctx.state && typeof ctx.state === "object") {
+          ctx.state.agentcompass = updated;
+          ctx.state.route = updated;
         }
+        applyRoutedModelAndEffort(body, updated, ctx);
+        return body;
       }
     }
-
-    if (
-      isVirtualModelName(body.model, options) &&
-      typeof prov?.model === "string" &&
-      prov.model.trim()
-    ) {
-      const fallbackDecision = {
-        ...(prevDecision || {}),
-        targetModel: prov.model.trim(),
-        targetEffort: prevDecision?.targetEffort || "high",
-      };
-      applyRoutedModelAndEffort(body, fallbackDecision, ctx);
-      return body;
-    }
-
-    return undefined;
-  } finally {
-    if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
-      delete body[ROUTE_CARRIER_KEY];
-    }
   }
+
+  if (
+    isVirtualModelName(body.model, options) &&
+    typeof prov?.model === "string" &&
+    prov.model.trim()
+  ) {
+    const fallbackDecision = {
+      ...(prevDecision || {}),
+      targetModel: prov.model.trim(),
+      targetEffort: prevDecision?.targetEffort || "high",
+    };
+    applyRoutedModelAndEffort(body, fallbackDecision, ctx);
+    return body;
+  }
+
+  return undefined;
 }
 
 /**
@@ -591,35 +526,26 @@ export function onProvider(body, ctx = {}) {
  * on success and marks `healthy = false` on upstream error (`status >= 400`).
  */
 export function onResponse(body, ctx = {}) {
-  try {
-    if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
-      delete body[ROUTE_CARRIER_KEY];
-    }
-    const options = ctx?.options || {};
-    const store = options.continuityStore || defaultContinuityStore;
-    const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
-    const decision = ctx?.state?.agentcompass || ctx?.state?.route;
-    const sessionKey =
-      decision?.continuation?.sessionKey ||
-      ctx?.state?.sessionKey ||
-      computeSessionKey(ctx?.request || {}, ctx) ||
-      store.lastActiveSessionKey;
+  const options = ctx?.options || {};
+  const store = options.continuityStore || defaultContinuityStore;
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const decision = ctx?.state?.agentcompass || ctx?.state?.route;
+  const sessionKey =
+    decision?.continuation?.sessionKey ||
+    ctx?.state?.sessionKey ||
+    computeSessionKey(ctx?.request || {}, ctx) ||
+    store.lastActiveSessionKey;
 
-    store.recordResponse(
-      sessionKey,
-      body,
-      {
-        ...ctx,
-        model: decision?.targetModel || ctx?.model || body?.model,
-      },
-      now
-    );
-    return undefined;
-  } finally {
-    if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
-      delete body[ROUTE_CARRIER_KEY];
-    }
-  }
+  store.recordResponse(
+    sessionKey,
+    body,
+    {
+      ...ctx,
+      model: decision?.targetModel || ctx?.model || body?.model,
+    },
+    now
+  );
+  return undefined;
 }
 
 /**
@@ -629,65 +555,45 @@ export function onResponse(body, ctx = {}) {
  * as well as legacy `{provider, account, key}` shapes.
  */
 export function onAccount(accountOrBody, ctx = {}) {
-  try {
-    if (
-      accountOrBody &&
-      typeof accountOrBody === "object" &&
-      !Array.isArray(accountOrBody) &&
-      ROUTE_CARRIER_KEY in accountOrBody
-    ) {
-      delete accountOrBody[ROUTE_CARRIER_KEY];
-    }
+  const decision = ctx?.state?.agentcompass || ctx?.state?.route;
+  const options = ctx?.options || {};
+  if (!decision) return undefined;
 
-    const decision = ctx?.state?.agentcompass || ctx?.state?.route;
-    const options = ctx?.options || {};
-    if (!decision) return undefined;
+  const acct =
+    ctx?.account && typeof ctx.account === "object"
+      ? ctx.account
+      : accountOrBody &&
+          typeof accountOrBody === "object" &&
+          (accountOrBody.ref ||
+            accountOrBody.provider ||
+            accountOrBody.name ||
+            accountOrBody.kind ||
+            accountOrBody.account ||
+            accountOrBody.key)
+        ? accountOrBody
+        : ctx;
 
-    const acct =
-      ctx?.account && typeof ctx.account === "object"
-        ? ctx.account
-        : accountOrBody &&
-            typeof accountOrBody === "object" &&
-            (accountOrBody.ref ||
-              accountOrBody.provider ||
-              accountOrBody.name ||
-              accountOrBody.kind ||
-              accountOrBody.account ||
-              accountOrBody.key)
-          ? accountOrBody
-          : ctx;
+  if (!acct || typeof acct !== "object") return undefined;
 
-    if (!acct || typeof acct !== "object") return undefined;
+  const allowedByKind = options.accountsByWorkKind?.[decision.workKind];
+  if (Array.isArray(allowedByKind) && allowedByKind.length > 0) {
+    const identifiers = [
+      acct.ref,
+      acct.name,
+      acct.provider,
+      acct.kind,
+      acct.provider && acct.name ? `${acct.provider}/${acct.name}` : "",
+      acct.account,
+      acct.key,
+    ]
+      .filter((v) => typeof v === "string" && v.trim())
+      .map((v) => v.trim());
 
-    const allowedByKind = options.accountsByWorkKind?.[decision.workKind];
-    if (Array.isArray(allowedByKind) && allowedByKind.length > 0) {
-      const identifiers = [
-        acct.ref,
-        acct.name,
-        acct.provider,
-        acct.kind,
-        acct.provider && acct.name ? `${acct.provider}/${acct.name}` : "",
-        acct.account,
-        acct.key,
-      ]
-        .filter((v) => typeof v === "string" && v.trim())
-        .map((v) => v.trim());
-
-      if (identifiers.length > 0 && !identifiers.some((id) => allowedByKind.includes(id))) {
-        return { skip: true };
-      }
-    }
-    return undefined;
-  } finally {
-    if (
-      accountOrBody &&
-      typeof accountOrBody === "object" &&
-      !Array.isArray(accountOrBody) &&
-      ROUTE_CARRIER_KEY in accountOrBody
-    ) {
-      delete accountOrBody[ROUTE_CARRIER_KEY];
+    if (identifiers.length > 0 && !identifiers.some((id) => allowedByKind.includes(id))) {
+      return { skip: true };
     }
   }
+  return undefined;
 }
 
 /**

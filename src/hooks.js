@@ -1,24 +1,9 @@
 /**
- * Stage 1 of the Two-Stage Tandem Architecture: Async Bun Gateway Hook (`magpie.hooks`)
+ * Optional Async Bun Gateway Helper (`./hooks`)
  *
- * How Magpie executes this hook (`internal/gateway/middleware.go:39` & `internal/plugin/host.js:1374`):
- * 1. Runs in the **Bun** plugin host BEFORE `moejs` middleware (`magpie.middleware`) and BEFORE
- *    model resolution (`s.serve`).
- * 2. Has an asynchronous time budget configurable via `gatewayTimeoutMs` up to **10,000 ms (10 seconds)**
- *    (vs. 20 ms for `strategies` and 250 ms for `moejs` middleware).
- * 3. `host.js:1411` checks that `magpie.hooks` does NOT directly mutate `body.model`, `body.stream`,
- *    `body.tools`, `body.tool_choice`, `body.function_call`, `body.functions`, or `body.toolConfig`.
- * 4. Aligned with Magpie native router (`internal/gateway/affinity.go` & `rules.go`), `hooks.js`
- *    first checks `evaluateProviderContinuation`:
- *    - When `shouldHold === true` (`why: "turn" | "cache" | "followup" | "session" | "strict"`),
- *      it holds the current Provider/Model & monotonic effort (`keepsEffort`) in `< 0.1 ms` with
- *      ZERO external scorer calls.
- *    - Only when selecting or switching a Provider/Model is required (`why: "first" | "provider_unhealthy" |
- *      "capability_outgrown" | "outgrown" | "worn" | "compacted" | "cold"`) does it invoke `scoreTaskLive`
- *      + `selectBestRoute`.
- * 5. Immediately afterwards (`middleware.go:42`), Stage 2 (`src/middleware.js` in `moejs`) reads
- *    and deletes `body.__agentcompass_route`, rewrites `body.model` and reasoning effort in `< 0.2 ms`,
- *    and hands the routed request to `s.serve`.
+ * Used for programmatic / custom host integrations that opt into asynchronous external
+ * System-One scoring (`allowExternalScorer: true`) and pass routing state via `ctx.state.route`
+ * without mutating client request body fields.
  */
 
 import { selectBestRoute } from "./allocator.js";
@@ -252,13 +237,6 @@ export async function onRequest(body, ctx = {}) {
     ctx.state.route = carrier;
     ctx.state.agentcompass = carrier;
     ctx.report?.("ready", payloadBytes);
-
-    if (options.useRouteCarrier === true) {
-      return {
-        ...body,
-        [ROUTE_CARRIER_KEY]: carrier,
-      };
-    }
     return undefined;
   }
 
@@ -405,13 +383,6 @@ export async function onRequest(body, ctx = {}) {
   ctx.state.route = carrier;
   ctx.state.agentcompass = carrier;
   ctx.report?.("ready", payloadBytes);
-
-  if (options.useRouteCarrier === true) {
-    return {
-      ...body,
-      [ROUTE_CARRIER_KEY]: carrier,
-    };
-  }
   return undefined;
 }
 

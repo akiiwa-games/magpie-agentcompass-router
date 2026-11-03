@@ -67,21 +67,21 @@ flowchart TB
 1. **单阶段同步路由（`src/middleware.js`，`moejs` 运行时，单遍 O(N) `< 0.5 ms` 完成）**：
    - 默认仅拦截 `agentcompass` 命名空间请求（`agentcompass`、`agentcompass/auto`、`agentcompass/intent`、`agentcompass/System-One-0.5`），绝不劫持 Magpie 原生 `auto`、`intent` 或 `group/*` 路由组请求。
    - 使用零网络调用的本地确定性 10 维画像器（`inferTaskProfile`）与会话粘性契约（`evaluateProviderContinuation`），在轮内工具调用、KV 缓存温热或短追问时保持当前模型与单调思考档位（`keepsEffort`），默认不向请求体注入任何私有字段（通过 `ctx.state` 维护上下文）。
-   - 在已配置 `candidateModels` / `availableModels` / `allowedModels`（或 `modelMap`）的网关可用模型池内选出最优 `<targetModel>:<targetEffort>`；当请求虚拟模型 `agentcompass` / `agentcompass/*` 且未显式配置候选列表时，默认在主流网关模型集合（`DEFAULT_GATEWAY_CANDIDATES`）中完成意图选型与重写；若请求为具体模型名且未配置候选列表，则保持原模型不变、仅自动计算并注入最佳思考档位（`reasoning_effort` / `reasoning.effort` / `output_config.effort`）。
+   - 在已配置 `candidateModels` / `availableModels` / `allowedModels`（或 `modelMap` / `defaultModel`）的网关可用模型池内选出最优 `<targetModel>:<targetEffort>`；当请求虚拟模型 `agentcompass` / `agentcompass/*` 且未配置候选列表或 `defaultModel` 时，通过 `ctx.reject(400, "agentcompass: set candidateModels in the plugin's options")` 明确提示配置，绝不硬编码猜测模型列表；若请求为具体模型名且未配置候选列表，则保持原模型不变、仅自动计算并注入最佳思考档位（`reasoning_effort` / `reasoning.effort` / `output_config.effort`）。
    - `onProvider` 原生适配 Magpie `internal/middleware/hooks.go` 的 `{id, name, account, model}` 上下文结构（支持 `options.modelsByProvider` 细粒度重选），`onAccount` 原生适配 `{ref, provider, name, kind, model}` 结构，`onResponse` 在共享请求池化实例中记录缓存水位与上游健康度。
 2. **可选异步扩展（`src/hooks.js`，Bun 运行时）**：
-   - 仅供显式配置 `allowExternalScorer: true` 及外部评分端点（`scorer.baseUrl`）的高级宿主按需挂载，默认不在 `package.json` 的 `"magpie"` 中注册，避免 Stage 1 + Stage 2 重复执行。
+   - 仅供编程式接入且显式配置 `allowExternalScorer: true` 及外部评分端点（`scorer.baseUrl`）的高级宿主按需调用，默认不在 `package.json` 的 `"magpie"` 中注册，仅通过 `ctx.state.route` 传递路由状态，绝不读写请求体私有字段。
 
-#### 模式 B：原生 Routing Group 决策 Provider（`decide: true` / `/v1/systemone`，8,000 ms – 60,000 ms 预算）
-- `src/index.js` 同时注册了一个拥有 `decide: true` 能力的 Magpie Provider（`agentcompass`，显示名称 `AgentCompass`）及决策模型 `agentcompass-systemone`（`decides: true`）。
-- 当你在 Magpie UI 的 **Routing Group -> Classifier** 中选择 `agentcompass/agentcompass-systemone` 时，Magpie 的 `askJev`（`internal/gateway/decide.go:132`）会赋予它 `Settings.ClassifyTimeout` 的专属预算（**默认 `8,000 ms`，最高可在 Magpie 设置中调至 `60,000 ms` = 60 秒**）。
+#### 模式 B：原生 Routing Group 决策 Provider（`decide: true` / `/v1/systemone`，需显式开启 `enableDecisionProvider: true`，8,000 ms – 60,000 ms 预算）
+- `src/index.js` 同时注册了一个拥有 `decide: true` 能力的 Magpie Provider（`agentcompass`，显示名称 `AgentCompass`）及决策模型 `agentcompass-systemone`（`decides: true`），需在插件选项中显式开启 `"enableDecisionProvider": true` 后响应 `/v1/systemone` 请求。
+- 当你在插件选项中开启 `"enableDecisionProvider": true` 并在 Magpie UI 的 **Routing Group -> Classifier** 中选择 `agentcompass/agentcompass-systemone` 时，Magpie 的 `askJev`（`internal/gateway/decide.go:132`）会赋予它 `Settings.ClassifyTimeout` 的专属预算（**默认 `8,000 ms`，最高可在 Magpie 设置中调至 `60,000 ms` = 60 秒**）。
 - 插件完整兼容 Magpie 的两套 `/v1/systemone` 协议（`jevLevelled` 两级分类与 `jevBody` 单级分类），并在后台用完整的 10 维画像 + 7D/3D 向量算法把最优路由反推回你配置的 Routing Group 规则与 `effort`（`low` / `medium` / `high` / `xhigh`）。
 
 ---
 
 ## 🧠 核心算法：10 维任务画像 × (7 维客观能力 + 3 维主观禀赋)
 
-本插件完整移植了 [AgentCompass (`E:\PROJECTS\route_manager`)](https://github.com/akiiwa-games/AgentCompass) 的纯意图选型公式（详见 [`src/allocator.js`](./src/allocator.js) 与 [`src/profiler-core.js`](./src/profiler-core.js)）：
+本插件完整移植了 [AgentCompass](https://github.com/akiiwa-games/AgentCompass) 的纯意图选型公式（详见 [`src/allocator.js`](./src/allocator.js) 与 [`src/profiler-core.js`](./src/profiler-core.js)）：
 
 ### 1. 10 维任务画像（Task Profile）
 每次请求都会被剖析为 10 个正交维度：
@@ -199,16 +199,16 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\agentcompass" -Targ
 > **提示**：
 > - 插件默认 100% 使用 `< 1 ms` 零网络请求的本地确定性 10 维启发式画像器（`kind: "heuristic"`），绝不会将用户 Prompt 发送到任何外部地址。
 > - 如需启用外部 System-One 评分接口，必须同时显式配置 `"allowExternalScorer": true` 与 `"scorer": { "kind": "openai_compatible", "baseUrl": "..." }`。
-> - 若未配置 `availableModels` / `candidateModels` / `allowedModels`，对于 `agentcompass` / `agentcompass/*` 虚拟模型请求，插件会在 `onRequest` 中使用 `defaultModel` / `fallbackModel` 或默认主流模型池（`DEFAULT_GATEWAY_CANDIDATES`）完成模型与思考档位改写（若在 `onProvider` 中配置了 `modelsByProvider` 或 `ctx.provider.model`，也可按 Provider 进一步映射）；对于具体模型请求则保持原模型名不变，仅自动计算并注入思考档位（Effort）。
+> - 若请求 `agentcompass` / `agentcompass/*` 虚拟模型，需在插件选项中配置 `candidateModels`（或 `availableModels` / `allowedModels` / `defaultModel`）；未配置时插件将调用 `ctx.reject(400, "agentcompass: set candidateModels in the plugin's options")` 提示配置，不会硬编码猜测未配置的模型。对于具体模型请求（当开启 `routeAllModels: true` 且未配置候选列表时），则保持原模型名不变，仅自动计算并注入思考档位（Effort）。
 > - `onAccount(account, ctx)` 原生匹配 Magpie `internal/middleware/account.go` 传入的 `{ref, provider, name, kind, model}` 字段（可通过 `accountsByWorkKind` 按 `ref`、`name`、`provider` 或 `${provider}/${name}` 过滤账号）。
 
 ---
 
-### 3. 配置方式二：模式 B —— 作为 Magpie Routing Group 原生 Classifier（最高 60s 时间预算）
+### 3. 配置方式二：模式 B —— 作为 Magpie Routing Group 原生 Classifier（需开启 `enableDecisionProvider: true`，最高 60s 时间预算）
 
 如果你喜欢使用 Magpie UI 的 **Routing Groups（路由组）** 可视化界面：
 
-1. 在 Magpie 中登录启用本插件提供的 Provider：`magpie plugin login agentcompass`（显示名称为 `AgentCompass`）；
+1. 在插件选项中显式开启 `"enableDecisionProvider": true`，并在 Magpie 中登录启用本插件提供的 Provider：`magpie plugin login agentcompass`（显示名称为 `AgentCompass`）；
 2. 进入你的 **Routing Group** 设置，将 **Classifier（分类器模型）** 选择为 `agentcompass/agentcompass-systemone`（CLI：`magpie group set <group> effort=auto classifier=agentcompass/agentcompass-systemone`）；
 3. 在 Magpie 全局设置中，可将 `ClassifyTimeout` 调整为 `8000`–`30000` ms（最高支持 `60000` ms）；
 4. 在 Routing Group 中按标准类别（如 `direction_reasoning`、`debug_review`、`self_contained_code`、`bounded_bulk_work`）配置你的目标模型列表——插件会自动运行 AgentCompass 算法，选出最匹配的规则分支与思考档位（`low` / `medium` / `high` / `xhigh`）。
@@ -219,7 +219,7 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\agentcompass" -Targ
 
 ### 1. 单元测试（Node.js / Bun 零依赖）
 
-覆盖多协议解析、10 维画像推断、能力向量选型、两阶段 `hooks -> middleware` 接力及 `/v1/systemone` 协议兼容：
+覆盖多协议解析、10 维画像推断、能力向量选型、网关中间件路由与 `/v1/systemone` 协议兼容：
 
 ```bash
 node --test test/router.test.mjs
@@ -233,8 +233,7 @@ node --test test/router.test.mjs
 
 ```text
 /run/magpie-sandbox/agentcompass  on
-  async gateway hook  onRequest
-  gateway middleware  onRequest, onAccount, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure · onUsage
+  gateway middleware  onRequest, onProvider, onAccount, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure
   agentcompass (AgentCompass, 1 models)  signed in
 ```
 
@@ -261,9 +260,9 @@ node --test test/router.test.mjs
 - [`src/profiler-core.js`](./src/profiler-core.js) — 四大协议（Anthropic / OpenAI Responses / Chat / Gemini）单趟有界请求抽取器 + 确定性 10 维任务画像器
 - [`src/allocator.js`](./src/allocator.js) — AgentCompass 纯意图与能力矩阵选型核心算法实现（含 `continuity` 连续性权重与不健康模型剔除）
 - [`src/scorer-live.js`](./src/scorer-live.js) — 异步 System-One 10 维画像器（支持显式开启 `allowExternalScorer: true` 时的 Jev `/v1/systemone`、OpenAI 兼容接口、LRU 缓存与超时无损降级）
-- [`src/hooks.js`](./src/hooks.js) — **可选异步 Bun Hook（`./hooks`）**：供编程式接入或显式 `useRouteCarrier: true` + `allowExternalScorer: true` 场景使用
+- [`src/hooks.js`](./src/hooks.js) — **可选异步 Bun Helper（`./hooks`）**：供编程式接入或显式 `allowExternalScorer: true` 场景通过 `ctx.state.route` 传递路由决策
 - [`src/middleware.js`](./src/middleware.js) — **默认网关中间件（`moejs` `magpie.middleware`，250ms 预算）**：执行会话续用判定与 10D 意图选型并改写 `body.model = "<model>:<effort>"`，通过同实例 `onResponse` 追踪故障与缓存水位，并导出 `agentcompass` / `agentcompass-pure` 账号池策略
-- [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled`、`jevBody` 与 `previous_message_kind` / `previous_message_reasoning` 短追问续用）
+- [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，需显式开启 `enableDecisionProvider: true`，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled`、`jevBody` 与 `previous_message_kind` / `previous_message_reasoning` 短追问续用）
 - [`docs/RESEARCH_AND_SCHEME.md`](./docs/RESEARCH_AND_SCHEME.md) — **深度调研与架构设计报告**（含 Magpie 源码逐文件行号级分析、完整方案推导与 Linux 沙盒实测报告）
 - [`docs/magpie-community-registry-entry.json`](./docs/magpie-community-registry-entry.json) — **`magpie-community/plugins` 标准 `registry.json` 市场条目**
 - [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json) — **Linux 沙盒 8 大场景全链路真实网关与市场 E2E 实测 JSON 报告**

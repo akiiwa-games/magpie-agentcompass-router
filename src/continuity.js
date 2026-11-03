@@ -187,9 +187,9 @@ const AGENT_PARAGRAPH_NOISE_PATTERNS = [
   /^\[System note:[\s\S]*\]$/i,
 ];
 
-const MAX_NOISE_STRIP_CHARS = 8000;
-const MAX_USER_TURN_CHARS = 4000;
-const MAX_FIRST_WORDS_HASH_CHARS = 1024;
+export const MAX_NOISE_STRIP_CHARS = 8000;
+export const MAX_USER_TURN_CHARS = 4000;
+export const MAX_FIRST_WORDS_HASH_CHARS = 1024;
 const PARAGRAPH_NOISE_FAST_RE = /AGENTS\.md|TodoWrite|Available agent types|\[System note:/i;
 
 function capTextSlice(text, maxChars = MAX_USER_TURN_CHARS) {
@@ -414,8 +414,8 @@ function inspectMessageItem(item, options = {}) {
         : typeof item.text === "string"
           ? item.text
           : "";
-  const collectStrings = role === "user" ? true : needAssistantText;
-  const maxCollectChars = role === "user" ? (needFullText ? MAX_NOISE_STRIP_CHARS : 600) : 1000;
+  const collectStrings = role === "user" ? needFullText : needAssistantText;
+  const maxCollectChars = role === "user" ? MAX_NOISE_STRIP_CHARS : 1000;
   let collected = "";
   let charCount = 0;
   let sawToolResultBlock = false;
@@ -501,21 +501,24 @@ function inspectMessageItem(item, options = {}) {
       isAssistantStep: true,
       hasVisual,
       charCount,
+      scannedChars: needAssistantText ? joinedText.length : 0,
     };
   }
 
   if (role === "user") {
-    const said = sawNonToolUserBlock ? userSaidFromText(joinedText) : "";
-    const isPureToolOrNoise = !said && sawToolResultBlock;
+    const said = needFullText && sawNonToolUserBlock ? userSaidFromText(joinedText) : "";
+    const hasUserSpeech = needFullText ? Boolean(said) : sawNonToolUserBlock;
+    const isPureToolOrNoise = !hasUserSpeech && sawToolResultBlock;
     return {
       role: isPureToolOrNoise ? "tool" : "user",
       rawUserText: needFullText ? capTextSlice(joinedText, MAX_USER_TURN_CHARS) : "",
-      userSaid: needFullText ? capTextSlice(said, MAX_USER_TURN_CHARS) : said ? "1" : "",
+      userSaid: needFullText ? capTextSlice(said, MAX_USER_TURN_CHARS) : hasUserSpeech ? "1" : "",
       assistantText: "",
-      isToolStep: sawToolResultBlock && !said,
+      isToolStep: sawToolResultBlock && !hasUserSpeech,
       isAssistantStep: false,
       hasVisual,
       charCount,
+      scannedChars: needFullText && sawNonToolUserBlock ? joinedText.length : 0,
     };
   }
 
@@ -546,9 +549,9 @@ function getNormalizedItems(body) {
 }
 
 /**
- * Compute Magpie's `firstWords` fingerprint (`internal/gateway/rules.go:153`):
- * First 12 bytes (24 hex chars) of SHA-256 over the first genuine user message text
- * (bounded to the first 1,024 chars so huge initial context blocks stay sub-millisecond).
+ * Compute session `firstWords` fingerprint (inspired by `internal/gateway/rules.go:153`,
+ * hashing the first 1,024 chars of the first genuine user message text rather than the
+ * full unbounded string so huge initial context blocks stay sub-millisecond).
  */
 export function firstWords(body) {
   const items = getNormalizedItems(body);
@@ -663,6 +666,8 @@ export function analyzeTurnState(body = {}, ctx = {}) {
   let hasAnyVisual = false;
   let hasCurrentTurnVisual = false;
   let totalChars = 0;
+  let scannedChars = 0;
+  let extractedTurns = 0;
   let isToolFollowup = false;
   let firstUserSaid = "";
   let lastUserText = "";
@@ -675,6 +680,7 @@ export function analyzeTurnState(body = {}, ctx = {}) {
     const needAssistantText = i >= len - 3;
     const info = inspectMessageItem(item, { needFullText, needAssistantText });
     totalChars += info.charCount;
+    scannedChars += info.scannedChars || 0;
     if (info.hasVisual) {
       hasAnyVisual = true;
     }
@@ -700,6 +706,7 @@ export function analyzeTurnState(body = {}, ctx = {}) {
         firstUserSaid = info.userSaid;
       }
       if (needFullText) {
+        extractedTurns += 1;
         previousUserText = lastUserText;
         lastUserText = info.userSaid;
       }
@@ -741,6 +748,8 @@ export function analyzeTurnState(body = {}, ctx = {}) {
     within,
     isToolFollowup,
     totalChars,
+    scannedChars,
+    extractedTurns,
     lastUserText,
     previousUserText,
     previousAssistantText,
