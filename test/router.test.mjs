@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { rankCandidates, selectBestRoute } from "../src/allocator.js";
+import { namedRoute, rankCandidates, selectBestRoute } from "../src/allocator.js";
 import { DEFAULT_SCORING_POLICY } from "../src/catalog.js";
 import {
   CACHE_COLD_MS,
@@ -48,7 +48,7 @@ import {
   strategies,
 } from "../src/middleware.js";
 import { extractRequestFacts, inferTaskProfile, profileTask } from "../src/profiler-core.js";
-import { clearProfileCache, scoreTaskLive } from "../src/scorer-live.js";
+import { SCORER_SYSTEM_PROMPT, clearProfileCache, parseJevScorerAnswer, scoreTaskLive } from "../src/scorer-live.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -1333,12 +1333,41 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
       frontier: 3.5,
     });
 
-    // Verify multi-task detection (`MULTI_TASK_MARK_RE`)
+    // Verify multi-task detection (`MULTI_TASK_MARK_RE`) and structured-only profile (no free-text `reason`)
     const multiProfile = inferTaskProfile({
       objective: "Task 1: Refactor the auth middleware.\nTask 2: Build the billing CSV exporter.",
     });
     assert.equal(multiProfile.multi_task, true);
     assert.equal(multiProfile.task_count, "2");
+    assert.equal("reason" in multiProfile, false, "Structured task profile must omit free-text reason");
+    assert.equal(SCORER_SYSTEM_PROMPT.includes("- reason:"), false, "SCORER_SYSTEM_PROMPT must not request free-text reason");
+
+    // Verify `parseJevScorerAnswer` produces structured-only profile without `reason`
+    const jevParsed = parseJevScorerAnswer({
+      model: "jev-latest",
+      answers: {
+        work_kind: { choice: "debug_review" },
+        interaction_style: { choice: "exploration" },
+        reasoning_depth: { score: 2 },
+        code_complexity: { score: 0 },
+        context_scale: { score: 1 },
+        divergence: { score: 1 },
+        hallucination_risk: { score: 2 },
+        error_cost: { score: 1 },
+        needs_visual: { noul: 0.1 },
+        needs_gui: { noul: 0.1 },
+        local_only: { noul: 0.9 },
+      },
+    });
+    assert.equal("reason" in jevParsed, false);
+    assert.equal(jevParsed.work_kind, "debug_review");
+    assert.equal(jevParsed.local_only, true);
+
+    // Verify `namedRoute` trusts classifier's `work_kind` directly without secondary `code_complexity === 0` override (89f66ab)
+    assert.equal(
+      namedRoute({ work_kind: "general_implementation", code_complexity: 0 }),
+      "general_implementation"
+    );
 
     // Verify `free_usage` (+0.18 `unlimited_bonus`) on unlimited subscription accounts
     const unlimitedDec = selectBestRoute(

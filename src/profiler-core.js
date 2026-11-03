@@ -649,7 +649,9 @@ export function validateProfile(raw) {
     ? raw.hours_confidence
     : "medium";
   profile.urgency = ["unknown", "low", "normal", "high"].includes(raw.urgency) ? raw.urgency : "unknown";
-  profile.reason = typeof raw.reason === "string" ? raw.reason.trim().slice(0, 300) : "";
+  if (typeof raw.reason === "string" && raw.reason.trim()) {
+    profile.reason = raw.reason.trim().slice(0, 300);
+  }
   profile.multi_task = Boolean(raw.multi_task);
   profile.task_count = ["1", "2", "3", ">3"].includes(raw.task_count) ? raw.task_count : "1";
   return profile;
@@ -729,7 +731,6 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     expected_hours: expectedHours,
     hours_confidence: "medium",
     urgency: "unknown",
-    reason: `deterministic profile: work_kind=${kind}, depth=${depth}, code=${code}, scale=${context}, div=${divergence}`,
     multi_task: multiTask,
     task_count: taskCount,
   });

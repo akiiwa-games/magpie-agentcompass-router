@@ -32,12 +32,11 @@ Return ONLY a single valid JSON object matching the schema:
 - error_cost: integer 1..3 (1=low/read-only, 2=standard repo change, 3=critical production release)
 - needs_visual: boolean
 - needs_gui: boolean
-- local_only: boolean
+- local_only: boolean (True when the task explicitly depends on existing files, directories, or repositories on this machine—reading, copying, searching, editing, building, or testing un-inlined local files—or on local processes/GUI/environment. False when all required inputs are inlined in the prompt or fetched from the public web, such as web_research, self_contained_code, text_in_text_out, direction_reasoning, complex_build_plan, even if the brief has a workspace header or names a local target path where the finished output will be saved.)
 - interaction_style: one of [${INTERACTION_STYLES.join(", ")}]
 - expected_hours: number (0.1 to 24.0)
 - hours_confidence: "low" | "medium" | "high"
 - urgency: "unknown" | "low" | "normal" | "high"
-- reason: one concise sentence justifying the scores
 - multi_task: boolean
 - task_count: "1" | "2" | "3" | ">3"`;
 
@@ -158,7 +157,8 @@ export function buildJevScorerPayload(task, model = "jev-latest", routes = CANON
     },
     local_only: {
       type: "noul",
-      instructions: "Does this task depend on this machine's local repository, local CLI/daemons/tests, or local secrets?",
+      instructions:
+        "Does this task explicitly depend on existing files, directories, or repositories on this machine (reading, copying, editing, or testing un-inlined local files) or on local processes/GUI/environment?",
     },
   };
   for (const [name, [instructions, criteria]] of Object.entries(JEV_SCORE_QUESTIONS)) {
@@ -205,7 +205,6 @@ export function parseJevScorerAnswer(response, fallbackTask = {}) {
   raw.needs_gui = Number(pick("needs_gui", "noul")) >= 0.5;
   if (raw.needs_gui) raw.needs_visual = true;
   raw.local_only = Number(pick("local_only", "noul")) >= 0.5;
-  raw.reason = `Jev (${response.model || "jev"}) classified as ${raw.work_kind} (D${raw.reasoning_depth} C${raw.code_complexity} S${raw.context_scale} V${raw.divergence})`;
   return validateProfile(raw);
 }
 

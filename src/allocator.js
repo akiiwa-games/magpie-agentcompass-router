@@ -57,7 +57,6 @@ export function profileDifficulty(profile, policy = DEFAULT_SCORING_POLICY) {
 export function namedRoute(profile) {
   if (!profile || typeof profile !== "object") return null;
   const named = profile.work_kind;
-  if (named === "general_implementation" && profile.code_complexity === 0) return null;
   if (named && named in KIND_TRAITS && named !== "other_or_mixed") return named;
   return null;
 }
@@ -642,8 +641,7 @@ export function rankCandidates(profileInput, options = {}) {
   const kind = profileKind(profile, policy);
   const difficulty = profileDifficulty(profile, policy);
   const critical = Boolean(options.critical ?? profile.error_cost >= 3);
-  const rawDiv = profile.divergence || 1;
-  const div = (kind === "computer_use" || profile.needs_gui) && rawDiv >= 3 ? 1 : rawDiv;
+  const div = profile.divergence || 1;
   const depth = profile.reasoning_depth;
   const mechanicalRunbook = Boolean(depth === 1 && profile.code_complexity === 0 && div === 1);
   const unlockDiffs = policy.effort_unlock_difficulties || ["coupled", "frontier"];
