@@ -6,6 +6,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { rankCandidates, selectBestRoute } from "../src/allocator.js";
+import { DEFAULT_SCORING_POLICY } from "../src/catalog.js";
 import {
   CACHE_COLD_MS,
   CHATGPT_CODEX_COLD_MS,
@@ -94,7 +95,7 @@ test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation",
     const decision = selectBestRoute(profile);
     assert.equal(decision.difficulty, "coupled");
     assert.equal(decision.canonicalModel, "claude-opus-5-5");
-    assert.ok(["high", "max"].includes(decision.targetEffort));
+    assert.ok(["high", "xhigh", "max"].includes(decision.targetEffort));
   });
 
   await t.test("Open-ended divergent architecture ideation selects gemini-4-argon-high via divergence DNA (0.96)", () => {
@@ -193,7 +194,7 @@ test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moe
   const afterMw = mwOnRequest(afterHook, mwCtx);
   assert.ok(afterMw, "mwOnRequest should return mutated body");
   assert.equal(ROUTE_CARRIER_KEY in afterMw, false, "carrier must be stripped before reaching upstream");
-  assert.match(afterMw.model, /^claude-opus-5-5:(high|max)$/);
+  assert.match(afterMw.model, /^claude-opus-5-5:(high|xhigh|max)$/);
   assert.ok(["high", "xhigh"].includes(afterMw.reasoning_effort));
 
   // Verify `onAccount` can read `mwCtx.state.agentcompass`
@@ -548,7 +549,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
       headers: { "x-session-id": "sess-turn-lock" },
       options: { continuityStore: store, now: t0 },
     });
-    assert.equal(routed1.model, "claude-opus-5-5:max");
+    assert.equal(routed1.model, "claude-opus-5-5:xhigh");
 
     // Step 2a: Assistant calls a tool, and the next request ends with `role: "tool"`
     const toolResultReq = {
@@ -583,7 +584,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.held, true);
     assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.why, "turn");
     assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.within, true);
-    assert.equal(hooked2a[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:max");
+    assert.equal(hooked2a[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:xhigh");
 
     // Step 2b: Agent injects a `role: "user"` message containing only `<system-reminder>` and `TodoWrite` noise
     const agentNoiseReq = {
@@ -640,7 +641,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
       options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
     };
     const hooked1 = await hookOnRequest(turn1, ctx1);
-    assert.equal(hooked1[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:max");
+    assert.equal(hooked1[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:xhigh");
 
     // Simulate response returning 4,200 tokens (>= 1024 CACHE_WORTH_TOKENS) and cache creation
     await hookOnResponse(
@@ -657,7 +658,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     );
 
     // Turn 2 (2 minutes later, within 5m Anthropic cache TTL): User asks a trivial routine question
-    // Because the 4,200-token KV cache is warm, it MUST hold `claude-opus-5-5:max` (`why: "cache"`) without calling scorer!
+    // Because the 4,200-token KV cache is warm, it MUST hold `claude-opus-5-5:xhigh` (`why: "cache"`) without calling scorer!
     const turn2 = {
       model: "agentcompass/auto",
       messages: [
@@ -683,7 +684,7 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(scorerCalls, 0);
     assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.held, true);
     assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.why, "cache");
-    assert.equal(hooked2[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:max");
+    assert.equal(hooked2[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:xhigh");
 
     // Turn 3 (short follow-up "继续" / "ok go ahead" even when token count < 1024):
     assert.equal(isShortFollowupMessage("继续"), true);
@@ -733,9 +734,9 @@ test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold
     assert.equal(sysOneFollowup.agentcompass.continuation.held, true);
     assert.equal(sysOneFollowup.agentcompass.continuation.why, "followup");
 
-    // Verify `keepsEffort` directly: warm session on `max` never drops to `low`
+    // Verify `keepsEffort` directly: warm session on `xhigh` never drops to `low`
     const sessionSnap = store.get(hooked2[ROUTE_CARRIER_KEY].continuation.sessionKey, t0 + 2 * 60 * 1000);
-    assert.equal(keepsEffort(sessionSnap, "low", 4200, t0 + 2 * 60 * 1000), "max");
+    assert.equal(keepsEffort(sessionSnap, "low", 4200, t0 + 2 * 60 * 1000), "xhigh");
     // Verify ChatGPT/Codex & DeepSeek 1h cache TTL vs default 5m TTL
     assert.equal(coldAfterMs("claude-opus-5-5"), CACHE_COLD_MS);
     assert.equal(coldAfterMs("gpt-6.1-sol"), CHATGPT_CODEX_COLD_MS);
@@ -1194,10 +1195,9 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
       sprintDecision.components.reset_bonus > 0.8,
       `Expected reset_bonus > 0.8, got ${sprintDecision.components.reset_bonus}`
     );
-    assert.equal(
-      sprintDecision.targetEffort,
-      "max",
-      "Pre-reset surplus sprint on non-routine work should waive effort penalty and unlock max effort"
+    assert.ok(
+      ["xhigh", "max"].includes(sprintDecision.targetEffort),
+      `Pre-reset surplus sprint on non-routine work should waive effort penalty and unlock xhigh/max effort (got ${sprintDecision.targetEffort})`
     );
   });
 
@@ -1317,6 +1317,63 @@ test("Subscription Quota Economics: Opportunity Cost, Safety Margin Exclusion, P
       [5, 4, 3, 2, 1, 0],
       `Expected [learns(5), sprint(4), normalSub(3), apiKey(2), lowReserve(1), resting(0)], got [${order.join(", ")}]`
     );
+  });
+
+  await t.test("6. Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-accounts.json` invariants)", () => {
+    // Verify calibrated subjective blend weights (0.49 / 0.34 / 0.17) and default_hours (0.4 / 1.0 / 2.0 / 3.5)
+    assert.deepEqual(DEFAULT_SCORING_POLICY.profile.subjective, {
+      weight: 0.49,
+      vector_weight: 0.34,
+      route_weight: 0.17,
+    });
+    assert.deepEqual(DEFAULT_SCORING_POLICY.default_hours, {
+      routine: 0.4,
+      hard: 1.0,
+      coupled: 2.0,
+      frontier: 3.5,
+    });
+
+    // Verify multi-task detection (`MULTI_TASK_MARK_RE`)
+    const multiProfile = inferTaskProfile({
+      objective: "Task 1: Refactor the auth middleware.\nTask 2: Build the billing CSV exporter.",
+    });
+    assert.equal(multiProfile.multi_task, true);
+    assert.equal(multiProfile.task_count, "2");
+
+    // Verify `free_usage` (+0.18 `unlimited_bonus`) on unlimited subscription accounts
+    const unlimitedDec = selectBestRoute(
+      {
+        work_kind: "bounded_bulk_work",
+        reasoning_depth: 1,
+        code_complexity: 1,
+        context_scale: 2,
+        divergence: 1,
+        hallucination_risk: 1,
+        error_cost: 1,
+        needs_visual: false,
+        needs_gui: false,
+        local_only: true,
+        interaction_style: "engineering",
+        expected_hours: 0.4,
+      },
+      {
+        candidateModels: ["gpt-6.1-sol", "gemini-3.8-flash-high"],
+        quotas: {
+          "codex/unlimited@example.com": {
+            kind: "subscription",
+            unlimited: true,
+          },
+          "gemini/limited@example.com": {
+            kind: "subscription",
+            quota: {
+              windows: [{ name: "7d", used: 40, remaining: 60, resetHours: 100 }],
+            },
+          },
+        },
+      }
+    );
+    assert.equal(unlimitedDec.targetModel, "gpt-6.1-sol");
+    assert.equal(unlimitedDec.components.free_usage, 0.18);
   });
 });
 

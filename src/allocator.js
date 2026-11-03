@@ -19,11 +19,12 @@ import {
   EFFORT_ORDER,
   KIND_TRAITS,
   MODEL_ALIASES,
+  ROUTE_FIT_PEERS,
   SUBJECTIVE_DIMENSIONS,
   canonicalModel,
   resolveModelSpec,
 } from "./catalog.js";
-import { inferTaskProfile, isReadonlyReviewTask, validateProfile } from "./profiler-core.js";
+import { inferTaskProfile, validateProfile } from "./profiler-core.js";
 import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
 
 export const EFFORT_SCALED_CAPABILITIES = [
@@ -132,21 +133,46 @@ export function capabilityScore(weights, model, catalog = {}) {
 }
 
 /**
+ * Collapse models that share a route-fit slot (`allocator.py:route_preference`).
+ */
+export function routePreference(preferred = [], peers = ROUTE_FIT_PEERS, aliases = MODEL_ALIASES) {
+  const collapsed = [];
+  for (const rawItem of preferred) {
+    const item = canonicalModel(rawItem, aliases);
+    const target = peers?.[item] ? canonicalModel(peers[item], aliases) : item;
+    if (!collapsed.includes(target)) {
+      collapsed.push(target);
+    }
+  }
+  return collapsed;
+}
+
+/**
  * Route preference score (`allocator.py:fit_score`).
  */
-export function fitScore(kind, model, catalog = {}) {
+export function fitScore(kind, model, catalog = {}, options = {}) {
   const routes = catalog.routes || CANONICAL_ROUTES;
   const policy = catalog.policy || DEFAULT_SCORING_POLICY;
+  const peers = catalog.routeFitPeers || ROUTE_FIT_PEERS;
   const route = routes[kind] || {};
-  const canonical = canonicalModel(model, catalog.aliases);
-  const preferred = (route.preferred || []).map((m) => canonicalModel(m, catalog.aliases));
+  const rawCanonical = canonicalModel(model, catalog.aliases);
+  const canonical = peers?.[rawCanonical]
+    ? canonicalModel(peers[rawCanonical], catalog.aliases)
+    : rawCanonical;
+  let preferred = routePreference(route.preferred || [], peers, catalog.aliases);
+  if (
+    preferred[0] === "dot" &&
+    (options.local_only || (options.dotAvailable === false && canonical !== "dot"))
+  ) {
+    preferred = preferred.slice(1);
+  }
 
   if (preferred.length === 0 && !route.capability_fit) {
     return 0.6;
   }
   const place = preferred.indexOf(canonical);
   if (place === -1 && route.capability_fit) {
-    return round4(0.2 + 0.5 * capabilityScore(route.capability_fit, canonical, catalog));
+    return round4(0.2 + 0.5 * capabilityScore(route.capability_fit, rawCanonical, catalog));
   }
   if (route.strict_order) {
     if (place === -1) return 0.3;
@@ -371,13 +397,18 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const floor = policy.ability_floor[taskCtx.difficulty] ?? 3.0;
   const gate = floor + (taskCtx.critical ? policy.critical_headroom : 0.0);
 
-  if (ability < gate) {
-    excluded.push(`ability ${ability.toFixed(2)} below the ${taskCtx.difficulty} floor ${gate.toFixed(2)}`);
+  const routes = catalog.routes || CANONICAL_ROUTES;
+  const route = routes[taskCtx.kind] || {};
+  if (
+    route.restrict_models &&
+    taskCtx.specialist_available &&
+    !(route.preferred || []).map((m) => canonicalModel(m, aliases)).includes(canonical)
+  ) {
+    excluded.push(`not in the allowed model list for ${taskCtx.kind}`);
   }
 
-  // Routine work does not unlock xhigh/max
-  if ((effort === "xhigh" || effort === "max" || effort === "ultra") && taskCtx.difficulty === "routine") {
-    excluded.push(`effort ${effort} is over-provisioned for routine work`);
+  if (ability < gate) {
+    excluded.push(`ability ${ability.toFixed(2)} below the ${taskCtx.difficulty} floor ${gate.toFixed(2)}`);
   }
 
   // Subscription quota, safety margin, opportunity cost & pre-reset sprint evaluation
@@ -395,18 +426,20 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     excluded.push(...(quotaEval.excluded || [`${rawModel}: subscription quota exhausted`]));
   }
 
-  let fit = fitScore(taskCtx.kind, canonical, catalog);
+  let fit = fitScore(taskCtx.kind, canonical, catalog, {
+    local_only: taskCtx.local_only,
+    dotAvailable: taskCtx.dot_available,
+  });
   const visual = info.visual;
   if (
     taskCtx.needs_visual &&
     taskCtx.kind !== "visual_analysis" &&
+    !route.capability_fit &&
     typeof visual === "number"
   ) {
     fit = (fit + visual) / 2.0;
   }
 
-  const routes = catalog.routes || CANONICAL_ROUTES;
-  const route = routes[taskCtx.kind] || {};
   let vfit = 1.0;
   let sfit = 1.0;
   const routeFitRaw = fit;
@@ -450,12 +483,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
             clamp(effortGain / saturationSpan, 0, 1)
         )
       : 0.0;
-  // During a pre-reset surplus sprint (`sprintSunk > 0`), higher effort (`xhigh`/`max`) earns ability credit
-  // up to `ability` so expiring quota can be converted into deeper reasoning quality.
-  const credited =
-    sprintSunk > 0
-      ? Math.min(ability, Math.max(highAbility, target) + sprintSunk * (ability - Math.max(highAbility, target)))
-      : Math.min(ability, Math.max(highAbility, target));
+  const credited = Math.min(ability, Math.max(highAbility, target));
   const shortfall = Math.max(0.0, target - ability);
   const shortfallPenalty = round4((policy.demand?.shortfall_weight ?? 0.35) * shortfall);
 
@@ -532,14 +560,18 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
 
   const resetBonus = Number(quotaEval?.reset_bonus ?? 0.0);
   const opportunityCost = Number(quotaEval?.opportunity_cost ?? 0.0);
+  const freeUsage = Number(quotaEval?.free_usage ?? 0.0);
+  const fastBonus = Number(quotaEval?.fast_bonus ?? 0.0);
 
   const totalScore = round4(
     weights.fit * fit +
       weights.ability * abilityScore +
       continuityBonus +
       qualityBonus +
+      freeUsage +
       resetBonus +
-      sprintQuality -
+      sprintQuality +
+      fastBonus -
       opportunityCost -
       effortPenalty -
       overqualification -
@@ -551,6 +583,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     model: rawModel,
     canonicalModel: canonical,
     effort,
+    fast: Boolean(quotaEval?.fast),
     excluded,
     eligible: excluded.length === 0,
     score: excluded.length === 0 ? totalScore : null,
@@ -562,6 +595,9 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
           opportunity_cost: opportunityCost,
           reset_bonus: resetBonus,
           reset_sunk_weight: sunkWeight,
+          free_usage: freeUsage,
+          fast_bonus: fastBonus,
+          fast: Boolean(quotaEval.fast),
           shortage_probability: quotaEval.shortage_probability ?? 0.0,
           binding_window: quotaEval.binding_window || null,
         }
@@ -576,8 +612,10 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       required_ability: round3(target),
       continuity: continuityBonus,
       quality_bonus: qualityBonus,
+      free_usage: freeUsage,
       reset_bonus: resetBonus,
       sprint_quality: sprintQuality,
+      fast_bonus: fastBonus,
       opportunity_cost: opportunityCost,
       effort_penalty: effortPenalty,
       overqualification,
@@ -603,19 +641,37 @@ export function rankCandidates(profileInput, options = {}) {
 
   const kind = profileKind(profile, policy);
   const difficulty = profileDifficulty(profile, policy);
-  const critical = profile.error_cost >= 3;
-  const readonlyReview = isReadonlyReviewTask(options.objective || "", profile);
-  const highPrecision =
-    !critical &&
-    !profile.needs_gui &&
-    kind !== "computer_use" &&
-    (readonlyReview ||
-      (profile.hallucination_risk >= 3 &&
-        (profile.reasoning_depth >= 3 ||
-          (profile.reasoning_depth >= 2 && ["debug_review", "research_packet"].includes(kind)))));
-  const minimumSufficient = !critical && !highPrecision && profile.reasoning_depth <= 3;
+  const critical = Boolean(options.critical ?? profile.error_cost >= 3);
+  const rawDiv = profile.divergence || 1;
+  const div = (kind === "computer_use" || profile.needs_gui) && rawDiv >= 3 ? 1 : rawDiv;
+  const depth = profile.reasoning_depth;
+  const mechanicalRunbook = Boolean(depth === 1 && profile.code_complexity === 0 && div === 1);
+  const unlockDiffs = policy.effort_unlock_difficulties || ["coupled", "frontier"];
+  const unlocked = Boolean(
+    unlockDiffs.includes(difficulty) ||
+      (critical && !mechanicalRunbook) ||
+      depth >= 3 ||
+      (depth >= 2 && profile.hallucination_risk >= 3 && (div >= 2 || profile.code_complexity >= 2))
+  );
+  const highPrecision = Boolean(
+    unlocked &&
+      (difficulty === "frontier" ||
+        (critical && !mechanicalRunbook) ||
+        (profile.hallucination_risk >= 3 &&
+          (((div >= 2 || profile.code_complexity >= 2) &&
+            !["complex_build_plan", "direction_reasoning"].includes(kind) &&
+            profile.interaction_style !== "advisory") ||
+            (depth >= 3 && profile.code_complexity >= 3))))
+  );
+  const minimumSufficient = Boolean(
+    depth <= 2 &&
+      profile.code_complexity < 3 &&
+      div === 1 &&
+      (profile.error_cost <= 2 || mechanicalRunbook) &&
+      (!critical || mechanicalRunbook)
+  );
 
-  const demand = taskDemand(profile, difficulty, critical, profile.divergence, policy, highPrecision);
+  const demand = taskDemand(profile, difficulty, critical, div, policy, highPrecision);
   const requirements = profileRequirements(profile, policy);
   const sWeights = subjectiveWeights(profile, kind);
 
@@ -640,14 +696,36 @@ export function rankCandidates(profileInput, options = {}) {
       : { _normalized: normalizeQuotaSnapshot(options.quotas, nowMs, policy) }
     : null;
 
+  // Build candidate list from user-configured pool or default catalog
+  const candidateModels =
+    Array.isArray(options.candidateModels) && options.candidateModels.length > 0
+      ? options.candidateModels
+      : Object.keys(models).filter((m) => m !== "deepseek-v4.1-flash-free" && !models[m]?.disabled_by_default);
+
+  const candidateCanonicals = new Set();
+  for (const entry of candidateModels) {
+    const rawM = typeof entry === "string" ? entry.split(":")[0] : entry?.model;
+    if (rawM) candidateCanonicals.add(canonicalModel(rawM, aliases));
+  }
+  const dotAvailable = candidateCanonicals.has("dot");
+  const routeObj = routes[kind] || {};
+  const specialistAvailable = Boolean(
+    routeObj.restrict_models &&
+      (routeObj.preferred || []).some((m) => candidateCanonicals.has(canonicalModel(m, aliases)))
+  );
+
   const taskCtx = {
     profile,
     kind,
     difficulty,
     critical,
+    unlocked,
     high_precision: highPrecision,
     minimum_sufficient: minimumSufficient,
     needs_visual: profile.needs_visual,
+    local_only: Boolean(options.local_only ?? profile.local_only),
+    dot_available: dotAvailable,
+    specialist_available: specialistAvailable,
     demand,
     requirements,
     subjective_weights: sWeights,
@@ -657,14 +735,10 @@ export function rankCandidates(profileInput, options = {}) {
     quotas: normalizedQuotas,
     hours: options.hours,
     metered_ok: options.meteredOk,
+    fast_requested: Boolean(options.fast),
+    urgency: options.urgency || profile.urgency || "unknown",
     now: nowMs,
   };
-
-  // Build candidate list from user-configured pool or default catalog
-  const candidateModels =
-    Array.isArray(options.candidateModels) && options.candidateModels.length > 0
-      ? options.candidateModels
-      : Object.keys(models).filter((m) => m !== "deepseek-v4.1-flash-free" && !models[m]?.disabled_by_default);
 
   const expanded = [];
   for (const entry of candidateModels) {

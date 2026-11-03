@@ -756,6 +756,7 @@ export function evaluateAccountQuotaForModel(
       eligible: true,
       excluded: [],
       opportunity_cost: 0.0,
+      free_usage: Number(policy?.unlimited_bonus ?? 0.18),
       reset_bonus: 0.0,
       reset_sunk_weight: 0.0,
       binding_window: null,

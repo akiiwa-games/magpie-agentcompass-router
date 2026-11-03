@@ -102,6 +102,13 @@ const OBJECTIVE_LOCAL_RUNTIME_RE =
 const LOCAL_MACHINE_RE =
   /(?:[A-Za-z]:[\\/]|~\/|\\\\)|\b(?:working tree|git checkout|local repo|this repo|local daemon|local git)\b/i;
 
+const MULTI_TASK_MARK_RE =
+  /(?:^|\n)\s*(?:#{1,4}\s*)?(?:task|deliverable|part|module|workstream|任务|交付物|模块|工作线)\s*(?:[1-9a-d]|[一二三四五六])\s*[.:：\-—]/gi;
+
+export function multiTaskMarks(objective) {
+  return String(objective || "").match(MULTI_TASK_MARK_RE) || [];
+}
+
 const COUPLED_SIGNALS = [
   "cross-module",
   "multi-module",
@@ -561,7 +568,27 @@ export function inferDivergence(objective, kind = null, style = null) {
   if (DIVERGENT_WORDS.some((w) => text.includes(w))) {
     return 3;
   }
-  if (text.includes("intermittent") || text.includes("unknown cause") || text.includes("hypothes") || text.includes("偶发") || text.includes("未知根因")) {
+  if (
+    [
+      "intermittent",
+      "unknown cause",
+      "hypothes",
+      "race condition",
+      "deadlock",
+      "root cause",
+      "root-cause",
+      "memory leak",
+      "security audit",
+      "invariant audit",
+      "偶发",
+      "未知根因",
+      "死锁",
+      "竞态",
+      "根因",
+      "安全审计",
+      "内存泄漏",
+    ].some((w) => text.includes(w))
+  ) {
     return 2;
   }
   return 1;
@@ -578,7 +605,7 @@ export function inferReasoningDepth(objective, kind, explicitDifficulty = null) 
   if (COUPLED_SIGNALS.some((w) => text.includes(w)) || kind === "complex_build_plan" || kind === "direction_reasoning") {
     return 3;
   }
-  if (HARD_BY_DEFAULT.includes(kind)) {
+  if (HARD_BY_DEFAULT.includes(kind) || kind === "self_contained_code") {
     return 2;
   }
   return 1;
@@ -669,7 +696,23 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
   const localOnly =
     needs.local_only !== undefined ? Boolean(needs.local_only) : Boolean(localHit || implies.local_only);
 
-  const expectedHours = depth === 1 ? 0.25 : depth === 2 ? 0.8 : depth === 3 ? 2.0 : 3.5;
+  const expectedHours =
+    Number.isFinite(Number(task.expected_hours ?? task.hours)) && Number(task.expected_hours ?? task.hours) > 0
+      ? Number(task.expected_hours ?? task.hours)
+      : depth === 1
+        ? 0.4
+        : depth === 2
+          ? 1.0
+          : depth === 3
+            ? 2.0
+            : 3.5;
+
+  const marks = multiTaskMarks(objective);
+  const multiTask =
+    task.multi_task !== undefined ? Boolean(task.multi_task) : marks.length >= 2;
+  const taskCount =
+    task.task_count ||
+    (!multiTask ? "1" : marks.length === 2 ? "2" : marks.length === 3 ? "3" : ">3");
 
   return validateProfile({
     work_kind: kind,
@@ -687,8 +730,8 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     hours_confidence: "medium",
     urgency: "unknown",
     reason: `deterministic profile: work_kind=${kind}, depth=${depth}, code=${code}, scale=${context}, div=${divergence}`,
-    multi_task: false,
-    task_count: "1",
+    multi_task: multiTask,
+    task_count: taskCount,
   });
 }
 
