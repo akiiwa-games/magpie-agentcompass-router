@@ -1213,10 +1213,6 @@ export const MODEL_ALIASES = {
 };
 
 export const EFFORT_CURVES = {
-  "deepseek-v4.1-flash-free": {
-    ability: { default: 0.0, low: -0.2, high: 0.0, max: 0.1 },
-    burn: { default: 0.7, low: 0.35, high: 0.7, max: 1.4 },
-  },
   "claude-opus-5-5": {
     ability: { low: -1.2, medium: -0.3, high: 0.0, xhigh: 0.2, max: 0.4 },
     burn: { low: 0.21, medium: 0.52, high: 0.7, xhigh: 1.33, max: 2.3 },

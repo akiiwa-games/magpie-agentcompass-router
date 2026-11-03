@@ -366,8 +366,13 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
 
   const scorerCfg =
     pluginOptions.scorer && typeof pluginOptions.scorer === "object" ? pluginOptions.scorer : {};
+  const allowExternalScorer =
+    pluginOptions.allowExternalScorer === true ||
+    scorerCfg.allowExternalScorer === true ||
+    typeof pluginOptions.fetch === "function";
 
   const { profile, meta } = await scoreTaskLive(taskFacts, {
+    allowExternalScorer,
     scorerType: pluginOptions.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
     scorerModel: pluginOptions.scorerModel || scorerCfg.model,
     scorerBaseUrl: pluginOptions.scorerBaseUrl || scorerCfg.baseUrl,
@@ -481,16 +486,23 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
 }
 
 /**
- * Default OpenCode / Magpie Provider Plugin export (`src/index.js`).
+ * Default Magpie Gateway / Middleware Plugin export (`src/index.js`).
+ * By default, does not register a fake `auth` or `provider` entry in `cfg.provider`
+ * so Magpie treats the package purely as a gateway hook + middleware plugin.
  */
 export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
+  if (pluginOptions.enableDecisionProvider !== true) {
+    return {
+      async config() {},
+    };
+  }
+
   return {
     async config(cfg) {
       cfg.provider = cfg.provider || {};
       cfg.provider[PROVIDER_ID] = {
         name: "AgentCompass",
         icon: AGENTCOMPASS_ICON_DATA_URI,
-        api: "https://agentcompass.local/v1",
         decide: true,
         models: {
           [DECISION_MODEL_ID]: {
@@ -504,86 +516,24 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
         },
       };
     },
-    auth: {
-      provider: PROVIDER_ID,
-      icon: AGENTCOMPASS_ICON_DATA_URI,
-      single: true,
-      options: [
-        {
-          key: "prefer_local_heuristic",
-          label: "Prefer Local Deterministic Heuristic Profiler",
-          description:
-            "Always use the <1ms local deterministic 10D profiler without calling an external System-One scorer.",
-          default: false,
-          labels: { zh: "优先使用本地确定性 10 维启发式画像" },
-          descriptions: {
-            zh: "始终使用 <1ms 零延迟的本地确定性 10 维画像与 Model DNA 选型，不调用外部评分接口。",
-          },
-        },
-        {
-          key: "live_scorer",
-          label: "Use Live System-One LLM Scorer",
-          description:
-            "Call the configured fast LLM or Jev endpoint before falling back to the deterministic profiler.",
-          default: false,
-          labels: { zh: "启用实时 System-One 评分模型" },
-          descriptions: {
-            zh: "优先调用配置的轻量级评分模型或 Jev 接口生成 10 维任务画像，超时自动回退至确定性算法。",
-          },
-        },
-      ],
-      methods: [
-        {
-          type: "api",
-          keyless: true,
-          label: "Enable AgentCompass",
-          async authorize() {
-            return {
-              type: "success",
-              key: "agentcompass-local",
-              accountId: "agentcompass-core",
-            };
-          },
-        },
-      ],
-      async loader(_getAuth, _provider) {
-        return {
-          baseURL: "https://agentcompass.local/v1",
-          apiKey: "agentcompass-local",
-          async fetch(reqInput, init) {
-            const rawBody = init?.body
-              ? typeof init.body === "string"
-                ? init.body
-                : new TextDecoder().decode(init.body)
-              : reqInput instanceof Request
-                ? await reqInput.text()
-                : "{}";
-            let parsed = {};
-            try {
-              parsed = JSON.parse(rawBody);
-            } catch {}
+    async fetch(reqInput, init) {
+      const rawBody = init?.body
+        ? typeof init.body === "string"
+          ? init.body
+          : new TextDecoder().decode(init.body)
+        : reqInput instanceof Request
+          ? await reqInput.text()
+          : "{}";
+      let parsed = {};
+      try {
+        parsed = JSON.parse(rawBody);
+      } catch {}
 
-            const preferHeuristic =
-              input?.magpie?.option?.(PROVIDER_ID, "prefer_local_heuristic") === true ||
-              pluginOptions.prefer_local_heuristic === true;
-            const useLive =
-              !preferHeuristic &&
-              (input?.magpie?.option?.(PROVIDER_ID, "live_scorer") === true ||
-                Boolean(pluginOptions.scorerType && pluginOptions.scorerType !== "heuristic"));
-
-            const effectiveOpts = {
-              ...pluginOptions,
-              scorerType: useLive ? pluginOptions.scorerType || "openai_compatible" : "heuristic",
-            };
-
-            const reply = await handleSystemOneRequest(parsed, effectiveOpts);
-            return new Response(JSON.stringify(reply), {
-              status: 200,
-              headers: { "Content-Type": "application/json" },
-            });
-          },
-        };
-      },
+      const reply = await handleSystemOneRequest(parsed, pluginOptions);
+      return new Response(JSON.stringify(reply), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
     },
   };
 }

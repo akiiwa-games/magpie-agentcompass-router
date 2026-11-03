@@ -231,8 +231,10 @@ function extractLastProfileJson(text) {
 }
 
 /**
- * Score a task using the configured System-One backend with bounded timeout and
- * automatic fallback to the deterministic `inferTaskProfile` twin.
+ * Score a task using the deterministic in-process `inferTaskProfile` twin by default.
+ * External System-One HTTP scoring is strictly opt-in and only runs when the caller
+ * explicitly sets `allowExternalScorer: true` (or injects a test `fetch`) AND provides
+ * an explicit `scorerBaseUrl` / `jevBaseUrl`.
  */
 export async function scoreTaskLive(task, options = {}) {
   const started = Date.now();
@@ -248,7 +250,14 @@ export async function scoreTaskLive(task, options = {}) {
     }
   }
 
-  if (scorerType === "heuristic" || !task?.objective?.trim()) {
+  const rawBaseUrl =
+    scorerType === "jev"
+      ? String(options.jevBaseUrl || options.scorerBaseUrl || options.scorerUrl || "").trim()
+      : String(options.scorerBaseUrl || options.scorerUrl || "").trim();
+  const hasInjectedFetch = typeof options.fetch === "function";
+  const externalAllowed = Boolean(options.allowExternalScorer === true || hasInjectedFetch);
+
+  if (scorerType === "heuristic" || !task?.objective?.trim() || !externalAllowed || !rawBaseUrl) {
     const profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
     const meta = {
       source: "heuristic_twin",
@@ -259,8 +268,7 @@ export async function scoreTaskLive(task, options = {}) {
     return { profile, meta };
   }
 
-  const envTimeout = Number(globalThis.process?.env?.AGENTCOMPASS_SCORER_TIMEOUT_MS) || 0;
-  const timeoutMs = Math.min(Math.max(Number(options.scorerTimeoutMs) || envTimeout || 6500, 100), 55000);
+  const timeoutMs = Math.min(Math.max(Number(options.scorerTimeoutMs) || 6500, 100), 55000);
   const fetchFn = options.fetch || globalThis.fetch;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
@@ -269,15 +277,14 @@ export async function scoreTaskLive(task, options = {}) {
   try {
     let profile;
     let modelUsed = options.scorerModel || "";
+    const baseUrl = rawBaseUrl.replace(/\/+$/, "");
 
     if (scorerType === "jev") {
-      const baseUrl = String(options.jevBaseUrl || "https://api.typesafe.ai").replace(/\/+$/, "");
       const url = baseUrl.endsWith("/v1/systemone") ? baseUrl : `${baseUrl}/v1/systemone`;
       modelUsed = modelUsed || "jev-latest";
       const headers = {
         "Content-Type": "application/json",
         Accept: "application/json",
-        "User-Agent": "Magpie-Router/1.0",
       };
       if (options.jevApiKey) {
         headers.Authorization = `Bearer ${options.jevApiKey}`;
@@ -294,7 +301,6 @@ export async function scoreTaskLive(task, options = {}) {
       const data = await res.json();
       profile = parseJevScorerAnswer(data, task);
     } else if (scorerType === "openai_compatible") {
-      const baseUrl = String(options.scorerBaseUrl || "http://127.0.0.1:4096").replace(/\/+$/, "");
       const url = baseUrl.endsWith("/chat/completions")
         ? baseUrl
         : baseUrl.endsWith("/v1")
@@ -304,8 +310,6 @@ export async function scoreTaskLive(task, options = {}) {
       const headers = {
         "Content-Type": "application/json",
         Accept: "application/json",
-        // Use Magpie's RouterAgent header so Magpie's gateway never triggers recursive classification!
-        "User-Agent": "Magpie-Router/1.0",
       };
       if (options.scorerApiKey) {
         headers.Authorization = `Bearer ${options.scorerApiKey}`;

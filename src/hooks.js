@@ -36,30 +36,117 @@ import { scoreTaskLive } from "./scorer-live.js";
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
 export const DEFAULT_VIRTUAL_MODELS = [
-  "auto",
   "agentcompass",
   "agentcompass/auto",
-  "intent",
-  "group/intent",
-  "group/agentcompass",
+  "agentcompass/intent",
+  "agentcompass/system-one-0.5",
 ];
+
+function stripEffortSuffix(rawModel) {
+  if (!rawModel || typeof rawModel !== "string") return "";
+  const trimmed = rawModel.trim();
+  const colonIdx = trimmed.lastIndexOf(":");
+  if (colonIdx > 0) {
+    const suffix = trimmed.slice(colonIdx + 1).toLowerCase();
+    if (["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"].includes(suffix)) {
+      return trimmed.slice(0, colonIdx);
+    }
+  }
+  return trimmed;
+}
+
+export function isVirtualModelName(model, options = {}) {
+  if (!model || typeof model !== "string") return false;
+  const clean = stripEffortSuffix(model).toLowerCase();
+  if (clean === "agentcompass" || clean.startsWith("agentcompass/")) {
+    return true;
+  }
+  const triggerList = options.triggerModels || options.routeModelTriggers;
+  if (Array.isArray(triggerList) && triggerList.length > 0) {
+    return triggerList.some((m) => String(m).trim().toLowerCase() === clean);
+  }
+  return DEFAULT_VIRTUAL_MODELS.includes(clean);
+}
+
+export function extractModelList(source) {
+  if (!source) return null;
+  if (Array.isArray(source)) {
+    const list = source
+      .map((item) => {
+        if (typeof item === "string") return item.trim();
+        if (item && typeof item === "object") {
+          return String(item.id || item.name || item.model || "").trim();
+        }
+        return "";
+      })
+      .filter(Boolean);
+    return list.length > 0 ? list : null;
+  }
+  if (typeof source === "object") {
+    const keys = Object.keys(source)
+      .map((k) => k.trim())
+      .filter(Boolean);
+    return keys.length > 0 ? keys : null;
+  }
+  return null;
+}
+
+export function resolveCandidateModels(body, ctx = {}, options = {}) {
+  const explicit =
+    extractModelList(options.candidateModels) ||
+    extractModelList(options.allowedModels) ||
+    extractModelList(options.availableModels) ||
+    extractModelList(options.models) ||
+    extractModelList(ctx?.models) ||
+    extractModelList(ctx?.availableModels) ||
+    extractModelList(body?.available_models) ||
+    extractModelList(ctx?.provider?.models) ||
+    extractModelList(options.modelMap);
+
+  if (explicit) {
+    return { candidateModels: explicit, hasExplicitCandidates: true, canRewriteModel: true };
+  }
+
+  if (options.allowUnconstrainedCatalog === true) {
+    return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: true };
+  }
+
+  const rawModel = stripEffortSuffix(body?.model || ctx?.model || "");
+  if (rawModel && !isVirtualModelName(rawModel, options)) {
+    return {
+      candidateModels: [rawModel],
+      hasExplicitCandidates: false,
+      canRewriteModel: true,
+    };
+  }
+
+  const fallback = String(options.defaultModel || options.fallbackModel || "").trim();
+  if (fallback) {
+    return {
+      candidateModels: [fallback],
+      hasExplicitCandidates: false,
+      canRewriteModel: true,
+    };
+  }
+
+  return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: false };
+}
 
 /**
  * Determine whether this request should be routed by AgentCompass.
+ * By default, only claims the `agentcompass` / `agentcompass/*` namespace.
  */
 export function shouldRouteRequest(model, options = {}) {
   if (!model || typeof model !== "string") return false;
   if (options.routeAllModels === true) return true;
-  const clean = model.trim().toLowerCase();
-  const triggerList = options.triggerModels || options.routeModelTriggers;
-  const triggers =
-    Array.isArray(triggerList) && triggerList.length > 0
-      ? triggerList.map((m) => String(m).trim().toLowerCase())
-      : DEFAULT_VIRTUAL_MODELS;
-  return triggers.includes(clean) || clean.startsWith("agentcompass/");
+  return isVirtualModelName(model, options);
 }
 
 export async function onRequest(body, ctx = {}) {
+  if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
+    delete body[ROUTE_CARRIER_KEY];
+  }
+
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     ctx.report?.("skipped");
     return undefined;
@@ -78,7 +165,11 @@ export async function onRequest(body, ctx = {}) {
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const sessionKey = facts.sessionKey || computeSessionKey(body, ctx);
   const sessionState = sessionKey ? store.get(sessionKey, now) : null;
-  const candidateModels = options.candidateModels || options.allowedModels;
+  const { candidateModels, hasExplicitCandidates, canRewriteModel } = resolveCandidateModels(
+    body,
+    ctx,
+    options
+  );
   const liveQuotas = loadLiveQuotas(options, now);
 
   const cont = evaluateProviderContinuation(facts, sessionState, {
@@ -131,6 +222,8 @@ export async function onRequest(body, ctx = {}) {
       canonicalModel: canonical,
       targetEffort: heldEffort,
       modelWithEffort: `${cont.model}:${heldEffort}`,
+      canRewriteModel,
+      hasExplicitCandidates,
       workKind: sessionState?.workKind || "general_implementation",
       difficulty: sessionState?.difficulty || "routine",
       requiredAbility: null,
@@ -155,17 +248,20 @@ export async function onRequest(body, ctx = {}) {
       topCandidates: [],
     };
 
-    const next = {
-      ...body,
-      [ROUTE_CARRIER_KEY]: carrier,
-    };
-
     const payloadBytes = JSON.stringify(carrier).length;
     ctx.state = ctx.state || {};
     ctx.state.sessionKey = sessionKey;
     ctx.state.route = carrier;
+    ctx.state.agentcompass = carrier;
     ctx.report?.("ready", payloadBytes);
-    return next;
+
+    if (options.useRouteCarrier === true) {
+      return {
+        ...body,
+        [ROUTE_CARRIER_KEY]: carrier,
+      };
+    }
+    return undefined;
   }
 
   if (!facts.objective) {
@@ -173,33 +269,26 @@ export async function onRequest(body, ctx = {}) {
     return undefined;
   }
 
-  const envScorerUrl = globalThis.process?.env?.AGENTCOMPASS_SCORER_URL || "";
-  const envScorerTimeout = Number(globalThis.process?.env?.AGENTCOMPASS_SCORER_TIMEOUT_MS) || 0;
   const preferHeuristic =
-    options.prefer_local_heuristic === true ||
-    scorerCfg.prefer_local_heuristic === true ||
-    globalThis.process?.env?.AGENTCOMPASS_PREFER_LOCAL_HEURISTIC === "1";
+    options.prefer_local_heuristic === true || scorerCfg.prefer_local_heuristic === true;
+  const allowExternalScorer =
+    options.allowExternalScorer === true ||
+    scorerCfg.allowExternalScorer === true ||
+    typeof options.fetch === "function";
 
   const { profile, meta } = await scoreTaskLive(facts, {
+    allowExternalScorer,
     scorerType: preferHeuristic
       ? "heuristic"
-      : options.scorerType ||
-        scorerCfg.kind ||
-        scorerCfg.type ||
-        (envScorerUrl ? "openai_compatible" : "heuristic"),
-    scorerModel:
-      options.scorerModel || scorerCfg.model || globalThis.process?.env?.AGENTCOMPASS_SCORER_MODEL,
-    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl || envScorerUrl,
-    scorerApiKey:
-      options.scorerApiKey ||
-      scorerCfg.apiKey ||
-      globalThis.process?.env?.AGENTCOMPASS_SCORER_API_KEY,
+      : options.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
+    scorerModel: options.scorerModel || scorerCfg.model,
+    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl,
+    scorerApiKey: options.scorerApiKey || scorerCfg.apiKey,
     jevBaseUrl: options.jevBaseUrl || scorerCfg.jevBaseUrl,
     jevApiKey: options.jevApiKey || scorerCfg.jevApiKey,
     scorerTimeoutMs:
       options.scorerTimeoutMs ||
       scorerCfg.timeoutMs ||
-      envScorerTimeout ||
       Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
     useCache: options.useCache !== false && scorerCfg.useCache !== false,
     signal: ctx.signal,
@@ -283,14 +372,14 @@ export async function onRequest(body, ctx = {}) {
     );
   }
 
-  // Attach transient routing carrier for Stage 2 (`src/middleware.js` in `moejs`).
-  // Never mutate `model`, `tools`, `tool_choice`, `function_call`, `functions`, `toolConfig`, or `stream` here!
   const carrier = {
     v: 1,
     targetModel: decision.targetModel,
     canonicalModel: decision.canonicalModel,
     targetEffort: finalEffort,
     modelWithEffort: `${decision.targetModel}:${finalEffort}`,
+    canRewriteModel,
+    hasExplicitCandidates,
     selectedAccount: decision.selectedAccount || null,
     quota: decision.quota || null,
     workKind: decision.workKind,
@@ -313,17 +402,20 @@ export async function onRequest(body, ctx = {}) {
     topCandidates: decision.topCandidates,
   };
 
-  const next = {
-    ...body,
-    [ROUTE_CARRIER_KEY]: carrier,
-  };
-
   const payloadBytes = JSON.stringify(carrier).length;
   ctx.state = ctx.state || {};
   ctx.state.sessionKey = sessionKey;
   ctx.state.route = carrier;
+  ctx.state.agentcompass = carrier;
   ctx.report?.("ready", payloadBytes);
-  return next;
+
+  if (options.useRouteCarrier === true) {
+    return {
+      ...body,
+      [ROUTE_CARRIER_KEY]: carrier,
+    };
+  }
+  return undefined;
 }
 
 export async function onResponse(reply, ctx = {}) {

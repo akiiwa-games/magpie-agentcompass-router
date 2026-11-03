@@ -62,15 +62,15 @@ flowchart TB
 
 我们通过分析 Magpie 的请求管线（`internal/gateway/middleware.go:serveAgent` 与 `internal/gateway/decide.go`），设计了**双模式长预算架构**，无需修改 Magpie 任何一行源码：
 
-#### 模式 A：两阶段接力直改模型（`magpie.hooks` [Bun, 10,000 ms] $\rightarrow$ `magpie.middleware` [`moejs`, 250 ms]）
+#### 模式 A：网关级意图路由与自动 Effort 注入（`magpie.hooks` [Bun] + `magpie.middleware` [`moejs`]）
 在 `internal/gateway/middleware.go:serveAgent` 中：
 1. **第一阶段（`src/hooks.js`，Bun 运行时，最长 `10,000 ms` 预算）**：
-   - Magpie 先执行 `gatewayHooks`（第 39 行），默认超时 `1200 ms`，可通过插件配置或环境变量 `AGENTCOMPASS_GATEWAY_TIMEOUT_MS=8000` 提升至 **`10,000 ms`（10 秒）**！
-   - `src/hooks.js` 在完整的 Bun 异步环境中调用外部或本地 System-One 模型（支持 Jev `/v1/systemone`、任意 OpenAI 兼容快模型、以及毫秒级确定性启发式兜底），生成 [AgentCompass](https://github.com/akiiwa-games/AgentCompass) 的 **10 维结构化任务画像**，并运行完整的 `selectBestRoute()` 算法算出最优 `<targetModel>:<targetEffort>`。
-   - **绕过 `host.js:1411` 限制**：Magpie 的 `host.js` 禁止 `hooks` 直接修改 `body.model` / `tools` / `stream`，但允许写入自定义元数据字段。因此 `hooks.js` 将选型结果写入 `body.__agentcompass_route`。
+   - 默认使用 `< 1 ms` 零网络调用的本地确定性 10 维画像器（`inferTaskProfile`），仅在用户显式配置 `allowExternalScorer: true` 及 `scorer.baseUrl` 时才发起外部评分请求。
+   - 遵循 Magpie 原生会话粘性契约（`evaluateProviderContinuation`），在轮内工具调用、KV 缓存温热或短追问时保持当前模型与单调思考档位（`keepsEffort`），默认不向请求体注入任何私有字段（通过 `ctx.state` 维护上下文）。
 2. **第二阶段（`src/middleware.js`，`moejs` 运行时，`< 0.2 ms` 完成）**：
-   - 紧接着（第 42 行），Magpie 执行 `gwmw.Agent`（`src/middleware.js`）。
-   - `middleware.js` 读取并删除 `body.__agentcompass_route`，直接将 `body.model` 改写为 `<targetModel>:<targetEffort>`（Magpie `gateway.go:1560` 的 `askedAt()` 原生支持 `<model>:<effort>` 语法并自动设置请求思考档位！）。
+   - 默认仅拦截 `agentcompass` 命名空间请求（`agentcompass`、`agentcompass/auto`、`agentcompass/intent`、`agentcompass/System-One-0.5`），绝不劫持 Magpie 原生 `auto`、`intent` 或 `group/*` 路由组请求。
+   - 在已配置 `candidateModels` / `availableModels` / `allowedModels`（或 `modelMap`）的网关可用模型池内选出最优 `<targetModel>:<targetEffort>`；若未配置可用模型列表且请求为具体模型名，则保持原模型不变、仅自动计算并注入最佳思考档位（`reasoning_effort` / `reasoning.effort` / `output_config.effort`）。
+   - `onAccount` 原生适配 Magpie `internal/middleware/account.go` 的 `{ref, provider, name, kind, model}` 上下文结构。
 
 #### 模式 B：原生 Routing Group 决策 Provider（`decide: true` / `/v1/systemone`，8,000 ms – 60,000 ms 预算）
 - `src/index.js` 同时注册了一个拥有 `decide: true` 能力的 Magpie Provider（`agentcompass`，显示名称 `AgentCompass`）及决策模型 `agentcompass-systemone`（`decides: true`）。
@@ -126,8 +126,8 @@ $$\text{pure\_intent\_score}(m, e) = \text{fit\_score}(m, e) - \text{overqual\_p
   6. `why: "cold"` / `why: "compacted"` — 闲置超过缓存 TTL 或刚执行 `/compact`（Token 骤降 >50%），重新评估并允许在简单日常任务上顺滑降档省钱。
 
 ### 4. 5h / 7d 订阅配额机会成本、临期余量冲刺（Pre-Reset Sprint）与账号池排序（[`src/quota.js`](./src/quota.js) & [`src/quota-loader.js`](./src/quota-loader.js)）
-本插件不仅匹配模型能力，还完整移植了 AgentCompass `allocator.py` 的**订阅窗口经济学模型**，并与 Magpie 的实时配额遥测（`quotas.json`、`/v1/magpie/quotas` 及 `strategies` 的 `Seat` 结构）深度打通：
-- **自动读取 Magpie 实时配额（`quotas.json`）**：在 Bun 阶段自动发现并读取 Magpie 配置目录下的 `quotas.json`（带 5s `mtime` 缓存，零额外 I/O 开销），支持 `<provider>/<account>` 多账号、多窗口（`5h` / `7d` / `monthly`）与专属模型窗口（`opus` / `sonnet` / `gemini-weekly` / `3p-weekly`）。
+本插件不仅匹配模型能力，还完整移植了 AgentCompass `allocator.py` 的**订阅窗口经济学模型**，并与 Magpie 的 `strategies` `Seat` 结构（`{ key, account, known, learns, used, soon, pace, weight, resting, tokens }`）及显式配额配置打通：
+- **显式配额读取（零隐式目录扫描）**：支持通过 `options.quotas`（内存对象）或显式指定 `options.quotasPath` / `options.quotaFile` 传入配额快照，默认不扫描父目录或读取宿主内部文件。
 - **安全水位硬门禁（Safety Margin & Short-Window Floor）**：
   - 当某个订阅窗口剩余配额低于安全底线（默认长窗口 `safety_margin_pct = 5%`、短窗口 `short_window_floor_pct = 10%`）或已触发 `rate_limited` 时，自动剔除该候选，切换到配额健康的 Provider。
   - 若当前粘性会话所在 Provider 耗尽配额，即使 KV 缓存仍温热也会立即触发 `why: "quota_exhausted"`（对齐 Magpie `affinity.go` 的 `spent`），无缝故障转移至有余量的订阅。
@@ -169,51 +169,38 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\agentcompass" -Targ
 
 ---
 
-### 2. 配置方式一（推荐）：模式 A —— 两阶段接力直改 `<model>:<effort>`（10s 时间预算）
+### 2. 配置方式：网关中间件与账号池排序策略
 
-在模式 A 下，客户端只需发送虚拟模型名（如 `model: "auto"`、`model: "agentcompass"`，或开启 `routeAllModels: true` 拦截全部请求），插件就会在网关层自动计算最佳 `<model>:<effort>` 并转发给对应上游。
+在默认配置下，客户端只需发送 `agentcompass` 命名空间模型名（如 `model: "agentcompass"` 或 `model: "agentcompass/auto"`，或显式开启 `routeAllModels: true`），插件就会在网关层从你配置的 `candidateModels` / `availableModels` / `allowedModels` 中自动计算最佳 `<model>:<effort>` 并转发给对应上游。
 
-通过 `magpie plugin options` 或在 `~/.magpie/config.json` 中设置：
+通过 `magpie plugin options` 或在配置文件中设置：
 
 ```json
 {
   "plugins": {
     "agentcompass": {
       "gatewayTimeoutMs": 8000,
-      "routeModelTriggers": ["auto", "agentcompass", "compass", "smart", "default"],
+      "routeModelTriggers": ["agentcompass", "agentcompass/auto", "agentcompass/intent"],
       "routeAllModels": false,
-      "allowedModels": [
-        "claude-opus-5-5",
-        "claude-sonnet-5-5",
-        "claude-haiku-5-5",
-        "gpt-6-astra",
-        "gpt-6.1-sol",
-        "gpt-6.1-terra",
-        "gpt-6-luna",
-        "gemini-4-argon-high",
-        "gemini-3.8-flash-high"
-      ],
-      "modelMap": {
-        "claude-opus-5-5": "claude-opus-4-6",
-        "claude-sonnet-5-5": "claude-sonnet-4-6",
-        "claude-haiku-5-5": "claude-haiku-4-5"
-      },
-      "scorer": {
-        "kind": "openai_compatible",
-        "baseUrl": "http://127.0.0.1:3000/v1",
-        "apiKey": "your-key-or-magpie-local-token",
-        "model": "gpt-5.4-nano",
-        "timeoutMs": 6500
-      }
+      "availableModels": [
+        "claude-opus-4-6",
+        "claude-sonnet-4-6",
+        "claude-haiku-4-5",
+        "gpt-5.4",
+        "gpt-5.3-codex",
+        "gemini-2.5-pro",
+        "gemini-2.5-flash"
+      ]
     }
   }
 }
 ```
 
 > **提示**：
-> - 如果不配置外部 `scorer.baseUrl`，插件会默认使用 `< 1 ms` 零延迟的确定性 10 维启发式画像器（`kind: "heuristic"`），同样运行完整的 10D × (7D+3D) 选模算法。
-> - 如果将 `scorer.baseUrl` 指向 Magpie 自身（如 `http://127.0.0.1:3000/v1`），插件会自动附带 `User-Agent: Magpie-Router/1.0` 请求头，触发 Magpie `rules.go:196` 的内置防递归保护，绝不会产生死循环！
-> - `modelMap` 可将 AgentCompass 标准模型 ID 映射为你 Magpie 网关里实际配置的模型 ID。
+> - 插件默认 100% 使用 `< 1 ms` 零网络请求的本地确定性 10 维启发式画像器（`kind: "heuristic"`），绝不会将用户 Prompt 发送到任何外部地址。
+> - 如需启用外部 System-One 评分接口，必须同时显式配置 `"allowExternalScorer": true` 与 `"scorer": { "kind": "openai_compatible", "baseUrl": "..." }`。
+> - 若未配置 `availableModels` / `candidateModels` / `allowedModels`，插件不会把请求改写为网关中不存在的内置目录模型名：对于具体模型请求仅自动计算并注入思考档位（Effort），对于 `agentcompass/*` 虚拟模型则使用 `defaultModel` / `fallbackModel` 或在 `onProvider` 中按当前 Provider 可用模型选型。
+> - `onAccount(account, ctx)` 原生匹配 Magpie `internal/middleware/account.go` 传入的 `{ref, provider, name, kind, model}` 字段（可通过 `accountsByWorkKind` 按 `ref`、`name`、`provider` 或 `${provider}/${name}` 过滤账号）。
 
 ---
 
@@ -257,7 +244,7 @@ node --test test/router.test.mjs
 | :--- | :--- | :--- | :--- | :--- |
 | **Scenario 1: CLI 插件生命周期与元数据契约** | `magpie plugin add` · `magpie plugin login agentcompass` · `magpie plugin list` | `agentcompass (AgentCompass, 1 models) signed in` · `routings agentcompass/agentcompass, agentcompass/agentcompass-pure` | `magpie.name = "AgentCompass"` 与 `magpie.icon` (`data:image/svg+xml;base64,...`) 校验通过 | ✅ PASS |
 | **Scenario 2: 插件市场 (`registry.json`) 与 Web/GUI 管理 API** | `magpie web` · `GET /api/plugins/listings` · `GET /api/plugins` · `GET /api/plugins/page` · `POST /api/plugins/off` & `options` | 市场解析 `package: "agentcompass"`；图标落盘为 `file:a100c6af45032ded.svg`；README 渲染 `16,299 B`；`Off: true` 时请求保持原模型 `gpt-6-luna` 不改写 | 完整覆盖 `internal/plugin/market.go`、`github.go` 与 `internal/gui/plugins.go` | ✅ PASS |
-| **Scenario 3: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1730 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 载体被剥离，反递归头 `Magpie-Router/1.0` 生效 | ✅ PASS |
+| **Scenario 3: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="agentcompass/auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1730 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 私有字段零残留 | ✅ PASS |
 | **Scenario 4: 5 维 Model DNA 区分度（发散创意 vs 独立模块编码 vs 日常批量降级）** | **Mode A** · `/v1/chat/completions` & `/v1/responses` | 发散脑暴 $\rightarrow$ `gemini-4-argon-high:high`<br/>独立模块 (`/v1/responses`) $\rightarrow$ `gpt-6.1-sol:high`<br/>机械批量重命名 $\rightarrow$ `gemini-3.8-flash-high:high` | `divergence`、`module_precision` 与 `overqualification` 过配惩罚同时生效 | ✅ PASS |
 | **Scenario 5: Anthropic `/v1/messages` 协议与 SSE 流式 (`stream: true`)** | **Mode A** · `POST /v1/messages` & `POST /v1/chat/completions` (`stream: true`) | `/v1/messages` $\rightarrow$ `claude-opus-5-5` (`type="message"`)<br/>SSE `stream: true` $\rightarrow$ `gpt-6.1-sol:high` (`text/event-stream` + `[DONE]`) | 流式请求与 Anthropic 协议均正常路由且不触发 `host.js:1411` 字段回滚 | ✅ PASS |
 | **Scenario 6: 故障演练与优雅降级（HTTP 500 & 评分超时）** | **Mode A** · 远程评分器注入 `HTTP 500` 与 `2000ms > 300ms` 超时 | `HTTP 500` $\rightarrow$ `claude-opus-5-5`<br/>`Timeout (368ms)` $\rightarrow$ `gemini-4-argon-high` | 远程 System-One 异常或超时时自动无缝回退至 `<1ms` 本地确定性 `profileTask`，网关请求零报错 | ✅ PASS |

@@ -32,17 +32,12 @@
   },
   "keywords": [
     "magpie",
-    "magpie-plugin",
-    "opencode",
-    "opencode-plugin",
-    "provider",
-    "auth",
-    "agentcompass",
-    "intent-routing",
-    "llm-router",
-    "system-one",
-    "cindy",
-    "paseo"
+    "magpie-middleware",
+    "magpie-routing",
+    "routing",
+    "load-balancing",
+    "llm-gateway",
+    "agentcompass"
   ],
   "homepage": "https://github.com/akiiwa-games/AgentCompass",
   "repository": {

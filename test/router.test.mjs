@@ -42,6 +42,7 @@ import {
 } from "../src/index.js";
 import {
   onAccount as mwOnAccount,
+  onProvider as mwOnProvider,
   onRequest as mwOnRequest,
   onResponse as mwOnResponse,
   onUsage as mwOnUsage,
@@ -142,9 +143,9 @@ test("1.6 GUI computer-use task routes to gpt-6-astra (#1 GUI grounding) and exc
     assert.equal(visualReview.needs_gui, false);
 });
 
-test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moejs` 250ms]) bypasses `host.js:1411` model rollback", async () => {
+test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moejs` 250ms]) bypasses `host.js:1411` model rollback without polluting `body`", async () => {
   const originalBody = {
-    model: "auto",
+    model: "agentcompass/auto",
     stream: true,
     messages: [
       {
@@ -173,53 +174,54 @@ test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moe
   };
 
   // Stage 1: Run Async Bun Hook (`src/hooks.js`)
-  const afterHook = await hookOnRequest(structuredClone(originalBody), hookCtx);
-  assert.ok(afterHook, "hookOnRequest should return a body with carrier");
+  const bodyClone = structuredClone(originalBody);
+  const afterHook = await hookOnRequest(bodyClone, hookCtx);
+  assert.equal(afterHook, undefined, "hookOnRequest must not mutate or replace body by default");
+  assert.equal(ROUTE_CARRIER_KEY in bodyClone, false, "hookOnRequest must never inject __agentcompass_route by default");
   assert.equal(reportedOutcome, "ready");
   assert.ok(reportedBytes > 0);
-
-  // Verify `host.js:1411` invariant: tools, tool_choice, function_call, functions, toolConfig, model, stream MUST be identical!
-  for (const key of ["tools", "tool_choice", "function_call", "functions", "toolConfig", "model", "stream"]) {
-    assert.equal(
-      JSON.stringify(afterHook[key]),
-      JSON.stringify(originalBody[key]),
-      `host.js:1411 invariant violated on key: ${key}`,
-    );
-  }
-  assert.ok(afterHook[ROUTE_CARRIER_KEY], "carrier __agentcompass_route must be present after Stage 1");
-  assert.equal(afterHook[ROUTE_CARRIER_KEY].targetModel, "claude-opus-5-5");
+  assert.ok(hookCtx.state.route, "route decision must be stored in ctx.state.route");
+  assert.equal(hookCtx.state.route.targetModel, "claude-opus-5-5");
 
   // Stage 2: Run Sync `moejs` Middleware (`src/middleware.js`)
   const mwCtx = {
     protocol: "chat",
     agent: "claude-code",
-    options: { injectProtocolEffort: true },
+    options: {
+      injectProtocolEffort: true,
+      candidateModels: ["claude-opus-5-5", "gpt-6.1-sol", "gemini-3.8-flash-high"],
+    },
     state: {},
   };
-  const afterMw = mwOnRequest(afterHook, mwCtx);
+  const afterMw = mwOnRequest(bodyClone, mwCtx);
   assert.ok(afterMw, "mwOnRequest should return mutated body");
-  assert.equal(ROUTE_CARRIER_KEY in afterMw, false, "carrier must be stripped before reaching upstream");
+  assert.equal(ROUTE_CARRIER_KEY in afterMw, false, "carrier must never be present on body");
   assert.match(afterMw.model, /^claude-opus-5-5:(high|xhigh|max)$/);
   assert.ok(["high", "xhigh"].includes(afterMw.reasoning_effort));
 
-  // Verify `onAccount` can read `mwCtx.state.agentcompass`
+  // Verify `onAccount` works with Magpie's real `{ref, provider, name, kind, model}` account shape
   const skipRes = mwOnAccount(
-    { provider: "openai", account: "openai#1" },
+    {
+      ref: "a1b2c3d4e5f60718",
+      provider: "openai",
+      name: "OpenAI Plus",
+      kind: "codex",
+      model: "gpt-6.1-sol",
+    },
     {
       state: mwCtx.state,
-      options: { accountsByWorkKind: { debug_review: ["anthropic#1"] } },
+      options: { accountsByWorkKind: { debug_review: ["anthropic"] } },
     },
   );
   assert.deepEqual(skipRes, { skip: true });
 });
 
-test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches it", async () => {
+test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches it when explicitly opted in", async () => {
   clearProfileCache();
     let fetchCalls = 0;
     const mockFetch = async (_url, init) => {
       fetchCalls++;
-      // Verify RouterAgent header is sent to prevent recursive Magpie classification
-      assert.equal(init.headers["User-Agent"], "Magpie-Router/1.0");
+      assert.equal("User-Agent" in (init.headers || {}), false, "Must not send fake Magpie-Router/1.0 User-Agent");
       return new Response(
         JSON.stringify({
           choices: [
@@ -240,7 +242,6 @@ test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches 
                   expected_hours: 1.0,
                   hours_confidence: "high",
                   urgency: "unknown",
-                  reason: "Frontend React dashboard component with visual styling.",
                   multi_task: false,
                   task_count: "1",
                 }),
@@ -254,6 +255,7 @@ test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches 
 
     const task = { objective: "Build the interactive React analytics dashboard component from the Figma spec." };
     const first = await scoreTaskLive(task, {
+      allowExternalScorer: true,
       scorerType: "openai_compatible",
       scorerBaseUrl: "http://127.0.0.1:4096",
       scorerModel: "gemini-3.8-flash-high",
@@ -265,6 +267,7 @@ test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches 
 
     // Second call with identical task hits LRU cache in 0ms without calling fetch
     const second = await scoreTaskLive(task, {
+      allowExternalScorer: true,
       scorerType: "openai_compatible",
       scorerBaseUrl: "http://127.0.0.1:4096",
       scorerModel: "gemini-3.8-flash-high",
@@ -281,13 +284,18 @@ test("3.2 Timeout or HTTP failure gracefully falls back to deterministic twin wi
     };
     const res = await scoreTaskLive(
       { objective: "Fix the memory leak in the WebSocket connection pool." },
-      { scorerType: "openai_compatible", fetch: failingFetch },
+      {
+        allowExternalScorer: true,
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:4096",
+        fetch: failingFetch,
+      },
     );
     assert.equal(res.meta.source, "heuristic_fallback");
     assert.equal(res.profile.work_kind, "debug_review");
 });
 
-test("4. Native Magpie `/v1/systemone` Decision Provider (`decide: true` / `decides: true`)", async () => {
+test("4. Native Magpie `/v1/systemone` Decision Handler (`handleSystemOneRequest`)", async () => {
   // 4a. Test `jevLevelled` probe (`decide.go:310`)
   const levelProbe = await handleSystemOneRequest({
     model: DECISION_MODEL_ID,
@@ -328,17 +336,23 @@ test("4. Native Magpie `/v1/systemone` Decision Provider (`decide: true` / `deci
   assert.ok(turnDecision.answers.intent.confidence >= 0.6, "confidence must clear Magpie's jevSure (0.6)");
   assert.ok(turnDecision.answers.effort.score >= 2.0, "coupled review must select high/xhigh effort (>= 2.0)");
 
-  // 4c. Test OpenCode / Magpie plugin registration and loader.fetch
+  // 4c. Default plugin export does NOT inject a fake auth/provider entry unless explicitly opted in
   assert.equal(PROVIDER_ID, "agentcompass");
-  const plugin = await AgentCompassRouterPlugin({ magpie: { option: () => false } }, {});
+  const defaultPlugin = await AgentCompassRouterPlugin({}, {});
+  const emptyCfg = {};
+  await defaultPlugin.config(emptyCfg);
+  assert.equal(emptyCfg.provider, undefined, "Default gateway plugin must not register a fake provider");
+  assert.equal(defaultPlugin.auth, undefined, "Default gateway plugin must not register a fake auth hook");
+
+  // Opt-in decision provider mode
+  const optInPlugin = await AgentCompassRouterPlugin({}, { enableDecisionProvider: true });
   const cfg = {};
-  await plugin.config(cfg);
+  await optInPlugin.config(cfg);
   assert.equal(cfg.provider[PROVIDER_ID].name, "AgentCompass");
   assert.equal(cfg.provider[PROVIDER_ID].decide, true);
   assert.equal(cfg.provider[PROVIDER_ID].models[DECISION_MODEL_ID].decides, true);
 
-  const loaded = await plugin.auth.loader();
-  const httpRes = await loaded.fetch("https://agentcompass.local/v1/systemone", {
+  const httpRes = await optInPlugin.fetch("http://127.0.0.1/v1/systemone", {
     method: "POST",
     body: JSON.stringify({
       model: DECISION_MODEL_ID,
@@ -374,7 +388,7 @@ test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting l
   assert.deepEqual(order1.map((i) => seats[i].key), ["seat-fresh", "seat-busy", "seat-resting"]);
 });
 
-test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`, `icon`, `options`, `registry.json`)", async () => {
+test("6. Magpie Plugin Market & Registry Contract (`package.json`, `icon`, `options`, `registry.json`)", async () => {
   assert.equal(profileTask, inferTaskProfile);
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
   assert.ok(["agentcompass", "@magpie-community/gateway-agentcompass"].includes(pkg.name));
@@ -387,23 +401,16 @@ test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`,
   const decodedSvg = Buffer.from(pkg.magpie.icon.split(",")[1], "base64").toString("utf8");
   assert.ok(decodedSvg.includes("<svg"), "Decoded icon must be valid SVG for Magpie StoreIcon()");
 
-  for (const kw of ["magpie-plugin", "opencode", "opencode-plugin", "provider", "auth", "agentcompass", "intent-routing"]) {
+  for (const kw of ["magpie", "magpie-middleware", "magpie-routing", "routing", "load-balancing", "llm-gateway", "agentcompass"]) {
     assert.ok(pkg.keywords.includes(kw), `package.json keywords must include "${kw}"`);
   }
+  assert.equal(pkg.keywords.includes("provider"), false, "Middleware plugin must not claim 'provider' keyword");
+  assert.equal(pkg.keywords.includes("auth"), false, "Middleware plugin must not claim 'auth' keyword");
   assert.equal(
     pkg.keywords.includes("pi-package"),
     false,
-    "OpenCode plugins must not include 'pi-package' in keywords (pi.js:49 treats pi-package as a Pi extension instead of OpenCode plugin)"
+    "Plugins must not include 'pi-package' in keywords"
   );
-
-  const plugin = await AgentCompassRouterPlugin({ magpie: { option: (_p, k) => k === "prefer_local_heuristic" } }, {});
-  assert.equal(plugin.auth.icon, AGENTCOMPASS_ICON_DATA_URI);
-  const optKeys = plugin.auth.options.map((o) => o.key);
-  assert.ok(optKeys.includes("prefer_local_heuristic"));
-  assert.ok(optKeys.includes("live_scorer"));
-  for (const key of optKeys) {
-    assert.match(key, /^[a-z0-9_-]{1,40}$/);
-  }
 
   const standaloneListingPath = path.join(REPO_ROOT, "docs", "magpie-community-registry-entry.json");
   const monorepoRegistryPath = path.resolve(REPO_ROOT, "..", "..", "registry.json");
@@ -412,6 +419,7 @@ test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`,
     assert.ok(["agentcompass", "@magpie-community/gateway-agentcompass"].includes(listing.package));
     assert.equal(listing.name, "AgentCompass");
     assert.equal(listing.kind, "middleware");
+    assert.equal("providers" in listing, false);
     assert.ok(listing.summary?.en && listing.summary?.zh);
   }
   if (fs.existsSync(monorepoRegistryPath)) {
@@ -447,55 +455,55 @@ test("7.1 Scenario 1 (`why: first` & subagent isolation): New session runs inten
       ],
     };
 
-    const afterHook1 = await hookOnRequest(req1, {
+    const ctx1 = {
       protocol: "chat",
       headers: { "x-session-id": "sess-main-1" },
+      state: {},
       options: {
         continuityStore: store,
         now: t0,
+        allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
         useCache: false,
         fetch: async () => {
           scorerCalls += 1;
-          return {
-            ok: true,
-            status: 200,
-            text: async () =>
-              JSON.stringify({
-                choices: [
-                  {
-                    message: {
-                      content: JSON.stringify({
-                        work_kind: "debug_review",
-                        reasoning_depth: 3,
-                        code_complexity: 3,
-                        context_scale: 3,
-                        divergence: 1,
-                        hallucination_risk: 3,
-                        error_cost: 3,
-                        needs_visual: false,
-                        needs_gui: false,
-                        local_only: true,
-                        interaction_style: "engineering",
-                        expected_hours: 2.0,
-                        hours_confidence: "high",
-                        urgency: "normal",
-                        reason: "cross-module deadlock root cause",
-                        multi_task: false,
-                        task_count: "1",
-                      }),
-                    },
+          return new Response(
+            JSON.stringify({
+              choices: [
+                {
+                  message: {
+                    content: JSON.stringify({
+                      work_kind: "debug_review",
+                      reasoning_depth: 3,
+                      code_complexity: 3,
+                      context_scale: 3,
+                      divergence: 1,
+                      hallucination_risk: 3,
+                      error_cost: 3,
+                      needs_visual: false,
+                      needs_gui: false,
+                      local_only: true,
+                      interaction_style: "engineering",
+                      expected_hours: 2.0,
+                      hours_confidence: "high",
+                      urgency: "normal",
+                      multi_task: false,
+                      task_count: "1",
+                    }),
                   },
-                ],
-              }),
-          };
+                },
+              ],
+            }),
+            { status: 200 }
+          );
         },
       },
-    });
+    };
+    await hookOnRequest(req1, ctx1);
 
     assert.equal(scorerCalls, 1, "First turn of a new session must invoke intent scorer once");
-    const carrier1 = afterHook1[ROUTE_CARRIER_KEY];
+    const carrier1 = ctx1.state.route;
     assert.equal(carrier1.continuation.held, false);
     assert.equal(carrier1.continuation.why, "first");
     assert.equal(carrier1.canonicalModel, "claude-opus-5-5");
@@ -552,15 +560,23 @@ test("7.2 Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected 
         },
       ],
     };
-    const hooked1 = await hookOnRequest(firstTurn, {
+    const ctx1 = {
       protocol: "chat",
       headers: { "x-session-id": "sess-turn-lock" },
-      options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
-    });
-    const routed1 = mwOnRequest(structuredClone(hooked1), {
+      state: {},
+      options: {
+        continuityStore: store,
+        now: t0,
+        prefer_local_heuristic: true,
+        allowUnconstrainedCatalog: true,
+      },
+    };
+    await hookOnRequest(firstTurn, ctx1);
+    const routed1 = mwOnRequest(structuredClone(firstTurn), {
       protocol: "chat",
       headers: { "x-session-id": "sess-turn-lock" },
-      options: { continuityStore: store, now: t0 },
+      state: ctx1.state,
+      options: { continuityStore: store, now: t0, allowUnconstrainedCatalog: true },
     });
     assert.equal(routed1.model, "claude-opus-5-5:xhigh");
 
@@ -582,22 +598,25 @@ test("7.2 Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected 
       ],
     };
 
-    const hooked2a = await hookOnRequest(toolResultReq, {
+    const ctx2a = {
       protocol: "chat",
       headers: { "x-session-id": "sess-turn-lock" },
+      state: {},
       options: {
         continuityStore: store,
         now: t0 + 10 * 60 * 1000, // Even after 10 minutes (> 5m cache TTL), mid-turn `within: true` MUST still hold!
+        allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
         fetch: countingFetch,
       },
-    });
+    };
+    await hookOnRequest(toolResultReq, ctx2a);
     assert.equal(scorerCalls, 0, "Mid-turn tool result must make 0 scorer calls");
-    assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.held, true);
-    assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.why, "turn");
-    assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.within, true);
-    assert.equal(hooked2a[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:xhigh");
+    assert.equal(ctx2a.state.route.continuation.held, true);
+    assert.equal(ctx2a.state.route.continuation.why, "turn");
+    assert.equal(ctx2a.state.route.continuation.within, true);
+    assert.equal(ctx2a.state.route.modelWithEffort, "claude-opus-5-5:xhigh");
 
     // Step 2b: Agent injects a `role: "user"` message containing only `<system-reminder>` and `TodoWrite` noise
     const agentNoiseReq = {
@@ -616,20 +635,23 @@ test("7.2 Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected 
     assert.equal(turnState2b.within, true, "Agent-injected reminder must keep within === true");
     assert.equal(turnState2b.turn, 1, "Agent-injected reminder must not increment user turn count");
 
-    const hooked2b = await hookOnRequest(agentNoiseReq, {
+    const ctx2b = {
       protocol: "chat",
       headers: { "x-session-id": "sess-turn-lock" },
+      state: {},
       options: {
         continuityStore: store,
         now: t0 + 12 * 60 * 1000,
+        allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
         fetch: countingFetch,
       },
-    });
+    };
+    await hookOnRequest(agentNoiseReq, ctx2b);
     assert.equal(scorerCalls, 0);
-    assert.equal(hooked2b[ROUTE_CARRIER_KEY].continuation.held, true);
-    assert.equal(hooked2b[ROUTE_CARRIER_KEY].continuation.why, "turn");
+    assert.equal(ctx2b.state.route.continuation.held, true);
+    assert.equal(ctx2b.state.route.continuation.why, "turn");
   });
 
 test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV cache and short follow-up nudges hold model and ratchet effort", async () => {
@@ -651,10 +673,11 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
     const ctx1 = {
       protocol: "anthropic",
       headers: { "x-session-id": "sess-warm-cache" },
+      state: {},
       options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
     };
-    const hooked1 = await hookOnRequest(turn1, ctx1);
-    assert.equal(hooked1[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:xhigh");
+    await hookOnRequest(turn1, ctx1);
+    assert.equal(ctx1.state.route.modelWithEffort, "claude-opus-5-5:xhigh");
 
     // Simulate response returning 4,200 tokens (>= 1024 CACHE_WORTH_TOKENS) and cache creation
     await hookOnResponse(
@@ -680,12 +703,14 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
         { role: "user", content: "Also rename the variable `sync_flag` to `isSynced` in that file." },
       ],
     };
-    const hooked2 = await hookOnRequest(turn2, {
+    const ctx2 = {
       protocol: "anthropic",
       headers: { "x-session-id": "sess-warm-cache" },
+      state: {},
       options: {
         continuityStore: store,
         now: t0 + 2 * 60 * 1000,
+        allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
         fetch: async () => {
@@ -693,11 +718,12 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
           throw new Error("Should not call scorer while KV cache is warm!");
         },
       },
-    });
+    };
+    await hookOnRequest(turn2, ctx2);
     assert.equal(scorerCalls, 0);
-    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.held, true);
-    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.why, "cache");
-    assert.equal(hooked2[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:xhigh");
+    assert.equal(ctx2.state.route.continuation.held, true);
+    assert.equal(ctx2.state.route.continuation.why, "cache");
+    assert.equal(ctx2.state.route.modelWithEffort, "claude-opus-5-5:xhigh");
 
     // Turn 3 (short follow-up "继续" / "ok go ahead" even when token count < 1024):
     assert.equal(isShortFollowupMessage("继续"), true);
@@ -732,6 +758,7 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
         },
       },
       {
+        allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
         fetch: async () => {
@@ -748,7 +775,7 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
     assert.equal(sysOneFollowup.agentcompass.continuation.why, "followup");
 
     // Verify `keepsEffort` directly: warm session on `xhigh` never drops to `low`
-    const sessionSnap = store.get(hooked2[ROUTE_CARRIER_KEY].continuation.sessionKey, t0 + 2 * 60 * 1000);
+    const sessionSnap = store.get(ctx2.state.route.continuation.sessionKey, t0 + 2 * 60 * 1000);
     assert.equal(keepsEffort(sessionSnap, "low", 4200, t0 + 2 * 60 * 1000), "xhigh");
     // Verify ChatGPT/Codex & DeepSeek 1h cache TTL vs default 5m TTL
     assert.equal(coldAfterMs("claude-opus-5-5"), CACHE_COLD_MS);
@@ -787,15 +814,17 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
         },
       ],
     };
-    const hookedVis = await hookOnRequest(visReq, {
+    const ctxVis = {
       protocol: "chat",
       session_id: sessKeyVis,
+      state: {},
       options: { continuityStore: store, now: t0 + 30_000, prefer_local_heuristic: true },
-    });
-    assert.equal(hookedVis[ROUTE_CARRIER_KEY].continuation.held, false);
-    assert.equal(hookedVis[ROUTE_CARRIER_KEY].continuation.why, "capability_outgrown");
-    assert.equal(hookedVis[ROUTE_CARRIER_KEY].continuation.reasonDetail, "visual_modality_required");
-    assert.notEqual(hookedVis[ROUTE_CARRIER_KEY].canonicalModel, "grok-4.7");
+    };
+    await hookOnRequest(visReq, ctxVis);
+    assert.equal(ctxVis.state.route.continuation.held, false);
+    assert.equal(ctxVis.state.route.continuation.why, "capability_outgrown");
+    assert.equal(ctxVis.state.route.continuation.reasonDetail, "visual_modality_required");
+    assert.notEqual(ctxVis.state.route.canonicalModel, "grok-4.7");
 
     // 4b. Tier escalation outgrowth: session starts on lightweight `claude-haiku-5-5` (tier 3.2),
     // next turn asks for a complex cross-module architecture & deadlock refactoring
@@ -826,14 +855,16 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
     };
     const tierKey = computeSessionKey(tierReq, { headers: { "x-session-id": sessKeyTier } });
     store.set(tierKey, store.get(sessKeyTier, t0), t0);
-    const hookedTier = await hookOnRequest(tierReq, {
+    const ctxTier = {
       protocol: "chat",
       headers: { "x-session-id": sessKeyTier },
+      state: {},
       options: { continuityStore: store, now: t0 + 20_000, prefer_local_heuristic: true },
-    });
-    assert.equal(hookedTier[ROUTE_CARRIER_KEY].continuation.held, false);
-    assert.equal(hookedTier[ROUTE_CARRIER_KEY].continuation.why, "capability_outgrown");
-    assert.equal(hookedTier[ROUTE_CARRIER_KEY].canonicalModel, "claude-opus-5-5");
+    };
+    await hookOnRequest(tierReq, ctxTier);
+    assert.equal(ctxTier.state.route.continuation.held, false);
+    assert.equal(ctxTier.state.route.continuation.why, "capability_outgrown");
+    assert.equal(ctxTier.state.route.canonicalModel, "claude-opus-5-5");
 
     // 4c. Context window 95% outgrowth (`claude-opus-5-5` has 200k limit; 95% = 190k; pass 195k tokens)
     const outgrownReq = {
@@ -859,19 +890,21 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
       },
       t0
     );
-    const hookedOutgrown = await hookOnRequest(outgrownReq, {
+    const ctxOutgrown = {
       protocol: "chat",
       headers: { "x-session-id": "sess-ctx-outgrow" },
+      state: {},
       options: { continuityStore: store, now: t0 + 10_000, prefer_local_heuristic: true },
-    });
-    assert.equal(hookedOutgrown[ROUTE_CARRIER_KEY].continuation.held, false);
-    assert.equal(hookedOutgrown[ROUTE_CARRIER_KEY].continuation.why, "outgrown");
+    };
+    await hookOnRequest(outgrownReq, ctxOutgrown);
+    assert.equal(ctxOutgrown.state.route.continuation.held, false);
+    assert.equal(ctxOutgrown.state.route.continuation.why, "outgrown");
     // Must switch to a model whose 95% context window >= 195k (e.g. `gemini-4-argon-high` 1M or `gpt-6-astra` 400k)
     assert.ok(
       ["gemini-4-argon-high", "gpt-6-astra", "gpt-6.1-terra", "gpt-6.1-sol"].includes(
-        hookedOutgrown[ROUTE_CARRIER_KEY].canonicalModel
+        ctxOutgrown.state.route.canonicalModel
       ),
-      `Expected >205k context model, got ${hookedOutgrown[ROUTE_CARRIER_KEY].canonicalModel}`
+      `Expected >205k context model, got ${ctxOutgrown.state.route.canonicalModel}`
     );
 
     // 4d. 2M cumulative token wear (`compactedTokens + tokens >= 2,000,000`)
@@ -928,19 +961,21 @@ test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/com
     );
 
     // 5a. Advance clock by 6 minutes (> 5m Anthropic cacheCold): cache is now COLD
-    const hookedCold = await hookOnRequest(routineFollowupReq, {
+    const ctxCold = {
       protocol: "anthropic",
       headers: { "x-session-id": "sess-cold-downshift" },
+      state: {},
       options: {
         continuityStore: store,
         now: t0 + 6 * 60 * 1000,
         prefer_local_heuristic: true,
       },
-    });
-    assert.equal(hookedCold[ROUTE_CARRIER_KEY].continuation.held, false);
-    assert.equal(hookedCold[ROUTE_CARRIER_KEY].continuation.why, "cold");
+    };
+    await hookOnRequest(routineFollowupReq, ctxCold);
+    assert.equal(ctxCold.state.route.continuation.held, false);
+    assert.equal(ctxCold.state.route.continuation.why, "cold");
     // Must downshift from `claude-opus-5-5` to lightweight `gemini-3.8-flash-high`!
-    assert.equal(hookedCold[ROUTE_CARRIER_KEY].canonicalModel, "gemini-3.8-flash-high");
+    assert.equal(ctxCold.state.route.canonicalModel, "gemini-3.8-flash-high");
 
     // 5b. Reset to warm `claude-opus-5-5` with 20,000 tokens, then send a compacted context (2,000 tokens < 50% of 20,000)
     store.set(
@@ -959,18 +994,20 @@ test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/com
       ...routineFollowupReq,
       estimated_input_tokens: 2_000,
     };
-    const hookedCompacted = await hookOnRequest(compactedReq, {
+    const ctxCompacted = {
       protocol: "anthropic",
       headers: { "x-session-id": "sess-cold-downshift" },
+      state: {},
       options: {
         continuityStore: store,
         now: t0 + 11 * 60 * 1000, // Only 1 minute later, but tokens dropped from 20k -> 2k!
         prefer_local_heuristic: true,
       },
-    });
-    assert.equal(hookedCompacted[ROUTE_CARRIER_KEY].continuation.held, false);
-    assert.equal(hookedCompacted[ROUTE_CARRIER_KEY].continuation.why, "compacted");
-    assert.equal(hookedCompacted[ROUTE_CARRIER_KEY].canonicalModel, "gemini-3.8-flash-high");
+    };
+    await hookOnRequest(compactedReq, ctxCompacted);
+    assert.equal(ctxCompacted.state.route.continuation.held, false);
+    assert.equal(ctxCompacted.state.route.continuation.why, "compacted");
+    assert.equal(ctxCompacted.state.route.canonicalModel, "gemini-3.8-flash-high");
     // Verify `compactedTokens` accumulated the pre-compaction 20,000 tokens
     assert.equal(store.get(sessKey, t0 + 11 * 60 * 1000).compactedTokens, 20_000);
   });
@@ -991,11 +1028,12 @@ test("7.6 Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onR
     const ctx = {
       protocol: "chat",
       headers: { "x-session-id": "sess-failover" },
+      state: {},
       options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
     };
 
-    const hooked1 = await hookOnRequest(req, ctx);
-    assert.equal(hooked1[ROUTE_CARRIER_KEY].canonicalModel, "claude-opus-5-5");
+    await hookOnRequest(req, ctx);
+    assert.equal(ctx.state.route.canonicalModel, "claude-opus-5-5");
 
     // Simulate upstream 429 rate-limit failure reported to `hookOnResponse` (or `mwOnUsage`)
     await hookOnResponse(
@@ -1006,23 +1044,25 @@ test("7.6 Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onR
 
     // Retry the exact same request (or even a mid-turn tool loop): because `claude-opus-5-5` is unhealthy,
     // it MUST break the lock (`why: "provider_unhealthy"`) and switch to a healthy fallback model!
-    const hooked2 = await hookOnRequest(req, {
+    const ctx2 = {
       ...ctx,
+      state: {},
       options: { ...ctx.options, now: t0 + 2000 },
-    });
-    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.held, false);
-    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.why, "provider_unhealthy");
+    };
+    await hookOnRequest(req, ctx2);
+    assert.equal(ctx2.state.route.continuation.held, false);
+    assert.equal(ctx2.state.route.continuation.why, "provider_unhealthy");
     assert.notEqual(
-      hooked2[ROUTE_CARRIER_KEY].canonicalModel,
+      ctx2.state.route.canonicalModel,
       "claude-opus-5-5",
       "Unhealthy model must be excluded on failover"
     );
 
     // Also verify `mwOnUsage` marking a model unhealthy on `{ rejected: true, status: 503 }`
-    const fallbackModel = hooked2[ROUTE_CARRIER_KEY].canonicalModel;
+    const fallbackModel = ctx2.state.route.canonicalModel;
     mwOnUsage(
       {
-        session_id: hooked2[ROUTE_CARRIER_KEY].continuation.sessionKey,
+        session_id: ctx2.state.route.continuation.sessionKey,
         model: fallbackModel,
         rejected: true,
         status: 503,
@@ -1283,9 +1323,10 @@ test("8.4 Sticky session failover on quota exhaustion (`why: quota_exhausted`) &
         t0
       );
 
-      const hooked = await hookOnRequest(req, {
+      const ctxQuota = {
         protocol: "chat",
         headers: { "x-session-id": "sess-quota-spent" },
+        state: {},
         options: {
           continuityStore: store,
           magpieConfigDir: tmpDir,
@@ -1293,12 +1334,13 @@ test("8.4 Sticky session failover on quota exhaustion (`why: quota_exhausted`) &
           now: t0 + 15_000,
           prefer_local_heuristic: true,
         },
-      });
+      };
+      await hookOnRequest(req, ctxQuota);
 
-      assert.equal(hooked[ROUTE_CARRIER_KEY].continuation.held, false);
-      assert.equal(hooked[ROUTE_CARRIER_KEY].continuation.why, "quota_exhausted");
-      assert.equal(hooked[ROUTE_CARRIER_KEY].targetModel, "claude-sonnet-4-6");
-      assert.equal(hooked[ROUTE_CARRIER_KEY].selectedAccount, "claude/acct1");
+      assert.equal(ctxQuota.state.route.continuation.held, false);
+      assert.equal(ctxQuota.state.route.continuation.why, "quota_exhausted");
+      assert.equal(ctxQuota.state.route.targetModel, "claude-sonnet-4-6");
+      assert.equal(ctxQuota.state.route.selectedAccount, "claude/acct1");
     } finally {
       clearQuotasCache();
       fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -1415,5 +1457,220 @@ test("8.6 Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-acco
     assert.equal(unlimitedDec.targetModel, "gpt-6.1-sol");
     assert.equal(unlimitedDec.components.free_usage, 0.18);
   });
+
+test("9.1 PR #670 Review Guard: Default triggers ONLY claim `agentcompass` / `agentcompass/*` and never hijack `auto` or `group/intent`", async () => {
+  for (const nonOwnedModel of ["auto", "intent", "group/intent", "default", "claude-sonnet-4-6"]) {
+    const req = {
+      model: nonOwnedModel,
+      messages: [{ role: "user", content: "Explain how HTTP/3 QUIC connection migration works." }],
+    };
+    const hookCtx = { protocol: "chat", state: {}, options: {} };
+    const hookRes = await hookOnRequest(req, hookCtx);
+    assert.equal(hookRes, undefined, `hookOnRequest must skip non-owned model "${nonOwnedModel}" by default`);
+    assert.equal(hookCtx.state.route, undefined);
+
+    const mwCtx = { protocol: "chat", state: {}, options: {} };
+    const mwRes = mwOnRequest(req, mwCtx);
+    assert.equal(mwRes, undefined, `mwOnRequest must skip non-owned model "${nonOwnedModel}" by default`);
+    assert.equal(req.model, nonOwnedModel, `req.model "${nonOwnedModel}" must remain untouched`);
+  }
+});
+
+test("9.2 PR #670 Review Guard: `availableModels` / `candidateModels` / `ctx.models` & safe fallback when candidate list is omitted", async () => {
+  // 1. When `availableModels: ["claude-haiku-5-5", "claude-sonnet-5-5"]` is passed, `agentcompass/auto` ONLY selects from those two models
+  const reqLimited = {
+    model: "agentcompass/auto",
+    messages: [
+      {
+        role: "user",
+        content:
+          "Conduct a deep cross-module deadlock and race condition root-cause audit across the distributed transaction engine.",
+      },
+    ],
+  };
+  const mwCtxLimited = {
+    protocol: "chat",
+    state: {},
+    options: {
+      availableModels: ["claude-haiku-5-5", "claude-sonnet-5-5"],
+      injectProtocolEffort: true,
+    },
+  };
+  const routedLimited = mwOnRequest(structuredClone(reqLimited), mwCtxLimited);
+  assert.ok(routedLimited, "mwOnRequest must route within availableModels");
+  assert.match(
+    routedLimited.model,
+    /^claude-sonnet-5-5:(high|xhigh|max)$/,
+    `Must pick claude-sonnet-5-5 from availableModels, got ${routedLimited.model}`
+  );
+
+  // 2. When NO candidate list is configured and `routeAllModels: true` is used on a concrete model (`claude-sonnet-4-6`),
+  // it MUST keep `claude-sonnet-4-6` and only inject effort — never rewriting to an unverified catalog model like `claude-opus-5-5`!
+  const reqConcrete = {
+    model: "claude-sonnet-4-6",
+    messages: [
+      {
+        role: "user",
+        content: "Audit the cross-module state machine for deadlocks and prove liveness invariants.",
+      },
+    ],
+  };
+  const routedConcrete = mwOnRequest(structuredClone(reqConcrete), {
+    protocol: "chat",
+    state: {},
+    options: { routeAllModels: true, injectProtocolEffort: true },
+  });
+  assert.ok(routedConcrete);
+  assert.match(
+    routedConcrete.model,
+    /^claude-sonnet-4-6:(high|xhigh|max)$/,
+    `Concrete model must not be rewritten to an unverified catalog model (got ${routedConcrete.model})`
+  );
+
+  // 3. When `model: "agentcompass/auto"` is sent WITHOUT `candidateModels` in `onRequest`, `onRequest` does not rewrite to an unverified model,
+  // and `onProvider` selects from `ctx.provider.models` when the provider's model catalog is supplied!
+  const reqVirtual = {
+    model: "agentcompass/auto",
+    messages: [
+      {
+        role: "user",
+        content: "Implement a standalone LRU cache module in TypeScript with unit tests.",
+      },
+    ],
+  };
+  const sharedState = {};
+  const afterReq = mwOnRequest(reqVirtual, {
+    protocol: "chat",
+    state: sharedState,
+    options: { injectProtocolEffort: true },
+  });
+  assert.equal(reqVirtual.model, "agentcompass/auto", "Without candidateModels, onRequest must not rewrite to an unverified catalog model");
+  assert.ok(sharedState.agentcompass?.profile, "Task profile must be saved in ctx.state for onProvider/onAccount");
+
+  const afterProv = mwOnProvider(afterReq || reqVirtual, {
+    protocol: "chat",
+    state: sharedState,
+    provider: {
+      id: "anthropic",
+      name: "Anthropic",
+      models: ["claude-haiku-5-5", "claude-sonnet-5-5"],
+    },
+    options: { injectProtocolEffort: true },
+  });
+  assert.ok(afterProv);
+  assert.match(afterProv.model, /^claude-sonnet-5-5:(medium|high|xhigh)$/);
+});
+
+test("9.3 PR #670 Review Guard: `__agentcompass_route` carrier is never injected by default and unconditionally stripped in `middleware`", async () => {
+  // 1. `hooks.onRequest` leaves zero `__agentcompass_route` property on `body`
+  const req = {
+    model: "agentcompass/auto",
+    messages: [{ role: "user", content: "Fix the bug in the parser." }],
+  };
+  const hookCtx = {
+    protocol: "chat",
+    state: {},
+    options: { candidateModels: ["claude-sonnet-5-5"] },
+  };
+  const hookOut = await hookOnRequest(req, hookCtx);
+  assert.equal(hookOut, undefined);
+  assert.equal(ROUTE_CARRIER_KEY in req, false);
+
+  // 2. Even if `__agentcompass_route` was attached on a non-routed request (`model: "gpt-4o"`),
+  // `mwOnRequest`, `mwOnProvider`, `mwOnAccount`, and `mwOnResponse` unconditionally delete it!
+  for (const fn of [mwOnRequest, mwOnProvider, mwOnAccount, mwOnResponse]) {
+    const poisoned = {
+      model: "gpt-4o",
+      messages: [{ role: "user", content: "hello" }],
+      [ROUTE_CARRIER_KEY]: { targetModel: "claude-opus-5-5" },
+    };
+    fn(poisoned, { protocol: "chat", state: {}, options: {} });
+    assert.equal(
+      ROUTE_CARRIER_KEY in poisoned,
+      false,
+      `${fn.name} must unconditionally strip ${ROUTE_CARRIER_KEY}`
+    );
+  }
+});
+
+test("9.4 PR #670 Review Guard: `onAccount` natively matches Magpie's `{ref, provider, name, kind, model}` context", () => {
+  const state = {
+    agentcompass: {
+      workKind: "debug_review",
+      targetModel: "claude-sonnet-5-5",
+      targetEffort: "high",
+    },
+  };
+
+  // Match by `ref`
+  assert.equal(
+    mwOnAccount(
+      { ref: "deadbeefcafe1234", provider: "anthropic", name: "Team Seat", kind: "claude", model: "claude-sonnet-5-5" },
+      { state, options: { accountsByWorkKind: { debug_review: ["deadbeefcafe1234"] } } }
+    ),
+    undefined
+  );
+
+  // Match by `provider/name`
+  assert.equal(
+    mwOnAccount(
+      { ref: "deadbeefcafe1234", provider: "anthropic", name: "work", kind: "claude", model: "claude-sonnet-5-5" },
+      { state, options: { accountsByWorkKind: { debug_review: ["anthropic/work"] } } }
+    ),
+    undefined
+  );
+
+  // Skip when neither `ref`, `name`, `provider`, `kind`, nor `${provider}/${name}` matches
+  assert.deepEqual(
+    mwOnAccount(
+      { ref: "deadbeefcafe1234", provider: "openai", name: "personal", kind: "codex", model: "gpt-5.3-codex" },
+      { state, options: { accountsByWorkKind: { debug_review: ["anthropic/work", "claude"] } } }
+    ),
+    { skip: true }
+  );
+});
+
+test("9.5 PR #670 Review Guard: Zero implicit external scorer calls and zero parent-directory `quotas.json` walking", async () => {
+  clearProfileCache();
+  clearQuotasCache();
+
+  // 1. `loadLiveQuotas({})` returns `null` without walking parent directories or reading disk
+  assert.equal(loadLiveQuotas({}), null);
+
+  // 2. `scoreTaskLive` with `scorerType: "openai_compatible"` or `"jev"` and `scorerBaseUrl` set,
+  // but WITHOUT `allowExternalScorer: true` (and without injected test `fetch`), makes 0 network calls!
+  const origFetch = globalThis.fetch;
+  let globalFetchCalled = false;
+  globalThis.fetch = async () => {
+    globalFetchCalled = true;
+    throw new Error("globalThis.fetch must not be called without allowExternalScorer: true");
+  };
+  try {
+    const res1 = await scoreTaskLive(
+      { objective: "Design a distributed consensus protocol." },
+      {
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:4096",
+        useCache: false,
+      }
+    );
+    assert.equal(globalFetchCalled, false);
+    assert.equal(res1.meta.source, "heuristic_twin");
+
+    const res2 = await scoreTaskLive(
+      { objective: "Design a distributed consensus protocol." },
+      {
+        scorerType: "jev",
+        jevBaseUrl: "https://api.typesafe.ai",
+        useCache: false,
+      }
+    );
+    assert.equal(globalFetchCalled, false);
+    assert.equal(res2.meta.source, "heuristic_twin");
+  } finally {
+    globalThis.fetch = origFetch;
+  }
+});
+
 
 
