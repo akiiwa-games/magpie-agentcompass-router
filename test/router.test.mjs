@@ -133,6 +133,13 @@ test("1.6 GUI computer-use task routes to gpt-6-astra (#1 GUI grounding) and exc
     const grok = ranked.allCandidates.find((c) => c.canonicalModel === "grok-4.7");
     assert.ok(grok.excluded.includes("task needs visual input"), "text-only grok-4.7 must be excluded on visual/GUI work");
     assert.equal(ranked.selected.canonicalModel, "gpt-6-astra");
+
+    const visualReview = inferTaskProfile({
+      objective: "Compare screenshots of the login dialog and inspect the screenshot for layout misalignment.",
+    });
+    assert.equal(visualReview.work_kind, "visual_analysis");
+    assert.equal(visualReview.needs_visual, true);
+    assert.equal(visualReview.needs_gui, false);
 });
 
 test("2. Two-Stage Tandem (`magpie.hooks` [Bun 10s] -> `magpie.middleware` [`moejs` 250ms]) bypasses `host.js:1411` model rollback", async () => {
