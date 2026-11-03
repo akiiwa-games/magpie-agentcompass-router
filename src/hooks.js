@@ -38,8 +38,9 @@ export function shouldRouteRequest(model, options = {}) {
   if (!model || typeof model !== "string") return false;
   if (options.routeAllModels === true) return true;
   const clean = model.trim().toLowerCase();
-  const triggers = Array.isArray(options.triggerModels) && options.triggerModels.length > 0
-    ? options.triggerModels.map((m) => String(m).trim().toLowerCase())
+  const triggerList = options.triggerModels || options.routeModelTriggers;
+  const triggers = Array.isArray(triggerList) && triggerList.length > 0
+    ? triggerList.map((m) => String(m).trim().toLowerCase())
     : DEFAULT_VIRTUAL_MODELS;
   return triggers.includes(clean) || clean.startsWith("agentcompass/");
 }
@@ -51,6 +52,7 @@ export async function onRequest(body, ctx = {}) {
   }
 
   const options = ctx.options || {};
+  const scorerCfg = options.scorer && typeof options.scorer === "object" ? options.scorer : {};
   const facts = extractRequestFacts(body, ctx);
 
   if (!shouldRouteRequest(facts.model, options)) {
@@ -64,21 +66,24 @@ export async function onRequest(body, ctx = {}) {
   }
 
   const { profile, meta } = await scoreTaskLive(facts, {
-    scorerType: options.scorerType || "heuristic",
-    scorerModel: options.scorerModel,
-    scorerBaseUrl: options.scorerBaseUrl,
-    scorerApiKey: options.scorerApiKey,
-    jevBaseUrl: options.jevBaseUrl,
-    jevApiKey: options.jevApiKey,
-    scorerTimeoutMs: options.scorerTimeoutMs || Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
-    useCache: options.useCache !== false,
+    scorerType: options.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
+    scorerModel: options.scorerModel || scorerCfg.model,
+    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl,
+    scorerApiKey: options.scorerApiKey || scorerCfg.apiKey,
+    jevBaseUrl: options.jevBaseUrl || scorerCfg.jevBaseUrl,
+    jevApiKey: options.jevApiKey || scorerCfg.jevApiKey,
+    scorerTimeoutMs:
+      options.scorerTimeoutMs ||
+      scorerCfg.timeoutMs ||
+      Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
+    useCache: options.useCache !== false && scorerCfg.useCache !== false,
     signal: ctx.signal,
     fetch: options.fetch,
   });
 
   const decision = selectBestRoute(profile, {
     objective: facts.objective,
-    candidateModels: options.candidateModels,
+    candidateModels: options.candidateModels || options.allowedModels,
     catalog: options.catalog,
   });
 

@@ -35,8 +35,9 @@ function shouldRoute(model, options = {}) {
   if (!model || typeof model !== "string") return false;
   if (options.routeAllModels === true) return true;
   const clean = model.trim().toLowerCase();
-  const triggers = Array.isArray(options.triggerModels) && options.triggerModels.length > 0
-    ? options.triggerModels.map((m) => String(m).trim().toLowerCase())
+  const triggerList = options.triggerModels || options.routeModelTriggers;
+  const triggers = Array.isArray(triggerList) && triggerList.length > 0
+    ? triggerList.map((m) => String(m).trim().toLowerCase())
     : DEFAULT_VIRTUAL_MODELS;
   return triggers.includes(clean) || clean.startsWith("agentcompass/");
 }
@@ -49,10 +50,18 @@ function shouldRoute(model, options = {}) {
 export function applyRoutedModelAndEffort(body, decision, ctx = {}) {
   const options = ctx?.options || {};
   const protocol = String(ctx?.protocol || "").toLowerCase();
-  const targetModel = decision.targetModel;
+  const rawModel = decision.targetModel;
   const targetEffort = decision.targetEffort || "high";
 
-  if (!targetModel) return body;
+  if (!rawModel) return body;
+
+  const mappedModel =
+    (options.modelMap && typeof options.modelMap === "object" && options.modelMap[rawModel]) ||
+    rawModel;
+  const targetModel =
+    typeof options.modelPrefix === "string" && options.modelPrefix.trim() && !mappedModel.includes("/")
+      ? `${options.modelPrefix.trim().replace(/\/$/, "")}/${mappedModel}`
+      : mappedModel;
 
   // Magpie natively supports `<model>:<effort>` in `gateway.go:askedAt` (unless disabled by option)
   if (options.useColonEffort !== false && targetEffort && !targetModel.includes(":")) {
@@ -99,7 +108,7 @@ export function onRequest(body, ctx = {}) {
       const profile = inferTaskProfile(facts);
       decision = selectBestRoute(profile, {
         objective: facts.objective,
-        candidateModels: options.candidateModels,
+        candidateModels: options.candidateModels || options.allowedModels,
         catalog: options.catalog,
       });
     }
@@ -134,21 +143,24 @@ export function onAccount(account, ctx = {}) {
 }
 
 /**
- * Optional pool seat-ordering strategy (`magpie-agentcompass-router/agentcompass-pure`).
+ * Optional pool seat-ordering strategy (`agentcompass/agentcompass` and `agentcompass/agentcompass-pure`).
  * Prefers non-resting seats with the lowest pace / usage pressure.
  */
+function agentcompassPureStrategy(_pool, seats, _options) {
+  if (!Array.isArray(seats) || seats.length <= 1) return seats;
+  return [...seats]
+    .sort((a, b) => {
+      if (Boolean(a.resting) !== Boolean(b.resting)) {
+        return a.resting ? 1 : -1;
+      }
+      const aUsed = typeof a.used === "number" ? a.used : 50;
+      const bUsed = typeof b.used === "number" ? b.used : 50;
+      return aUsed - bUsed;
+    })
+    .map((s) => s.key);
+}
+
 export const strategies = {
-  "agentcompass-pure"(pool, seats, _options) {
-    if (!Array.isArray(seats) || seats.length <= 1) return seats;
-    return [...seats]
-      .sort((a, b) => {
-        if (Boolean(a.resting) !== Boolean(b.resting)) {
-          return a.resting ? 1 : -1;
-        }
-        const aUsed = typeof a.used === "number" ? a.used : 50;
-        const bUsed = typeof b.used === "number" ? b.used : 50;
-        return aUsed - bUsed;
-      })
-      .map((s) => s.key);
-  },
+  agentcompass: agentcompassPureStrategy,
+  "agentcompass-pure": agentcompassPureStrategy,
 };

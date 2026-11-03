@@ -73,8 +73,8 @@ flowchart TB
    - `middleware.js` 读取并删除 `body.__agentcompass_route`，直接将 `body.model` 改写为 `<targetModel>:<targetEffort>`（Magpie `gateway.go:1560` 的 `askedAt()` 原生支持 `<model>:<effort>` 语法并自动设置请求思考档位！）。
 
 #### 模式 B：原生 Routing Group 决策 Provider（`decide: true` / `/v1/systemone`，8,000 ms – 60,000 ms 预算）
-- `src/index.js` 同时注册了一个拥有 `decide: true` 能力的 Magpie Provider（`agentcompass-router`）及决策模型 `agentcompass-systemone`（`decides: true`）。
-- 当你在 Magpie UI 的 **Routing Group -> Classifier** 中选择 `agentcompass-router/agentcompass-systemone` 时，Magpie 的 `askJev`（`internal/gateway/decide.go:132`）会赋予它 `Settings.ClassifyTimeout` 的专属预算（**默认 `8,000 ms`，最高可在 Magpie 设置中调至 `60,000 ms` = 60 秒**）。
+- `src/index.js` 同时注册了一个拥有 `decide: true` 能力的 Magpie Provider（`agentcompass`，显示名称 `AgentCompass`）及决策模型 `agentcompass-systemone`（`decides: true`）。
+- 当你在 Magpie UI 的 **Routing Group -> Classifier** 中选择 `agentcompass/agentcompass-systemone` 时，Magpie 的 `askJev`（`internal/gateway/decide.go:132`）会赋予它 `Settings.ClassifyTimeout` 的专属预算（**默认 `8,000 ms`，最高可在 Magpie 设置中调至 `60,000 ms` = 60 秒**）。
 - 插件完整兼容 Magpie 的两套 `/v1/systemone` 协议（`jevLevelled` 两级分类与 `jevBody` 单级分类），并在后台用完整的 10 维画像 + 7D/3D 向量算法把最优路由反推回你配置的 Routing Group 规则与 `effort`（`low` / `medium` / `high` / `xhigh`）。
 
 ---
@@ -122,14 +122,22 @@ git clone https://github.com/akiiwa-games/magpie-agentcompass-router.git
 cd magpie-agentcompass-router
 ```
 
-将插件软链接或复制到 Magpie 的插件目录（`~/.magpie/plugins/`）：
+将插件添加到 Magpie 并启用 `agentcompass`：
+
+```bash
+magpie plugin add /path/to/magpie-agentcompass-router
+magpie plugin login agentcompass
+magpie plugin list
+```
+
+或在 `~/.magpie/plugins/` 创建软链接：
 
 ```bash
 # Linux / macOS
-ln -s "$(pwd)" ~/.magpie/plugins/magpie-agentcompass-router
+ln -s "$(pwd)" ~/.magpie/plugins/agentcompass
 
 # Windows (PowerShell)
-New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\magpie-agentcompass-router" -Target (Get-Location).Path
+New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\agentcompass" -Target (Get-Location).Path
 ```
 
 ---
@@ -138,12 +146,12 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\magpie-agentcompass
 
 在模式 A 下，客户端只需发送虚拟模型名（如 `model: "auto"`、`model: "agentcompass"`，或开启 `routeAllModels: true` 拦截全部请求），插件就会在网关层自动计算最佳 `<model>:<effort>` 并转发给对应上游。
 
-在 `~/.magpie/config.json`（或插件配置）中设置：
+通过 `magpie plugin options` 或在 `~/.magpie/config.json` 中设置：
 
 ```json
 {
   "plugins": {
-    "magpie-agentcompass-router": {
+    "agentcompass": {
       "gatewayTimeoutMs": 8000,
       "routeModelTriggers": ["auto", "agentcompass", "compass", "smart", "default"],
       "routeAllModels": false,
@@ -186,20 +194,46 @@ New-Item -ItemType SymbolicLink -Path "$HOME\.magpie\plugins\magpie-agentcompass
 
 如果你喜欢使用 Magpie UI 的 **Routing Groups（路由组）** 可视化界面：
 
-1. 在 Magpie 中添加本插件提供的 Provider：`AgentCompass Pure Intent Router (agentcompass-router)`；
-2. 进入你的 **Routing Group** 设置，将 **Classifier（分类器模型）** 选择为 `agentcompass-router/agentcompass-systemone`；
+1. 在 Magpie 中登录启用本插件提供的 Provider：`magpie plugin login agentcompass`（显示名称为 `AgentCompass`）；
+2. 进入你的 **Routing Group** 设置，将 **Classifier（分类器模型）** 选择为 `agentcompass/agentcompass-systemone`（CLI：`magpie group set <group> effort=auto classifier=agentcompass/agentcompass-systemone`）；
 3. 在 Magpie 全局设置中，可将 `ClassifyTimeout` 调整为 `8000`–`30000` ms（最高支持 `60000` ms）；
-4. 在 Routing Group 中按标准类别（如 `code`、`debug`、`research`、`writing`、`quick`）配置你的目标模型列表——插件会自动运行 AgentCompass 算法，选出最匹配的规则分支与思考档位（`low` / `medium` / `high` / `xhigh`）。
+4. 在 Routing Group 中按标准类别（如 `direction_reasoning`、`debug_review`、`self_contained_code`、`bounded_bulk_work`）配置你的目标模型列表——插件会自动运行 AgentCompass 算法，选出最匹配的规则分支与思考档位（`low` / `medium` / `high` / `xhigh`）。
 
 ---
 
-## 🧪 运行测试
+## 🧪 运行测试与 Linux 沙盒真实网关实测报告（Real Linux Sandbox E2E Verification）
 
-本仓库内置完整的零依赖单元测试套件（覆盖多协议解析、10 维画像推断、能力向量选型、两阶段 `hooks -> middleware` 接力及 `/v1/systemone` 协议兼容）：
+### 1. 单元测试（Node.js / Bun 零依赖）
+
+覆盖多协议解析、10 维画像推断、能力向量选型、两阶段 `hooks -> middleware` 接力及 `/v1/systemone` 协议兼容：
 
 ```bash
 node --test test/router.test.mjs
 ```
+
+### 2. Linux 沙盒真实网关实测（Real Linux Sandbox E2E Verification）
+
+我们在隔离的 Linux x86_64 沙盒环境（WSL2 Linux `6.18.40.1-microsoft-standard-WSL2 x86_64` `/run/magpie-sandbox` tmpfs）中，使用真实编译的 Linux `magpie` 二进制守护进程（`magpie serve`）+ Linux `bun` v1.4.2 插件宿主 + 嵌入式 `moejs` 引擎完成了全链路端到端实测（脚本见 [`test/run-linux-sandbox.sh`](./test/run-linux-sandbox.sh) 与 [`test/linux-sandbox-e2e.mjs`](./test/linux-sandbox-e2e.mjs)，完整 JSON 报告见 [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json)）。
+
+#### 插件挂载与 `magpie plugin list` 实测输出
+
+```text
+/run/magpie-sandbox/agentcompass  on
+  async gateway hook  onRequest
+  gateway middleware  onRequest, onAccount · routings agentcompass/agentcompass, agentcompass/agentcompass-pure
+  agentcompass (AgentCompass, 1 models)  signed in
+```
+
+#### 6 项真实网关端到端（E2E）验证结果
+
+| 测试用例 | 验证链路与协议 | 实测路由结果 (`routedModel` : `routedEffort`) | 关键不变量验证 | 状态 |
+| :--- | :--- | :--- | :--- | :--- |
+| **Test 1: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1600 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 载体被剥离，反递归头 `Magpie-Router/1.0` 生效 | ✅ PASS |
+| **Test 2: 第一性原理发散架构脑暴（Model DNA `divergence=0.96`）** | **Mode A** · `/v1/chat/completions` · `model="agentcompass/auto"` | `gemini-4-argon-high` : `high` | 发散度 `divergence=3` 触发 Model DNA 发散加权，精准路由至 `gemini-4-argon-high` | ✅ PASS |
+| **Test 3: OpenAI `/v1/responses` 协议 + 单模块高内聚代码实现** | **Mode A** · `/v1/responses` · `model="auto"` | `gpt-6.1-sol` : `high` | 兼容 `/v1/responses` 结构化 `input`，`module_precision=0.95` 路由至 `gpt-6.1-sol` | ✅ PASS |
+| **Test 4: 日常机械批量重命名（防杀鸡用牛刀惩罚）** | **Mode A** · `/v1/chat/completions` · `model="auto"` | `gemini-3.8-flash-high` : `high` | `bounded_bulk_work` (`routine`) 对高价旗舰模型施加 `overqualification` 惩罚，自动选择轻量模型 | ✅ PASS |
+| **Test 5: 原生路由组 `/v1/systemone` 决策 — 开放式方案脑暴** | **Mode B** (`group/compass-group` · `classifier=agentcompass/agentcompass-systemone` · `effort=auto`) | `gemini-4-argon-high` : `high` | 通过 `/v1/systemone`（`jevLevelled` + `jevBody`）匹配 `intent=direction_reasoning` 并将 `effort` 从 `medium` 自动升级为 `high` | ✅ PASS |
+| **Test 6: 原生路由组 `/v1/systemone` 决策 — 多文件内存损坏与死锁根因排查** | **Mode B** (`group/compass-group` · `classifier=agentcompass/agentcompass-systemone` · `effort=auto`) | `claude-opus-5-5` : `xhigh` | 通过 `/v1/systemone` 匹配 `intent=debug_review` 并将 `effort` 从 `low` 自动升级为 `xhigh` (`jevLevels[3]`) | ✅ PASS |
 
 ---
 
@@ -211,10 +245,12 @@ node --test test/router.test.mjs
 - [`src/allocator.js`](./src/allocator.js) — AgentCompass 纯意图与能力矩阵选型核心算法实现
 - [`src/scorer-live.js`](./src/scorer-live.js) — 异步 System-One 10 维画像器（支持 Jev `/v1/systemone`、OpenAI 兼容接口、LRU 缓存与超时无损降级）
 - [`src/hooks.js`](./src/hooks.js) — **阶段一（Bun `magpie.hooks`，最长 10s 预算）**：执行异步 10D 画像与选型，注入 `body.__agentcompass_route`
-- [`src/middleware.js`](./src/middleware.js) — **阶段二（`moejs` `magpie.middleware`，250ms 预算）**：消费路由结果并改写 `body.model = "<model>:<effort>"`，同时导出 `agentcompass-pure` 账号池策略
-- [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：实现 `/v1/systemone`（兼容 `jevLevelled` 与 `jevBody`）
-- [`docs/RESEARCH_AND_SCHEME.md`](./docs/RESEARCH_AND_SCHEME.md) — **深度调研与架构设计报告**（含 Magpie 源码逐文件行号级分析与完整方案推导）
-- [`test/router.test.mjs`](./test/router.test.mjs) — 自动化测试套件
+- [`src/middleware.js`](./src/middleware.js) — **阶段二（`moejs` `magpie.middleware`，250ms 预算）**：消费路由结果并改写 `body.model = "<model>:<effort>"`，同时导出 `agentcompass` / `agentcompass-pure` 账号池策略
+- [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled` 与 `jevBody`）
+- [`docs/RESEARCH_AND_SCHEME.md`](./docs/RESEARCH_AND_SCHEME.md) — **深度调研与架构设计报告**（含 Magpie 源码逐文件行号级分析、完整方案推导与 Linux 沙盒实测报告）
+- [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json) — **Linux 沙盒真实网关 E2E 实测 JSON 报告**
+- [`test/router.test.mjs`](./test/router.test.mjs) — 自动化单元测试套件
+- [`test/linux-sandbox-e2e.mjs`](./test/linux-sandbox-e2e.mjs) & [`test/run-linux-sandbox.sh`](./test/run-linux-sandbox.sh) — Linux 沙盒真实 `magpie serve` 全链路端到端验证套件
 
 ---
 

@@ -1,5 +1,5 @@
 {
-  "name": "magpie-agentcompass-router",
+  "name": "agentcompass",
   "version": "0.1.0",
   "description": "Pure intent and multi-dimensional capability routing plugin for Magpie, powered by AgentCompass's System-One 10-field task profiler and Model DNA allocator.",
   "type": "module",

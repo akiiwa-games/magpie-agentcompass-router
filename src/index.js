@@ -2,10 +2,10 @@
  * Native Magpie System-One Decision Provider Plugin (`decide: true` / `decides: true`)
  *
  * How Magpie integrates this provider (`internal/gateway/decide.go` & `internal/plugin/host.js:1787,1821`):
- * 1. Registers provider `"agentcompass-router"` with `decide: true` and model
+ * 1. Registers provider `"agentcompass"` with `decide: true` and model
  *    `"agentcompass-systemone"` with `decides: true`.
  * 2. In Magpie's UI (Routing -> Group -> Classifier), the user can select
- *    `agentcompass-router/agentcompass-systemone` as the Routing Group's Classifier.
+ *    `agentcompass/agentcompass-systemone` as the Routing Group's Classifier.
  * 3. Magpie gives Classifier calls `Settings.ClassifyTimeout`: **8,000 ms default, configurable
  *    up to 60,000 ms (60 seconds)** (`internal/gateway/classify.go:classifyTimeout()`).
  * 4. Handles all three `/v1/systemone` request shapes sent by Magpie:
@@ -18,7 +18,7 @@ import { rankCandidates, selectBestRoute } from "./allocator.js";
 import { CANONICAL_ROUTES, canonicalModel } from "./catalog.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
-export const PROVIDER_ID = "agentcompass-router";
+export const PROVIDER_ID = "agentcompass";
 export const DECISION_MODEL_ID = "agentcompass-systemone";
 
 const DIFFICULTY_SCALE_WORDS = {
@@ -94,10 +94,11 @@ export function evaluateLevelsProbe(kinds = []) {
 export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
   const choices = Object.keys(criteriaObj || {});
   if (choices.length === 0) {
-    return { choice: "none", confidence: 1.0, probabilities: { none: 1.0 } };
+    return { choice: "none of these", confidence: 1.0, probabilities: { "none of these": 1.0 } };
   }
 
-  const nonNone = choices.filter((c) => c !== "none");
+  const noneKey = choices.find((c) => c === "none of these" || c === "none") || "none of these";
+  const nonNone = choices.filter((c) => c !== "none" && c !== "none of these");
   const wk = String(routeDecision.workKind || "").toLowerCase();
   const diff = String(routeDecision.difficulty || "hard").toLowerCase();
   const targetCanon = canonicalModel(routeDecision.targetModel || "").toLowerCase();
@@ -115,7 +116,7 @@ export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
     // 1. Exact or substring match with AgentCompass's 16 canonical `work_kind` routes
     if (lower === wk || lower.replace(/[-\s]/g, "_") === wk) {
       w = 10.0;
-    } else if (desc.includes(wk.replace(/_/g, " ")) || lower.includes(wk.split("_")[0])) {
+    } else if (desc.includes(wk.replace(/_/g, " ")) || (wk && lower.includes(wk.split("_")[0]))) {
       w = Math.max(w, 6.0);
     }
 
@@ -131,12 +132,13 @@ export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
     if (
       (wk === "frontend_implementation" && /frontend|ui|react|css|前端|界面/.test(lower)) ||
       (wk === "debug_review" && /debug|bug|fix|review|audit|排查|修复|审查|审计/.test(lower)) ||
-      ((wk === "direction_reasoning" || wk === "complex_build_plan") && /plan|architect|design|scheme|方案|架构|规划/.test(lower)) ||
+      ((wk === "direction_reasoning" || wk === "complex_build_plan") &&
+        /direction|reason|brainstorm|creative|plan|architect|design|scheme|方案|架构|规划|创意|脑暴|推理/.test(lower)) ||
       ((wk === "bounded_bulk_work" || wk === "tool_execution") && /fast|quick|routine|bulk|simple|简单|日常|批量|轻量/.test(lower)) ||
       (wk === "visual_analysis" && /vis|image|screenshot|看图|视觉|截图/.test(lower)) ||
       (wk === "computer_use" && /gui|desktop|browser|computer|桌面|点击/.test(lower)) ||
       (style === "exploration" && /explor|research|search|分析|调研|探索/.test(lower)) ||
-      (style === "engineering" && /code|coding|implement|dev|代码|开发|实现/.test(lower))
+      ((wk === "self_contained_code" || wk === "general_implementation") && /code|coding|implement|dev|代码|开发|实现/.test(lower))
     ) {
       w = Math.max(w, 7.5);
     }
@@ -148,8 +150,8 @@ export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
     }
   }
 
-  if (!bestChoice || (bestWeight < 1.0 && choices.includes("none"))) {
-    bestChoice = choices.includes("none") ? "none" : nonNone[0];
+  if (!bestChoice || (bestWeight < 1.0 && choices.includes(noneKey))) {
+    bestChoice = choices.includes(noneKey) ? noneKey : nonNone[0];
   }
 
   // Build normalized probability distribution so Magpie's `sureOf` (`decide.go:257`, `jevSure = 0.6`) accepts the choice
@@ -194,34 +196,45 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     };
   }
 
-  // Case 2: Magpie Routing Group per-turn decision (`state.turn` + `questions.intent` / `level` / `effort`)
+  // Case 2: Magpie Routing Group per-turn decision (`state.message` / `state.turn` + `questions.intent` / `level` / `effort`)
   const turnText =
-    typeof state.turn === "string"
-      ? state.turn
-      : typeof state.task?.objective === "string"
-        ? state.task.objective
-        : JSON.stringify(state);
+    typeof state.message === "string"
+      ? state.message
+      : typeof state.turn === "string"
+        ? state.turn
+        : typeof state.task?.objective === "string"
+          ? state.task.objective
+          : JSON.stringify(state);
+
+  const prevUser =
+    typeof state.previous_user_message === "string"
+      ? state.previous_user_message
+      : typeof state.previous_user === "string"
+        ? state.previous_user
+        : "";
 
   const taskFacts = {
     objective: turnText,
-    previousUser: typeof state.previous_user === "string" ? state.previous_user : "",
+    previousUser: prevUser,
     hasVisualInput: Boolean(state.has_visual_input),
   };
 
+  const scorerCfg = pluginOptions.scorer && typeof pluginOptions.scorer === "object" ? pluginOptions.scorer : {};
+
   const { profile, meta } = await scoreTaskLive(taskFacts, {
-    scorerType: pluginOptions.scorerType || "heuristic",
-    scorerModel: pluginOptions.scorerModel,
-    scorerBaseUrl: pluginOptions.scorerBaseUrl,
-    scorerApiKey: pluginOptions.scorerApiKey,
-    jevBaseUrl: pluginOptions.jevBaseUrl,
-    jevApiKey: pluginOptions.jevApiKey,
-    scorerTimeoutMs: pluginOptions.scorerTimeoutMs || 15000,
+    scorerType: pluginOptions.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
+    scorerModel: pluginOptions.scorerModel || scorerCfg.model,
+    scorerBaseUrl: pluginOptions.scorerBaseUrl || scorerCfg.baseUrl,
+    scorerApiKey: pluginOptions.scorerApiKey || scorerCfg.apiKey,
+    jevBaseUrl: pluginOptions.jevBaseUrl || scorerCfg.jevBaseUrl,
+    jevApiKey: pluginOptions.jevApiKey || scorerCfg.jevApiKey,
+    scorerTimeoutMs: pluginOptions.scorerTimeoutMs || scorerCfg.timeoutMs || 15000,
     fetch: pluginOptions.fetch,
   });
 
   const decision = selectBestRoute(profile, {
     objective: turnText,
-    candidateModels: pluginOptions.candidateModels,
+    candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
     catalog: pluginOptions.catalog,
   });
 
@@ -235,8 +248,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   }
   if (questions.effort) {
     const effScore = EFFORT_TO_JEV_SCORE[decision.targetEffort] ?? 2.0;
-    const probs = [0.02, 0.03, 0.03, 0.02];
-    const idx = Math.max(0, Math.min(3, Math.round(effScore)));
+    const idx = String(Math.max(0, Math.min(3, Math.round(effScore))));
+    const probs = { "0": 0.02, "1": 0.03, "2": 0.03, "3": 0.02 };
     probs[idx] = 0.9;
     answers.effort = {
       score: effScore,
@@ -291,7 +304,7 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
     async config(cfg) {
       cfg.provider = cfg.provider || {};
       cfg.provider[PROVIDER_ID] = {
-        name: "AgentCompass Intent Router",
+        name: "AgentCompass",
         api: "https://agentcompass.local/v1",
         decide: true,
         models: {
@@ -323,7 +336,7 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
         {
           type: "api",
           keyless: true,
-          label: "Enable AgentCompass Local Intent Router",
+          label: "Enable AgentCompass",
           async authorize() {
             return {
               type: "success",
@@ -371,5 +384,8 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
   };
 }
 
-export default AgentCompassRouterPlugin;
+export default {
+  id: "agentcompass",
+  server: AgentCompassRouterPlugin,
+};
 export { rankCandidates, selectBestRoute };

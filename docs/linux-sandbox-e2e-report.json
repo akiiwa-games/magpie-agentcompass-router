@@ -1,0 +1,48 @@
+{
+  "timestamp": "2026-11-03T06:25:24.541Z",
+  "platform": "linux",
+  "arch": "x64",
+  "release": "6.18.40.1-microsoft-standard-WSL2",
+  "sandboxRoot": "/run/magpie-sandbox",
+  "steps": [
+    {
+      "test": "Mode A (1,600ms Async System-One -> hooks.js [Bun] -> middleware.js [moejs]) — Root Cause Debugging",
+      "elapsedMs": 1717,
+      "scorerElapsedMs": 1603,
+      "routedModel": "claude-opus-5-5",
+      "routedEffort": "max",
+      "carrierStripped": true,
+      "pass": true
+    },
+    {
+      "test": "Mode A — Creative First-Principles Brainstorming (Model DNA divergence=95)",
+      "routedModel": "gemini-4-argon-high",
+      "routedEffort": "high",
+      "pass": true
+    },
+    {
+      "test": "Mode A (`/v1/responses` protocol) — Self-Contained Module Coding (module_precision=95)",
+      "routedModel": "gpt-6.1-sol",
+      "routedEffort": "high",
+      "pass": true
+    },
+    {
+      "test": "Mode A — Routine Bounded Bulk Work (Overqualification Penalty)",
+      "routedModel": "gemini-3.8-flash-high",
+      "routedEffort": "high",
+      "pass": true
+    },
+    {
+      "test": "Mode B (Native Routing Group `group/compass-group` via `/v1/systemone` Decision Provider) — Direction Reasoning",
+      "routedModel": "gemini-4-argon-high",
+      "routedEffort": "high",
+      "pass": true
+    },
+    {
+      "test": "Mode B (Native Routing Group `group/compass-group` via `/v1/systemone` Decision Provider) — Debug Review",
+      "routedModel": "claude-opus-5-5",
+      "routedEffort": "xhigh",
+      "pass": true
+    }
+  ]
+}

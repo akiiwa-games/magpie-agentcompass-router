@@ -57,7 +57,7 @@ flowchart TD
 
     subgraph ModeB["模式 B：原生路由组决策插件 (Decision Provider, 预算 8,000~60,000 ms)"]
         Serve["Magpie Gateway: s.serve() -> ruleFor() -> askJev()"]
-        Decide["Bun 决策插件 (src/index.js)\n注册 agentcompass-router/agentcompass-systemone (decide: true)\n预算: ClassifyTimeout = 8,000~60,000 ms\n拦截 POST /v1/systemone (支持 jevLevelled 与 jevBody)\n运行 10 维画像 + AgentCompass 评分\n返回精准 intent 概率分布 + effort 档位 (0..3)"]
+        Decide["Bun 决策插件 (src/index.js)\n注册 agentcompass/agentcompass-systemone (decide: true)\n预算: ClassifyTimeout = 8,000~60,000 ms\n拦截 POST /v1/systemone (支持 jevLevelled 与 jevBody)\n运行 10 维画像 + AgentCompass 评分\n返回精准 intent 概率分布 + effort 档位 (0..3)"]
         Serve -->|"/v1/systemone"| Decide
     end
 
@@ -79,11 +79,11 @@ flowchart TD
 
 ### 2.2 模式 B：原生 `/v1/systemone` 决策模型插件（`decide: true` / `decides: true`，最高 60 秒预算）
 
-- `src/index.js` 同时实现了 OpenCode / Magpie 标准 Provider 插件接口，通过 `config(cfg)` 注册虚拟决策提供商 `agentcompass-router`（`decide: true`）和决策模型 `agentcompass-systemone`（`decides: true`）。
-- 用户在 Magpie 的 **Routing（路由组）** 页面将分类器（Classifier）选为 `AgentCompass System-One Profiler` 后，Magpie 会给予每次分类默认 **8,000 ms**、在设置中最高可调至 **60,000 ms（60 秒）** 的时间预算（`internal/gateway/classify.go:classifyTimeout`）。
+- `src/index.js` 同时实现了 OpenCode / Magpie 标准 Provider 插件接口，通过 `config(cfg)` 注册虚拟决策提供商 `agentcompass`（显示名称 `AgentCompass`，`decide: true`）和决策模型 `agentcompass-systemone`（`decides: true`）。
+- 用户通过 `magpie plugin login agentcompass` 登录并在 Magpie 的 **Routing（路由组）** 页面将分类器（Classifier）选为 `agentcompass/agentcompass-systemone`（`AgentCompass System-One Profiler`）后，Magpie 会给予每次分类默认 **8,000 ms**、在设置中最高可调至 **60,000 ms（60 秒）** 的时间预算（`internal/gateway/classify.go:classifyTimeout`）。
 - 我们的 `handleSystemOneRequest` 完整兼容了 `internal/gateway/decide.go` 的两阶段协议：
   1. **`jevLevelled` 量表探测请求**（`decide.go:310`，含 `state.kinds` 与 `questions.levels`、`questions.work0..N`）；
-  2. **`jevBody` 轮次决策请求**（`decide.go:167`，含 `state.turn` 与 `questions.intent` / `questions.level` / `questions.effort`），将 AgentCompass 算出的 `workKind`、`difficulty`、`targetModel` 和 `targetEffort` 转化为满足 `jevSure (0.6)` 置信度门限的概率分布返回给 Magpie。
+  2. **`jevBody` 轮次决策请求**（`decide.go:167`，含 `state.turn` 与 `questions.intent` / `questions.level` / `questions.effort`），将 AgentCompass 算出的 `workKind`、`difficulty`、`targetModel` 和 `targetEffort` 转化为满足 `jevSure (0.6)` 置信度门限的概率分布（含 `"none of these"` 与 `effort.probabilities` `"0".."3"` 字典）返回给 Magpie。
 
 ---
 
@@ -129,3 +129,39 @@ $$\text{fit} = w_r \cdot \text{route\_fit} + w_v \cdot \text{vector\_fit} + w_s 
 $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \text{ability\_score} + \text{quality\_bonus} - \text{effort\_penalty} - \text{overqualification} - \text{shortfall}$$
 
 - 在常规任务（`minimum_sufficient`）上，当模型有效能力超出 $\text{required\_ability} + \text{saturation\_span}$ 时，按该模型的小时费率 $\text{usd\_per\_hour} \times \text{effort\_burn}$ 施加 `overqualification` 惩罚，从而确保日常批量/简单任务自动落到 `gemini-3.8-flash-high` / `claude-haiku-5-5` / `gpt-6-luna`，而把 `claude-opus-5-5` / `gpt-6-astra` 留给真正需要高阶推理的任务。
+
+---
+
+## 4. Linux 沙盒真实网关实测报告（Real Linux Sandbox E2E Verification）
+
+为验证三层异构运行时（Go Gateway 主进程 + Bun OpenCode 插件宿主 + 嵌入式 `moejs` 引擎）与四条协议边界的真实端到端行为，我们在 WSL2 Linux 沙盒（`Linux 6.18.40.1-microsoft-standard-WSL2 x86_64`，`/run/magpie-sandbox` tmpfs）中编译并运行了真实 Linux `magpie` 守护进程（`magpie serve`）与 Linux `bun` v1.4.2 宿主（完整脚本见 [`test/run-linux-sandbox.sh`](../test/run-linux-sandbox.sh) 与 [`test/linux-sandbox-e2e.mjs`](../test/linux-sandbox-e2e.mjs)，实测产物见 [`docs/linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)）：
+
+### 4.1 插件注册与扩展点验证（`magpie plugin list`）
+
+```text
+✓ added /run/magpie-sandbox/agentcompass
+✓ signed in to AgentCompass · its models are agentcompass/<model>
+/run/magpie-sandbox/agentcompass  on
+  async gateway hook  onRequest
+  gateway middleware  onRequest, onAccount · routings agentcompass/agentcompass, agentcompass/agentcompass-pure
+  agentcompass (AgentCompass, 1 models)  signed in
+```
+
+### 4.2 6 项真实网关 E2E 测试矩阵
+
+| 序号 | 模式与协议 | 输入请求与意图特征 | 实测路由落点 | 关键契约验证 | 结果 |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **1** | **Mode A** · `/v1/chat/completions` (`model="auto"`) | 跨 15 个微服务的分布式锁死锁与竞态根因排查（模拟 **1,600 ms** 慢速异步 System-One 评分） | `claude-opus-5-5:max` | 突破 20ms/250ms/1200ms 限制（耗时 `1759 ms`，其中评分 `1601 ms`）；`__agentcompass_route` 载体被 `moejs` 剥离；携带 `User-Agent: Magpie-Router/1.0` | **PASS** |
+| **2** | **Mode A** · `/v1/chat/completions` (`model="agentcompass/auto"`) | 开放式第一性原理创意架构方向与产品机制脑暴（`divergence=3`） | `gemini-4-argon-high:high` | Model DNA `divergence` ($0.96$) 主导开放式脑暴选型 | **PASS** |
+| **3** | **Mode A** · `/v1/responses` (`model="auto"`) | 独立自包含 TypeScript LRU 缓存模块与单元测试实现 | `gpt-6.1-sol:high` | OpenAI `/v1/responses` 协议解析与 `reasoning.effort` 注入；Model DNA `module_precision` ($0.95$) 生效 | **PASS** |
+| **4** | **Mode A** · `/v1/chat/completions` (`model="auto"`) | JSON 夹具中 `foo_bar` 到 `fooBar` 的机械批量重命名（`bounded_bulk_work`） | `gemini-3.8-flash-high:high` | `routine` 难度触发旗舰模型 `overqualification` 惩罚，自动收敛至高性价比轻量模型 | **PASS** |
+| **5** | **Mode B** · `/v1/chat/completions` (`model="group/compass-group"`, `classifier=agentcompass/agentcompass-systemone`) | 第一性原理非常规产品架构脑暴（初始 `reasoning_effort="medium"`） | `gemini-4-argon-high:high` | `/v1/systemone`（`jevLevelled` + `jevBody`）匹配规则 `intent=direction_reasoning`，`effort=auto` 将 `medium` 升级为 `high` | **PASS** |
+| **6** | **Mode B** · `/v1/chat/completions` (`model="group/compass-group"`, `classifier=agentcompass/agentcompass-systemone`) | 共识状态机多文件内存损坏与死锁根因诊断（初始 `reasoning_effort="low"`） | `claude-opus-5-5:xhigh` | `/v1/systemone` 匹配规则 `intent=debug_review`，`effort=auto` 通过 `probabilities["3"]=0.9` 将 `low` 升级为 `xhigh` | **PASS** |
+
+---
+
+## 5. 与 [AgentCompass 本体 (`akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass) 的生态协同
+
+本插件提供 Magpie 网关层面的**单轮纯意图路由（Turn-Level Micro-Router）**。在生产多 Agent 研发工作流中，推荐与 **[AgentCompass 本体 (`https://github.com/akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass)**、**[Magpie](https://github.com/yetone/magpie)**、**[Cindy](https://github.com/yetone/cindy)** 及 **Paseo** 配合使用：
+- **AgentCompass 本体**：负责跨宿主子 Agent 任务拆解与派发（`agentcompass roll`）、结合 Cindy 实时配额的 5h/7d 窗口机会成本精算、2M 累计未压缩上下文强制交接换人、以及 `PreToolUse` 路由门禁；
+- **Magpie + `agentcompass` 插件（本仓库）**：负责本地多订阅网关代理、协议转换与单次请求的 10D × (7D+3D) 自动模型/思考档位路由。

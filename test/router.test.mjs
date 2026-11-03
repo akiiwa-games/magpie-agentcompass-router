@@ -3,7 +3,8 @@ import test from "node:test";
 
 import { rankCandidates, selectBestRoute } from "../src/allocator.js";
 import { ROUTE_CARRIER_KEY, onRequest as hookOnRequest } from "../src/hooks.js";
-import AgentCompassRouterPlugin, {
+import {
+  AgentCompassRouterPlugin,
   DECISION_MODEL_ID,
   PROVIDER_ID,
   evaluateLevelsProbe,
@@ -288,9 +289,11 @@ test("4. Native Magpie `/v1/systemone` Decision Provider (`decide: true` / `deci
   assert.ok(turnDecision.answers.effort.score >= 2.0, "coupled review must select high/xhigh effort (>= 2.0)");
 
   // 4c. Test OpenCode / Magpie plugin registration and loader.fetch
+  assert.equal(PROVIDER_ID, "agentcompass");
   const plugin = await AgentCompassRouterPlugin({ magpie: { option: () => false } }, {});
   const cfg = {};
   await plugin.config(cfg);
+  assert.equal(cfg.provider[PROVIDER_ID].name, "AgentCompass");
   assert.equal(cfg.provider[PROVIDER_ID].decide, true);
   assert.equal(cfg.provider[PROVIDER_ID].models[DECISION_MODEL_ID].decides, true);
 
@@ -318,15 +321,12 @@ test("4. Native Magpie `/v1/systemone` Decision Provider (`decide: true` / `deci
   assert.equal(json.answers.intent.choice, "bounded_bulk_work");
 });
 
-test("5. Pool strategy `agentcompass-pure` orders non-resting lowest-used seats first", () => {
-  const ordered = strategies["agentcompass-pure"](
-    "anthropic",
-    [
-      { key: "seat-resting", used: 10, resting: true },
-      { key: "seat-busy", used: 80, resting: false },
-      { key: "seat-fresh", used: 20, resting: false },
-    ],
-    {},
-  );
-  assert.deepEqual(ordered, ["seat-fresh", "seat-busy", "seat-resting"]);
+test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting lowest-used seats first", () => {
+  const seats = [
+    { key: "seat-resting", used: 10, resting: true },
+    { key: "seat-busy", used: 80, resting: false },
+    { key: "seat-fresh", used: 20, resting: false },
+  ];
+  assert.deepEqual(strategies.agentcompass("anthropic", seats, {}), ["seat-fresh", "seat-busy", "seat-resting"]);
+  assert.deepEqual(strategies["agentcompass-pure"]("anthropic", seats, {}), ["seat-fresh", "seat-busy", "seat-resting"]);
 });
