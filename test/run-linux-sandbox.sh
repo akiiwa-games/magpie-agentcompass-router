@@ -1,11 +1,22 @@
 #!/bin/sh
 set -eu
 
-SCRATCH="/mnt/host/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch"
-REPO="/mnt/host/e/PROJECTS/magpie-agentcompass-router"
+if [ -d "/mnt/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch" ]; then
+  SCRATCH="/mnt/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch"
+else
+  SCRATCH="/mnt/host/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch"
+fi
+
+if [ -d "/mnt/e/PROJECTS/magpie-agentcompass-router" ]; then
+  REPO="/mnt/e/PROJECTS/magpie-agentcompass-router"
+else
+  REPO="/mnt/host/e/PROJECTS/magpie-agentcompass-router"
+fi
+
 SANDBOX="/run/magpie-sandbox"
 
 cleanup() {
+  pkill -f "$SANDBOX/magpie" 2>/dev/null || true
   rm -rf "$SANDBOX"
 }
 trap cleanup EXIT
@@ -52,6 +63,6 @@ echo "Linux Bun runtime: $BUN_BIN ($("$BUN_BIN" --version))"
 echo "=== [3/4] Running Unit Tests Inside Linux Sandbox ==="
 "$BUN_BIN" test "$PLUGIN_DIR/test/router.test.mjs"
 
-echo "=== [4/4] Running Live Magpie Gateway End-to-End Tests Inside Linux Sandbox ==="
+echo "=== [4/4] Running Live Magpie Web + Gateway Full-Chain E2E Tests Inside Linux Sandbox ==="
 "$BUN_BIN" "$PLUGIN_DIR/test/linux-sandbox-e2e.mjs"
 cp "$SANDBOX/e2e-report.json" "$REPO/docs/linux-sandbox-e2e-report.json"

@@ -65,16 +65,26 @@ export async function onRequest(body, ctx = {}) {
     return undefined;
   }
 
+  const envScorerUrl = globalThis.process?.env?.AGENTCOMPASS_SCORER_URL || "";
+  const envScorerTimeout = Number(globalThis.process?.env?.AGENTCOMPASS_SCORER_TIMEOUT_MS) || 0;
+  const preferHeuristic =
+    options.prefer_local_heuristic === true ||
+    scorerCfg.prefer_local_heuristic === true ||
+    globalThis.process?.env?.AGENTCOMPASS_PREFER_LOCAL_HEURISTIC === "1";
+
   const { profile, meta } = await scoreTaskLive(facts, {
-    scorerType: options.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
-    scorerModel: options.scorerModel || scorerCfg.model,
-    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl,
-    scorerApiKey: options.scorerApiKey || scorerCfg.apiKey,
+    scorerType: preferHeuristic
+      ? "heuristic"
+      : options.scorerType || scorerCfg.kind || scorerCfg.type || (envScorerUrl ? "openai_compatible" : "heuristic"),
+    scorerModel: options.scorerModel || scorerCfg.model || globalThis.process?.env?.AGENTCOMPASS_SCORER_MODEL,
+    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl || envScorerUrl,
+    scorerApiKey: options.scorerApiKey || scorerCfg.apiKey || globalThis.process?.env?.AGENTCOMPASS_SCORER_API_KEY,
     jevBaseUrl: options.jevBaseUrl || scorerCfg.jevBaseUrl,
     jevApiKey: options.jevApiKey || scorerCfg.jevApiKey,
     scorerTimeoutMs:
       options.scorerTimeoutMs ||
       scorerCfg.timeoutMs ||
+      envScorerTimeout ||
       Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
     useCache: options.useCache !== false && scorerCfg.useCache !== false,
     signal: ctx.signal,

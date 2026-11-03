@@ -224,16 +224,17 @@ node --test test/router.test.mjs
   agentcompass (AgentCompass, 1 models)  signed in
 ```
 
-#### 6 项真实网关端到端（E2E）验证结果
+#### 7 大场景全链路真实网关与插件市场端到端（E2E）验证结果
 
-| 测试用例 | 验证链路与协议 | 实测路由结果 (`routedModel` : `routedEffort`) | 关键不变量验证 | 状态 |
+| 场景 | 验证链路与协议 | 实测路由与市场合约结果 | 关键不变量验证 | 状态 |
 | :--- | :--- | :--- | :--- | :--- |
-| **Test 1: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1600 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 载体被剥离，反递归头 `Magpie-Router/1.0` 生效 | ✅ PASS |
-| **Test 2: 第一性原理发散架构脑暴（Model DNA `divergence=0.96`）** | **Mode A** · `/v1/chat/completions` · `model="agentcompass/auto"` | `gemini-4-argon-high` : `high` | 发散度 `divergence=3` 触发 Model DNA 发散加权，精准路由至 `gemini-4-argon-high` | ✅ PASS |
-| **Test 3: OpenAI `/v1/responses` 协议 + 单模块高内聚代码实现** | **Mode A** · `/v1/responses` · `model="auto"` | `gpt-6.1-sol` : `high` | 兼容 `/v1/responses` 结构化 `input`，`module_precision=0.95` 路由至 `gpt-6.1-sol` | ✅ PASS |
-| **Test 4: 日常机械批量重命名（防杀鸡用牛刀惩罚）** | **Mode A** · `/v1/chat/completions` · `model="auto"` | `gemini-3.8-flash-high` : `high` | `bounded_bulk_work` (`routine`) 对高价旗舰模型施加 `overqualification` 惩罚，自动选择轻量模型 | ✅ PASS |
-| **Test 5: 原生路由组 `/v1/systemone` 决策 — 开放式方案脑暴** | **Mode B** (`group/compass-group` · `classifier=agentcompass/agentcompass-systemone` · `effort=auto`) | `gemini-4-argon-high` : `high` | 通过 `/v1/systemone`（`jevLevelled` + `jevBody`）匹配 `intent=direction_reasoning` 并将 `effort` 从 `medium` 自动升级为 `high` | ✅ PASS |
-| **Test 6: 原生路由组 `/v1/systemone` 决策 — 多文件内存损坏与死锁根因排查** | **Mode B** (`group/compass-group` · `classifier=agentcompass/agentcompass-systemone` · `effort=auto`) | `claude-opus-5-5` : `xhigh` | 通过 `/v1/systemone` 匹配 `intent=debug_review` 并将 `effort` 从 `low` 自动升级为 `xhigh` (`jevLevels[3]`) | ✅ PASS |
+| **Scenario 1: CLI 插件生命周期与元数据契约** | `magpie plugin add` · `magpie plugin login agentcompass` · `magpie plugin list` | `agentcompass (AgentCompass, 1 models) signed in` · `routings agentcompass/agentcompass, agentcompass/agentcompass-pure` | `magpie.name = "AgentCompass"` 与 `magpie.icon` (`data:image/svg+xml;base64,...`) 校验通过 | ✅ PASS |
+| **Scenario 2: 插件市场 (`registry.json`) 与 Web/GUI 管理 API** | `magpie web` · `GET /api/plugins/listings` · `GET /api/plugins` · `GET /api/plugins/page` · `POST /api/plugins/off` & `options` | 市场解析 `package: "agentcompass"`；图标落盘为 `file:a100c6af45032ded.svg`；README 渲染 `15,217 B`；`Off: true` 时请求保持原模型 `gpt-6-luna` 不改写 | 完整覆盖 `internal/plugin/market.go`、`github.go` 与 `internal/gui/plugins.go` | ✅ PASS |
+| **Scenario 3: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1601 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 载体被剥离，反递归头 `Magpie-Router/1.0` 生效 | ✅ PASS |
+| **Scenario 4: 5 维 Model DNA 区分度（发散创意 vs 独立模块编码 vs 日常批量降级）** | **Mode A** · `/v1/chat/completions` & `/v1/responses` | 发散脑暴 $\rightarrow$ `gemini-4-argon-high:high`<br/>独立模块 (`/v1/responses`) $\rightarrow$ `gpt-6.1-sol:high`<br/>机械批量重命名 $\rightarrow$ `gemini-3.8-flash-high:high` | `divergence`、`module_precision` 与 `overqualification` 过配惩罚同时生效 | ✅ PASS |
+| **Scenario 5: Anthropic `/v1/messages` 协议与 SSE 流式 (`stream: true`)** | **Mode A** · `POST /v1/messages` & `POST /v1/chat/completions` (`stream: true`) | `/v1/messages` $\rightarrow$ `claude-opus-5-5` (`type="message"`)<br/>SSE `stream: true` $\rightarrow$ `gpt-6.1-sol:high` (`text/event-stream` + `[DONE]`) | 流式请求与 Anthropic 协议均正常路由且不触发 `host.js:1411` 字段回滚 | ✅ PASS |
+| **Scenario 6: 故障演练与优雅降级（HTTP 500 & 评分超时）** | **Mode A** · 远程评分器注入 `HTTP 500` 与 `2000ms > 300ms` 超时 | `HTTP 500` $\rightarrow$ `claude-opus-5-5`<br/>`Timeout (354ms)` $\rightarrow$ `gemini-4-argon-high` | 远程 System-One 异常或超时时自动无缝回退至 `<1ms` 本地确定性 `profileTask`，网关请求零报错 | ✅ PASS |
+| **Scenario 7: 原生路由组 `/v1/systemone` 决策（含规则命中、`"none of these"` 兜底与 `effort=auto`）** | **Mode B** (`group/compass-group` · `classifier=agentcompass/agentcompass-systemone` · `effort=auto`) | `direction_reasoning` $\rightarrow$ `gemini-4-argon-high:high`<br/>`debug_review` $\rightarrow$ `claude-opus-5-5:xhigh`<br/>未命中意图 (`"none of these"`) $\rightarrow$ 默认首模型 `gpt-6-luna` | 完整验证 `jevLevelled`、`jevBody`、`"none of these"` 兜底回退及 Jev 四档思考强度自动升级 | ✅ PASS |
 
 ---
 
@@ -248,7 +249,8 @@ node --test test/router.test.mjs
 - [`src/middleware.js`](./src/middleware.js) — **阶段二（`moejs` `magpie.middleware`，250ms 预算）**：消费路由结果并改写 `body.model = "<model>:<effort>"`，同时导出 `agentcompass` / `agentcompass-pure` 账号池策略
 - [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled` 与 `jevBody`）
 - [`docs/RESEARCH_AND_SCHEME.md`](./docs/RESEARCH_AND_SCHEME.md) — **深度调研与架构设计报告**（含 Magpie 源码逐文件行号级分析、完整方案推导与 Linux 沙盒实测报告）
-- [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json) — **Linux 沙盒真实网关 E2E 实测 JSON 报告**
+- [`docs/magpie-community-registry-entry.json`](./docs/magpie-community-registry-entry.json) — **`magpie-community/plugins` 标准 `registry.json` 市场条目**
+- [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json) — **Linux 沙盒 7 大场景全链路真实网关与市场 E2E 实测 JSON 报告**
 - [`test/router.test.mjs`](./test/router.test.mjs) — 自动化单元测试套件
 - [`test/linux-sandbox-e2e.mjs`](./test/linux-sandbox-e2e.mjs) & [`test/run-linux-sandbox.sh`](./test/run-linux-sandbox.sh) — Linux 沙盒真实 `magpie serve` 全链路端到端验证套件
 

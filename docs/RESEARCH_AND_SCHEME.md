@@ -147,16 +147,17 @@ $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \tex
   agentcompass (AgentCompass, 1 models)  signed in
 ```
 
-### 4.2 6 项真实网关 E2E 测试矩阵
+### 4.2 7 大场景真实网关与插件市场 E2E 测试矩阵
 
-| 序号 | 模式与协议 | 输入请求与意图特征 | 实测路由落点 | 关键契约验证 | 结果 |
+| 场景 | 模式与协议 | 输入请求与测试动作 | 实测结果 | 关键契约验证 | 结果 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **1** | **Mode A** · `/v1/chat/completions` (`model="auto"`) | 跨 15 个微服务的分布式锁死锁与竞态根因排查（模拟 **1,600 ms** 慢速异步 System-One 评分） | `claude-opus-5-5:max` | 突破 20ms/250ms/1200ms 限制（耗时 `1759 ms`，其中评分 `1601 ms`）；`__agentcompass_route` 载体被 `moejs` 剥离；携带 `User-Agent: Magpie-Router/1.0` | **PASS** |
-| **2** | **Mode A** · `/v1/chat/completions` (`model="agentcompass/auto"`) | 开放式第一性原理创意架构方向与产品机制脑暴（`divergence=3`） | `gemini-4-argon-high:high` | Model DNA `divergence` ($0.96$) 主导开放式脑暴选型 | **PASS** |
-| **3** | **Mode A** · `/v1/responses` (`model="auto"`) | 独立自包含 TypeScript LRU 缓存模块与单元测试实现 | `gpt-6.1-sol:high` | OpenAI `/v1/responses` 协议解析与 `reasoning.effort` 注入；Model DNA `module_precision` ($0.95$) 生效 | **PASS** |
-| **4** | **Mode A** · `/v1/chat/completions` (`model="auto"`) | JSON 夹具中 `foo_bar` 到 `fooBar` 的机械批量重命名（`bounded_bulk_work`） | `gemini-3.8-flash-high:high` | `routine` 难度触发旗舰模型 `overqualification` 惩罚，自动收敛至高性价比轻量模型 | **PASS** |
-| **5** | **Mode B** · `/v1/chat/completions` (`model="group/compass-group"`, `classifier=agentcompass/agentcompass-systemone`) | 第一性原理非常规产品架构脑暴（初始 `reasoning_effort="medium"`） | `gemini-4-argon-high:high` | `/v1/systemone`（`jevLevelled` + `jevBody`）匹配规则 `intent=direction_reasoning`，`effort=auto` 将 `medium` 升级为 `high` | **PASS** |
-| **6** | **Mode B** · `/v1/chat/completions` (`model="group/compass-group"`, `classifier=agentcompass/agentcompass-systemone`) | 共识状态机多文件内存损坏与死锁根因诊断（初始 `reasoning_effort="low"`） | `claude-opus-5-5:xhigh` | `/v1/systemone` 匹配规则 `intent=debug_review`，`effort=auto` 通过 `probabilities["3"]=0.9` 将 `low` 升级为 `xhigh` | **PASS** |
+| **Scenario 1** | **CLI 插件生命周期** (`magpie plugin add/login/list`) | 安装 `/run/magpie-sandbox/agentcompass` 并登录 `agentcompass` | `agentcompass (AgentCompass, 1 models) signed in` · `routings agentcompass/agentcompass` | 验证 `package.json` 的 `magpie.name`、`magpie.icon` 与 OpenCode 插件加载（排除 `pi.js:49` 的 `pi-package` 冲突） | **PASS** |
+| **Scenario 2** | **插件市场与 Web/GUI API** (`magpie web` · `/api/plugins/*`) | `MAGPIE_PLUGIN_MARKET` 加载 `registry.json`；查询 `/api/plugins`、`/api/plugins/page`；切换 `POST /api/plugins/off` 与 `options` | 图标落盘为 `file:a100c6af45032ded.svg`；README `15,217 B`；`Off: true` 时请求保持原模型 `gpt-6-luna` | 完整验证 `market.go`、`github.go` 与 `gui/plugins.go` | **PASS** |
+| **Scenario 3** | **Mode A** · `/v1/chat/completions` (`model="auto"`) | 跨 15 个微服务的分布式锁死锁与竞态根因排查（模拟 **1,600 ms** 慢速异步 System-One 评分） | `claude-opus-5-5:max` | 突破 20ms/250ms/1200ms 限制（耗时 `1705 ms`，其中评分 `1601 ms`）；`__agentcompass_route` 载体被 `moejs` 剥离；携带 `User-Agent: Magpie-Router/1.0` | **PASS** |
+| **Scenario 4** | **Mode A** · `/v1/chat/completions` & `/v1/responses` | 开放式脑暴 (`divergence=3`)、独立 TS 模块实现 (`/v1/responses`)、JSON 夹具机械批量重命名 (`bounded_bulk_work`) | 脑暴 $\rightarrow$ `gemini-4-argon-high:high`<br/>编码 $\rightarrow$ `gpt-6.1-sol:high`<br/>批量 $\rightarrow$ `gemini-3.8-flash-high:high` | Model DNA (`divergence` / `module_precision`) 与 `routine` 难度 `overqualification` 惩罚同时生效 | **PASS** |
+| **Scenario 5** | **Mode A** · `POST /v1/messages` & SSE `stream: true` | Anthropic Messages API 请求与 OpenAI `stream: true` SSE 流式请求 | `/v1/messages` $\rightarrow$ `claude-opus-5-5`<br/>SSE 流式 $\rightarrow$ `gpt-6.1-sol:high` (`[DONE]`) | 验证 Anthropic 协议与 SSE 流式响应完整跑通且不触发 `host.js:1411` 回滚 | **PASS** |
+| **Scenario 6** | **Mode A** · 故障注入与优雅降级 | 远程 System-One 评分器返回 `HTTP 500` 及 `2000ms > 300ms` 超时 | `HTTP 500` $\rightarrow$ `claude-opus-5-5`<br/>`Timeout (354ms)` $\rightarrow$ `gemini-4-argon-high` | 远程评分器故障或超时自动中断并无缝回退至本地 `<1ms` `profileTask` 启发式画像 | **PASS** |
+| **Scenario 7** | **Mode B** · `/v1/chat/completions` (`model="group/compass-group"`, `classifier=agentcompass/agentcompass-systemone`) | 命中 `direction_reasoning`、命中 `debug_review`、以及未命中任何规则的纯文本翻译请求 | `direction_reasoning` $\rightarrow$ `gemini-4-argon-high:high`<br/>`debug_review` $\rightarrow$ `claude-opus-5-5:xhigh`<br/>`"none of these"` $\rightarrow$ `gpt-6-luna` | `/v1/systemone`（`jevLevelled` + `jevBody`）规则命中、`"none of these"` 兜底回退首模型、以及 `effort=auto` 四档升级全部通过 | **PASS** |
 
 ---
 

@@ -645,3 +645,5 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     task_count: "1",
   });
 }
+
+export const profileTask = inferTaskProfile;

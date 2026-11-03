@@ -15,8 +15,15 @@
   },
   "magpie": {
     "name": "AgentCompass",
+    "icon": "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMjgiIHN0cm9rZT0iIzNCODJGNiIgc3Ryb2tlLXdpZHRoPSI0IiBmaWxsPSIjMEYxNzJBIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMjIiIHN0cm9rZT0iIzYwQTVGQSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjMgMyIvPjxwb2x5Z29uIHBvaW50cz0iMzIsMTIgMzgsMzIgMzIsMjggMjYsMzIiIGZpbGw9IiNFRjQ0NDQiLz48cG9seWdvbiBwb2ludHM9IjMyLDUyIDM4LDMyIDMyLDM2IDI2LDMyIiBmaWxsPSIjRTJFOEYwIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMy41IiBmaWxsPSIjRjhGQUZDIi8+PC9zdmc+",
     "hooks": "./src/hooks.js",
-    "middleware": "./src/middleware.js"
+    "middleware": "./src/middleware.js",
+    "options": {
+      "gatewayTimeoutMs": 8000,
+      "routeAllModels": false,
+      "injectProtocolEffort": true,
+      "prefer_local_heuristic": false
+    }
   },
   "scripts": {
     "test": "node --test test/router.test.mjs"
@@ -24,6 +31,10 @@
   "keywords": [
     "magpie",
     "magpie-plugin",
+    "opencode",
+    "opencode-plugin",
+    "provider",
+    "auth",
     "agentcompass",
     "intent-routing",
     "llm-router",

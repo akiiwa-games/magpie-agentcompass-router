@@ -1,0 +1,13 @@
+{
+  "package": "agentcompass",
+  "name": "AgentCompass",
+  "providers": [
+    "agentcompass"
+  ],
+  "kind": "middleware",
+  "community": true,
+  "summary": {
+    "en": "Pure intent and multi-dimensional capability routing for Magpie: 10-field System-One task profiling, 7D capability vector + 3D Model DNA matching, automatic reasoning effort scaling, and /v1/systemone decision provider.",
+    "zh": "基于 AgentCompass 核心算法的纯意图与多维能力路由插件：10 维 System-One 任务画像、7 维客观能力向量 + 3 维模型基因（Model DNA）匹配、自动思考档位（Effort）缩放与 /v1/systemone 路由组分类器。"
+  }
+}

@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 import { rankCandidates, selectBestRoute } from "../src/allocator.js";
 import { ROUTE_CARRIER_KEY, onRequest as hookOnRequest } from "../src/hooks.js";
 import {
+   AGENTCOMPASS_ICON_DATA_URI,
   AgentCompassRouterPlugin,
   DECISION_MODEL_ID,
   PROVIDER_ID,
@@ -11,8 +15,10 @@ import {
   handleSystemOneRequest,
 } from "../src/index.js";
 import { onAccount as mwOnAccount, onRequest as mwOnRequest, strategies } from "../src/middleware.js";
-import { extractRequestFacts, inferTaskProfile } from "../src/profiler-core.js";
+import { extractRequestFacts, inferTaskProfile, profileTask } from "../src/profiler-core.js";
 import { clearProfileCache, scoreTaskLive } from "../src/scorer-live.js";
+
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("1. Deterministic 10-Field Profiler & AgentCompass Pure Intent Allocation", async (t) => {
   await t.test("Routine bounded bulk work selects lightweight model (gemini-3.8-flash-high) and penalizes expensive overqualification", () => {
@@ -329,4 +335,43 @@ test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting l
   ];
   assert.deepEqual(strategies.agentcompass("anthropic", seats, {}), ["seat-fresh", "seat-busy", "seat-resting"]);
   assert.deepEqual(strategies["agentcompass-pure"]("anthropic", seats, {}), ["seat-fresh", "seat-busy", "seat-resting"]);
+});
+
+test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`, `icon`, `options`, `registry.json`)", async () => {
+  assert.equal(profileTask, inferTaskProfile);
+  const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
+  assert.equal(pkg.name, "agentcompass");
+  assert.equal(pkg.magpie.name, "AgentCompass");
+  assert.equal(pkg.magpie.hooks, "./src/hooks.js");
+  assert.equal(pkg.magpie.middleware, "./src/middleware.js");
+  assert.ok(pkg.magpie.icon.startsWith("data:image/svg+xml;base64,"));
+  assert.equal(pkg.magpie.icon, AGENTCOMPASS_ICON_DATA_URI);
+
+  const decodedSvg = Buffer.from(pkg.magpie.icon.split(",")[1], "base64").toString("utf8");
+  assert.ok(decodedSvg.includes("<svg"), "Decoded icon must be valid SVG for Magpie StoreIcon()");
+
+  for (const kw of ["magpie-plugin", "opencode", "opencode-plugin", "provider", "auth", "agentcompass", "intent-routing"]) {
+    assert.ok(pkg.keywords.includes(kw), `package.json keywords must include "${kw}"`);
+  }
+  assert.equal(
+    pkg.keywords.includes("pi-package"),
+    false,
+    "OpenCode plugins must not include 'pi-package' in keywords (pi.js:49 treats pi-package as a Pi extension instead of OpenCode plugin)"
+  );
+
+  const plugin = await AgentCompassRouterPlugin({ magpie: { option: (_p, k) => k === "prefer_local_heuristic" } }, {});
+  assert.equal(plugin.auth.icon, AGENTCOMPASS_ICON_DATA_URI);
+  const optKeys = plugin.auth.options.map((o) => o.key);
+  assert.ok(optKeys.includes("prefer_local_heuristic"));
+  assert.ok(optKeys.includes("live_scorer"));
+  for (const key of optKeys) {
+    assert.match(key, /^[a-z0-9_-]{1,40}$/);
+  }
+
+  const listing = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "docs", "magpie-community-registry-entry.json"), "utf8"));
+  assert.equal(listing.package, "agentcompass");
+  assert.equal(listing.name, "AgentCompass");
+  assert.deepEqual(listing.providers, ["agentcompass"]);
+  assert.equal(listing.kind, "middleware");
+  assert.ok(listing.summary?.en && listing.summary?.zh);
 });

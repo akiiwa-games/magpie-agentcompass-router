@@ -260,7 +260,8 @@ export async function scoreTaskLive(task, options = {}) {
     return { profile, meta };
   }
 
-  const timeoutMs = Math.min(Math.max(Number(options.scorerTimeoutMs) || 6500, 250), 55000);
+  const envTimeout = Number(globalThis.process?.env?.AGENTCOMPASS_SCORER_TIMEOUT_MS) || 0;
+  const timeoutMs = Math.min(Math.max(Number(options.scorerTimeoutMs) || envTimeout || 6500, 100), 55000);
   const fetchFn = options.fetch || globalThis.fetch;
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);

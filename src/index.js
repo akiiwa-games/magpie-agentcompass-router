@@ -20,6 +20,8 @@ import { scoreTaskLive } from "./scorer-live.js";
 
 export const PROVIDER_ID = "agentcompass";
 export const DECISION_MODEL_ID = "agentcompass-systemone";
+export const AGENTCOMPASS_ICON_DATA_URI =
+  "data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCA2NCA2NCIgZmlsbD0ibm9uZSI+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMjgiIHN0cm9rZT0iIzNCODJGNiIgc3Ryb2tlLXdpZHRoPSI0IiBmaWxsPSIjMEYxNzJBIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMjIiIHN0cm9rZT0iIzYwQTVGQSIgc3Ryb2tlLXdpZHRoPSIxLjUiIHN0cm9rZS1kYXNoYXJyYXk9IjMgMyIvPjxwb2x5Z29uIHBvaW50cz0iMzIsMTIgMzgsMzIgMzIsMjggMjYsMzIiIGZpbGw9IiNFRjQ0NDQiLz48cG9seWdvbiBwb2ludHM9IjMyLDUyIDM4LDMyIDMyLDM2IDI2LDMyIiBmaWxsPSIjRTJFOEYwIi8+PGNpcmNsZSBjeD0iMzIiIGN5PSIzMiIgcj0iMy41IiBmaWxsPSIjRjhGQUZDIi8+PC9zdmc+";
 
 const DIFFICULTY_SCALE_WORDS = {
   routine: 0,
@@ -305,6 +307,7 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
       cfg.provider = cfg.provider || {};
       cfg.provider[PROVIDER_ID] = {
         name: "AgentCompass",
+        icon: AGENTCOMPASS_ICON_DATA_URI,
         api: "https://agentcompass.local/v1",
         decide: true,
         models: {
@@ -321,8 +324,17 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
     },
     auth: {
       provider: PROVIDER_ID,
+      icon: AGENTCOMPASS_ICON_DATA_URI,
       single: true,
       options: [
+        {
+          key: "prefer_local_heuristic",
+          label: "Prefer Local Deterministic Heuristic Profiler",
+          description: "Always use the <1ms local deterministic 10D profiler without calling an external System-One scorer.",
+          default: false,
+          labels: { zh: "优先使用本地确定性 10 维启发式画像" },
+          descriptions: { zh: "始终使用 <1ms 零延迟的本地确定性 10 维画像与 Model DNA 选型，不调用外部评分接口。" },
+        },
         {
           key: "live_scorer",
           label: "Use Live System-One LLM Scorer",
@@ -363,9 +375,13 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
               parsed = JSON.parse(rawBody);
             } catch {}
 
+            const preferHeuristic =
+              input?.magpie?.option?.(PROVIDER_ID, "prefer_local_heuristic") === true ||
+              pluginOptions.prefer_local_heuristic === true;
             const useLive =
-              input?.magpie?.option?.(PROVIDER_ID, "live_scorer") === true ||
-              Boolean(pluginOptions.scorerType && pluginOptions.scorerType !== "heuristic");
+              !preferHeuristic &&
+              (input?.magpie?.option?.(PROVIDER_ID, "live_scorer") === true ||
+                Boolean(pluginOptions.scorerType && pluginOptions.scorerType !== "heuristic"));
 
             const effectiveOpts = {
               ...pluginOptions,
