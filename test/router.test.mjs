@@ -5,16 +5,41 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { rankCandidates, selectBestRoute } from "../src/allocator.js";
-import { ROUTE_CARRIER_KEY, onRequest as hookOnRequest } from "../src/hooks.js";
 import {
-   AGENTCOMPASS_ICON_DATA_URI,
+  CACHE_COLD_MS,
+  CHATGPT_CODEX_COLD_MS,
+  SessionContinuityStore,
+  WORKER_WORN_TOKENS,
+  analyzeTurnState,
+  coldAfterMs,
+  computeSessionKey,
+  evaluateProviderContinuation,
+  firstWords,
+  isShortFollowupMessage,
+  keepsEffort,
+  sha256Hex,
+  userSaidFromText,
+} from "../src/continuity.js";
+import {
+  ROUTE_CARRIER_KEY,
+  onRequest as hookOnRequest,
+  onResponse as hookOnResponse,
+} from "../src/hooks.js";
+import {
+  AGENTCOMPASS_ICON_DATA_URI,
   AgentCompassRouterPlugin,
   DECISION_MODEL_ID,
   PROVIDER_ID,
   evaluateLevelsProbe,
   handleSystemOneRequest,
 } from "../src/index.js";
-import { onAccount as mwOnAccount, onRequest as mwOnRequest, strategies } from "../src/middleware.js";
+import {
+  onAccount as mwOnAccount,
+  onRequest as mwOnRequest,
+  onResponse as mwOnResponse,
+  onUsage as mwOnUsage,
+  strategies,
+} from "../src/middleware.js";
 import { extractRequestFacts, inferTaskProfile, profileTask } from "../src/profiler-core.js";
 import { clearProfileCache, scoreTaskLive } from "../src/scorer-live.js";
 
@@ -375,3 +400,613 @@ test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`,
   assert.equal(listing.kind, "middleware");
   assert.ok(listing.summary?.en && listing.summary?.zh);
 });
+
+test("7. Magpie-Aligned Session Affinity, Turn-Loop Lock, Cache-Temperature Hold & Switching (`src/continuity.js`)", async (t) => {
+  await t.test("Scenario 1 (`why: first` & subagent isolation): New session runs intent routing and isolates `x-claude-code-agent-id` subagents", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+    let scorerCalls = 0;
+
+    // Verify pure-JS SHA-256 against NIST test vector ("abc")
+    assert.equal(
+      sha256Hex("abc"),
+      "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+    );
+
+    const req1 = {
+      model: "agentcompass/auto",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Audit our distributed Raft consensus state machine across 4 modules to find the split-brain deadlock root cause.",
+        },
+      ],
+    };
+
+    const afterHook1 = await hookOnRequest(req1, {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-main-1" },
+      options: {
+        continuityStore: store,
+        now: t0,
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:9999/v1",
+        useCache: false,
+        fetch: async () => {
+          scorerCalls += 1;
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                choices: [
+                  {
+                    message: {
+                      content: JSON.stringify({
+                        work_kind: "debug_review",
+                        reasoning_depth: 3,
+                        code_complexity: 3,
+                        context_scale: 3,
+                        divergence: 1,
+                        hallucination_risk: 3,
+                        error_cost: 3,
+                        needs_visual: false,
+                        needs_gui: false,
+                        local_only: true,
+                        interaction_style: "engineering",
+                        expected_hours: 2.0,
+                        hours_confidence: "high",
+                        urgency: "normal",
+                        reason: "cross-module deadlock root cause",
+                        multi_task: false,
+                        task_count: "1",
+                      }),
+                    },
+                  },
+                ],
+              }),
+          };
+        },
+      },
+    });
+
+    assert.equal(scorerCalls, 1, "First turn of a new session must invoke intent scorer once");
+    const carrier1 = afterHook1[ROUTE_CARRIER_KEY];
+    assert.equal(carrier1.continuation.held, false);
+    assert.equal(carrier1.continuation.why, "first");
+    assert.equal(carrier1.canonicalModel, "claude-opus-5-5");
+
+    // Simulate subagent sharing the same `x-session-id` but with `x-claude-code-agent-id`
+    const subagentReq = {
+      model: "agentcompass/auto",
+      messages: [
+        {
+          role: "user",
+          content: "Batch rename `old_var` to `new_var` across JSON fixtures.",
+        },
+      ],
+    };
+    const mainKey = computeSessionKey(req1, { headers: { "x-session-id": "sess-main-1" } });
+    const subKey = computeSessionKey(subagentReq, {
+      headers: {
+        "x-session-id": "sess-main-1",
+        "x-claude-code-agent-id": "subagent-haiku-worker",
+      },
+    });
+    assert.notEqual(mainKey, subKey, "Subagent must have an isolated session key");
+
+    await hookOnRequest(subagentReq, {
+      protocol: "chat",
+      headers: {
+        "x-session-id": "sess-main-1",
+        "x-claude-code-agent-id": "subagent-haiku-worker",
+      },
+      options: { continuityStore: store, now: t0 + 1000, prefer_local_heuristic: true },
+    });
+
+    // Main session must still hold `claude-opus-5-5`, unaffected by subagent
+    assert.equal(store.get(mainKey, t0 + 1000).model, "claude-opus-5-5");
+  });
+
+  await t.test("Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected `<system-reminder>` lock Provider/Model with 0 scorer calls", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+    let scorerCalls = 0;
+    const countingFetch = async () => {
+      scorerCalls += 1;
+      throw new Error("Scorer should NOT be called during mid-turn hold!");
+    };
+
+    // Turn 1: User starts a complex task on `claude-opus-5-5:high`
+    const firstTurn = {
+      model: "agentcompass/auto",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Refactor the distributed transaction coordinator across 4 microservices to fix the two-phase commit deadlock.",
+        },
+      ],
+    };
+    const hooked1 = await hookOnRequest(firstTurn, {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-turn-lock" },
+      options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
+    });
+    const routed1 = mwOnRequest(structuredClone(hooked1), {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-turn-lock" },
+      options: { continuityStore: store, now: t0 },
+    });
+    assert.equal(routed1.model, "claude-opus-5-5:max");
+
+    // Step 2a: Assistant calls a tool, and the next request ends with `role: "tool"`
+    const toolResultReq = {
+      model: "agentcompass/auto",
+      messages: [
+        ...firstTurn.messages,
+        {
+          role: "assistant",
+          content: null,
+          tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }],
+        },
+        {
+          role: "tool",
+          tool_call_id: "call_1",
+          content: "package coordinator // simple 10-line file",
+        },
+      ],
+    };
+
+    const hooked2a = await hookOnRequest(toolResultReq, {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-turn-lock" },
+      options: {
+        continuityStore: store,
+        now: t0 + 10 * 60 * 1000, // Even after 10 minutes (> 5m cache TTL), mid-turn `within: true` MUST still hold!
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:9999/v1",
+        fetch: countingFetch,
+      },
+    });
+    assert.equal(scorerCalls, 0, "Mid-turn tool result must make 0 scorer calls");
+    assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.held, true);
+    assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.why, "turn");
+    assert.equal(hooked2a[ROUTE_CARRIER_KEY].continuation.within, true);
+    assert.equal(hooked2a[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:max");
+
+    // Step 2b: Agent injects a `role: "user"` message containing only `<system-reminder>` and `TodoWrite` noise
+    const agentNoiseReq = {
+      model: "agentcompass/auto",
+      messages: [
+        ...toolResultReq.messages,
+        {
+          role: "user",
+          content:
+            "<system-reminder>Remember to run tests before finishing.</system-reminder>\n\nThe TodoWrite tool hasn't been used recently.",
+        },
+      ],
+    };
+    assert.equal(userSaidFromText(agentNoiseReq.messages[3].content), "");
+    const turnState2b = analyzeTurnState(agentNoiseReq);
+    assert.equal(turnState2b.within, true, "Agent-injected reminder must keep within === true");
+    assert.equal(turnState2b.turn, 1, "Agent-injected reminder must not increment user turn count");
+
+    const hooked2b = await hookOnRequest(agentNoiseReq, {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-turn-lock" },
+      options: {
+        continuityStore: store,
+        now: t0 + 12 * 60 * 1000,
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:9999/v1",
+        fetch: countingFetch,
+      },
+    });
+    assert.equal(scorerCalls, 0);
+    assert.equal(hooked2b[ROUTE_CARRIER_KEY].continuation.held, true);
+    assert.equal(hooked2b[ROUTE_CARRIER_KEY].continuation.why, "turn");
+  });
+
+  await t.test("Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV cache and short follow-up nudges hold model and ratchet effort", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+    let scorerCalls = 0;
+
+    // Turn 1: Complex task routes to `claude-opus-5-5:high`
+    const turn1 = {
+      model: "agentcompass/auto",
+      messages: [
+        {
+          role: "user",
+          content:
+            "Audit the cross-module state synchronization protocol across gateway, worker, and store for race conditions.",
+        },
+      ],
+    };
+    const ctx1 = {
+      protocol: "anthropic",
+      headers: { "x-session-id": "sess-warm-cache" },
+      options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
+    };
+    const hooked1 = await hookOnRequest(turn1, ctx1);
+    assert.equal(hooked1[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:max");
+
+    // Simulate response returning 4,200 tokens (>= 1024 CACHE_WORTH_TOKENS) and cache creation
+    await hookOnResponse(
+      {
+        id: "msg_1",
+        model: "claude-opus-5-5",
+        usage: {
+          input_tokens: 1800,
+          cache_creation_input_tokens: 2100,
+          output_tokens: 300,
+        },
+      },
+      ctx1
+    );
+
+    // Turn 2 (2 minutes later, within 5m Anthropic cache TTL): User asks a trivial routine question
+    // Because the 4,200-token KV cache is warm, it MUST hold `claude-opus-5-5:max` (`why: "cache"`) without calling scorer!
+    const turn2 = {
+      model: "agentcompass/auto",
+      messages: [
+        ...turn1.messages,
+        { role: "assistant", content: "Here is the protocol audit and synchronization state machine." },
+        { role: "user", content: "Also rename the variable `sync_flag` to `isSynced` in that file." },
+      ],
+    };
+    const hooked2 = await hookOnRequest(turn2, {
+      protocol: "anthropic",
+      headers: { "x-session-id": "sess-warm-cache" },
+      options: {
+        continuityStore: store,
+        now: t0 + 2 * 60 * 1000,
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:9999/v1",
+        fetch: async () => {
+          scorerCalls += 1;
+          throw new Error("Should not call scorer while KV cache is warm!");
+        },
+      },
+    });
+    assert.equal(scorerCalls, 0);
+    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.held, true);
+    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.why, "cache");
+    assert.equal(hooked2[ROUTE_CARRIER_KEY].modelWithEffort, "claude-opus-5-5:max");
+
+    // Turn 3 (short follow-up "继续" / "ok go ahead" even when token count < 1024):
+    assert.equal(isShortFollowupMessage("继续"), true);
+    assert.equal(isShortFollowupMessage("好的，按这个改"), true);
+    assert.equal(isShortFollowupMessage("ok, go ahead"), true);
+    assert.equal(isShortFollowupMessage("lgtm"), true);
+
+    // Verify `/v1/systemone` (`handleSystemOneRequest`) short follow-up inherits `previous_message_kind` & ratchets effort with 0 scorer calls
+    const sysOneFollowup = await handleSystemOneRequest(
+      {
+        model: DECISION_MODEL_ID,
+        state: {
+          message: "继续",
+          previous_message_kind: "debug_review",
+          previous_message_reasoning: "high",
+          previous_user_message: "Audit the distributed lock manager.",
+          previous_assistant_reply: "I found two lock ordering inversions. Shall I continue?",
+        },
+        questions: {
+          intent: {
+            type: "choice",
+            criteria: {
+              debug_review: "Debugging and review",
+              bounded_bulk_work: "Routine bulk edits",
+              none: "None",
+            },
+          },
+          effort: {
+            type: "score",
+            criteria: ["low", "medium", "high", "xhigh"],
+          },
+        },
+      },
+      {
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:9999/v1",
+        fetch: async () => {
+          scorerCalls += 1;
+          throw new Error("Short follow-up in /v1/systemone must not call external scorer!");
+        },
+      }
+    );
+    assert.equal(scorerCalls, 0);
+    assert.equal(sysOneFollowup.answers.intent.choice, "debug_review");
+    assert.ok(sysOneFollowup.answers.intent.confidence >= 0.9);
+    assert.equal(sysOneFollowup.answers.effort.score, 2.0, "Effort must stay ratcheted at high (2.0)");
+    assert.equal(sysOneFollowup.agentcompass.continuation.held, true);
+    assert.equal(sysOneFollowup.agentcompass.continuation.why, "followup");
+
+    // Verify `keepsEffort` directly: warm session on `max` never drops to `low`
+    const sessionSnap = store.get(hooked2[ROUTE_CARRIER_KEY].continuation.sessionKey, t0 + 2 * 60 * 1000);
+    assert.equal(keepsEffort(sessionSnap, "low", 4200, t0 + 2 * 60 * 1000), "max");
+    // Verify ChatGPT/Codex & DeepSeek 1h cache TTL vs default 5m TTL
+    assert.equal(coldAfterMs("claude-opus-5-5"), CACHE_COLD_MS);
+    assert.equal(coldAfterMs("gpt-6.1-sol"), CHATGPT_CODEX_COLD_MS);
+    assert.equal(coldAfterMs("deepseek-v4.1-flash-free"), CHATGPT_CODEX_COLD_MS);
+  });
+
+  await t.test("Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modality, tier escalation, 95% context window, and 2M wear trigger re-routing", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+
+    // 4a. Visual modality outgrowth: session starts on text-only `grok-4.7`, next turn sends an image
+    const sessKeyVis = "sess-vis-outgrow";
+    store.set(
+      sessKeyVis,
+      {
+        model: "grok-4.7",
+        effort: "medium",
+        tokens: 4000,
+        cached: true,
+        healthy: true,
+        turn: 1,
+      },
+      t0
+    );
+    const visReq = {
+      model: "agentcompass/auto",
+      session_id: sessKeyVis,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: "Inspect this UI screenshot and diagnose the overlapping flex layout bug." },
+            { type: "image_url", image_url: { url: "https://example.com/bug.png" } },
+          ],
+        },
+      ],
+    };
+    const hookedVis = await hookOnRequest(visReq, {
+      protocol: "chat",
+      session_id: sessKeyVis,
+      options: { continuityStore: store, now: t0 + 30_000, prefer_local_heuristic: true },
+    });
+    assert.equal(hookedVis[ROUTE_CARRIER_KEY].continuation.held, false);
+    assert.equal(hookedVis[ROUTE_CARRIER_KEY].continuation.why, "capability_outgrown");
+    assert.equal(hookedVis[ROUTE_CARRIER_KEY].continuation.reasonDetail, "visual_modality_required");
+    assert.notEqual(hookedVis[ROUTE_CARRIER_KEY].canonicalModel, "grok-4.7");
+
+    // 4b. Tier escalation outgrowth: session starts on lightweight `claude-haiku-5-5` (tier 3.2),
+    // next turn asks for a complex cross-module architecture & deadlock refactoring
+    const sessKeyTier = "sess-tier-outgrow";
+    store.set(
+      sessKeyTier,
+      {
+        model: "claude-haiku-5-5",
+        effort: "low",
+        tokens: 3000,
+        cached: true,
+        healthy: true,
+        turn: 1,
+      },
+      t0
+    );
+    const tierReq = {
+      model: "agentcompass/auto",
+      messages: [
+        { role: "user", content: "Rename `foo` to `bar`." },
+        { role: "assistant", content: "Done." },
+        {
+          role: "user",
+          content:
+            "Now perform a cross-module architecture refactoring and root cause deadlock audit across our consensus engine.",
+        },
+      ],
+    };
+    const tierKey = computeSessionKey(tierReq, { headers: { "x-session-id": sessKeyTier } });
+    store.set(tierKey, store.get(sessKeyTier, t0), t0);
+    const hookedTier = await hookOnRequest(tierReq, {
+      protocol: "chat",
+      headers: { "x-session-id": sessKeyTier },
+      options: { continuityStore: store, now: t0 + 20_000, prefer_local_heuristic: true },
+    });
+    assert.equal(hookedTier[ROUTE_CARRIER_KEY].continuation.held, false);
+    assert.equal(hookedTier[ROUTE_CARRIER_KEY].continuation.why, "capability_outgrown");
+    assert.equal(hookedTier[ROUTE_CARRIER_KEY].canonicalModel, "claude-opus-5-5");
+
+    // 4c. Context window 95% outgrowth (`claude-opus-5-5` has 200k limit; 95% = 190k; pass 195k tokens)
+    const outgrownReq = {
+      model: "agentcompass/auto",
+      estimated_input_tokens: 195_000,
+      messages: [
+        {
+          role: "user",
+          content: "Analyze the entire multi-module repository dump and architecture trade-offs.",
+        },
+      ],
+    };
+    const outgrownKey = computeSessionKey(outgrownReq, { headers: { "x-session-id": "sess-ctx-outgrow" } });
+    store.set(
+      outgrownKey,
+      {
+        model: "claude-opus-5-5",
+        effort: "high",
+        tokens: 195_000,
+        cached: true,
+        healthy: true,
+        turn: 2,
+      },
+      t0
+    );
+    const hookedOutgrown = await hookOnRequest(outgrownReq, {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-ctx-outgrow" },
+      options: { continuityStore: store, now: t0 + 10_000, prefer_local_heuristic: true },
+    });
+    assert.equal(hookedOutgrown[ROUTE_CARRIER_KEY].continuation.held, false);
+    assert.equal(hookedOutgrown[ROUTE_CARRIER_KEY].continuation.why, "outgrown");
+    // Must switch to a model whose 95% context window >= 195k (e.g. `gemini-4-argon-high` 1M or `gpt-6-astra` 400k)
+    assert.ok(
+      ["gemini-4-argon-high", "gpt-6-astra", "gpt-6.1-terra", "gpt-6.1-sol"].includes(
+        hookedOutgrown[ROUTE_CARRIER_KEY].canonicalModel
+      ),
+      `Expected >205k context model, got ${hookedOutgrown[ROUTE_CARRIER_KEY].canonicalModel}`
+    );
+
+    // 4d. 2M cumulative token wear (`compactedTokens + tokens >= 2,000,000`)
+    const wornCheck = evaluateProviderContinuation(
+      { within: false, turn: 15, estimatedInputTokens: 150_000 },
+      {
+        model: "claude-opus-5-5",
+        effort: "high",
+        tokens: 150_000,
+        compactedTokens: WORKER_WORN_TOKENS - 100_000,
+        cached: true,
+        healthy: true,
+        updatedAt: t0,
+      },
+      { now: t0 + 5_000 }
+    );
+    assert.equal(wornCheck.shouldHold, false);
+    assert.equal(wornCheck.why, "worn");
+  });
+
+  await t.test("Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/compact` re-evaluates and cleanly downshifts on routine work", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+
+    const routineFollowupReq = {
+      model: "agentcompass/auto",
+      messages: [
+        {
+          role: "user",
+          content: "Audit the distributed consensus engine across modules.",
+        },
+        {
+          role: "assistant",
+          content: "Audit complete.",
+        },
+        {
+          role: "user",
+          content: "Perform a mechanical batch rename of `old_key` to `newKey` across the JSON fixtures.",
+        },
+      ],
+    };
+    const sessKey = computeSessionKey(routineFollowupReq, { headers: { "x-session-id": "sess-cold-downshift" } });
+    store.set(
+      sessKey,
+      {
+        model: "claude-opus-5-5",
+        effort: "high",
+        tokens: 8000,
+        cached: true,
+        healthy: true,
+        turn: 1,
+      },
+      t0
+    );
+
+    // 5a. Advance clock by 6 minutes (> 5m Anthropic cacheCold): cache is now COLD
+    const hookedCold = await hookOnRequest(routineFollowupReq, {
+      protocol: "anthropic",
+      headers: { "x-session-id": "sess-cold-downshift" },
+      options: {
+        continuityStore: store,
+        now: t0 + 6 * 60 * 1000,
+        prefer_local_heuristic: true,
+      },
+    });
+    assert.equal(hookedCold[ROUTE_CARRIER_KEY].continuation.held, false);
+    assert.equal(hookedCold[ROUTE_CARRIER_KEY].continuation.why, "cold");
+    // Must downshift from `claude-opus-5-5` to lightweight `gemini-3.8-flash-high`!
+    assert.equal(hookedCold[ROUTE_CARRIER_KEY].canonicalModel, "gemini-3.8-flash-high");
+
+    // 5b. Reset to warm `claude-opus-5-5` with 20,000 tokens, then send a compacted context (2,000 tokens < 50% of 20,000)
+    store.set(
+      sessKey,
+      {
+        model: "claude-opus-5-5",
+        effort: "high",
+        tokens: 20_000,
+        cached: true,
+        healthy: true,
+        turn: 2,
+      },
+      t0 + 10 * 60 * 1000
+    );
+    const compactedReq = {
+      ...routineFollowupReq,
+      estimated_input_tokens: 2_000,
+    };
+    const hookedCompacted = await hookOnRequest(compactedReq, {
+      protocol: "anthropic",
+      headers: { "x-session-id": "sess-cold-downshift" },
+      options: {
+        continuityStore: store,
+        now: t0 + 11 * 60 * 1000, // Only 1 minute later, but tokens dropped from 20k -> 2k!
+        prefer_local_heuristic: true,
+      },
+    });
+    assert.equal(hookedCompacted[ROUTE_CARRIER_KEY].continuation.held, false);
+    assert.equal(hookedCompacted[ROUTE_CARRIER_KEY].continuation.why, "compacted");
+    assert.equal(hookedCompacted[ROUTE_CARRIER_KEY].canonicalModel, "gemini-3.8-flash-high");
+    // Verify `compactedTokens` accumulated the pre-compaction 20,000 tokens
+    assert.equal(store.get(sessKey, t0 + 11 * 60 * 1000).compactedTokens, 20_000);
+  });
+
+  await t.test("Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onResponse` or `onUsage` marks model unhealthy and fails over", async () => {
+    const store = new SessionContinuityStore();
+    const t0 = 1_700_000_000_000;
+
+    const req = {
+      model: "agentcompass/auto",
+      messages: [
+        {
+          role: "user",
+          content: "Audit the cross-module concurrency lock graph and race condition invariants.",
+        },
+      ],
+    };
+    const ctx = {
+      protocol: "chat",
+      headers: { "x-session-id": "sess-failover" },
+      options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
+    };
+
+    const hooked1 = await hookOnRequest(req, ctx);
+    assert.equal(hooked1[ROUTE_CARRIER_KEY].canonicalModel, "claude-opus-5-5");
+
+    // Simulate upstream 429 rate-limit failure reported to `hookOnResponse` (or `mwOnUsage`)
+    await hookOnResponse(
+      { error: { message: "Rate limit exceeded", status: 429 } },
+      { ...ctx, status: 429 }
+    );
+    assert.equal(store.isModelHealthy("claude-opus-5-5", t0 + 1000), false);
+
+    // Retry the exact same request (or even a mid-turn tool loop): because `claude-opus-5-5` is unhealthy,
+    // it MUST break the lock (`why: "provider_unhealthy"`) and switch to a healthy fallback model!
+    const hooked2 = await hookOnRequest(req, {
+      ...ctx,
+      options: { ...ctx.options, now: t0 + 2000 },
+    });
+    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.held, false);
+    assert.equal(hooked2[ROUTE_CARRIER_KEY].continuation.why, "provider_unhealthy");
+    assert.notEqual(
+      hooked2[ROUTE_CARRIER_KEY].canonicalModel,
+      "claude-opus-5-5",
+      "Unhealthy model must be excluded on failover"
+    );
+
+    // Also verify `mwOnUsage` marking a model unhealthy on `{ rejected: true, status: 503 }`
+    const fallbackModel = hooked2[ROUTE_CARRIER_KEY].canonicalModel;
+    mwOnUsage(
+      {
+        session_id: hooked2[ROUTE_CARRIER_KEY].continuation.sessionKey,
+        model: fallbackModel,
+        rejected: true,
+        status: 503,
+      },
+      { continuityStore: store, now: t0 + 3000 }
+    );
+    assert.equal(store.isModelHealthy(fallbackModel, t0 + 3500), false);
+  });
+});
+

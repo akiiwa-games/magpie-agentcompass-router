@@ -1077,10 +1077,146 @@ async function main() {
       );
     }
 
+    // =========================================================================
+    // SCENARIO 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold
+    // =========================================================================
+    {
+      const stickyFirstMsg = {
+        role: "user",
+        content:
+          "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.",
+      };
+
+      // 8a. Turn 1 (`why: "first"`): Calls System-One scorer and routes to `claude-opus-5-5`
+      const scorerBefore8a = scorerCalls.length;
+      const resp8a = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer sk-local-agent",
+          "x-session-id": "e2e-sticky-session-1",
+        },
+        body: JSON.stringify({
+          model: "auto",
+          messages: [stickyFirstMsg],
+        }),
+      });
+      assert.equal(resp8a.status, 200);
+      const up8a = upstreamCalls[upstreamCalls.length - 1];
+      assert.equal(up8a.model, "claude-opus-5-5");
+      assert.equal(scorerCalls.length, scorerBefore8a + 1, "Turn 1 of new session must call scorer once");
+
+      // 8b. Mid-turn tool result + agent `<system-reminder>` (`within: true` -> `why: "turn"`):
+      // Must hold `claude-opus-5-5` and effort with ZERO scorer calls!
+      const scorerBefore8b = scorerCalls.length;
+      const resp8b = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer sk-local-agent",
+          "x-session-id": "e2e-sticky-session-1",
+        },
+        body: JSON.stringify({
+          model: "auto",
+          messages: [
+            stickyFirstMsg,
+            {
+              role: "assistant",
+              content: null,
+              tool_calls: [
+                {
+                  id: "call_lock_1",
+                  type: "function",
+                  function: { name: "read_file", arguments: "{\"path\":\"lock.go\"}" },
+                },
+              ],
+            },
+            {
+              role: "tool",
+              tool_call_id: "call_lock_1",
+              content: "package lock // simple utility",
+            },
+            {
+              role: "user",
+              content: "<system-reminder>The TodoWrite tool hasn't been used recently.</system-reminder>",
+            },
+          ],
+        }),
+      });
+      assert.equal(resp8b.status, 200);
+      const up8b = upstreamCalls[upstreamCalls.length - 1];
+      assert.equal(
+        scorerCalls.length,
+        scorerBefore8b,
+        "Mid-turn tool result + <system-reminder> must make ZERO scorer calls"
+      );
+      assert.equal(up8b.model, "claude-opus-5-5", "Mid-turn tool loop must hold claude-opus-5-5");
+      assert.equal(up8b.reasoning_effort, up8a.reasoning_effort, "Mid-turn tool loop must lock reasoning_effort");
+
+      // 8c. Short conversational follow-up nudge ("继续" -> `why: "followup"`):
+      // Even though "继续" alone looks like trivial text, it must hold `claude-opus-5-5` and effort with ZERO scorer calls!
+      const scorerBefore8c = scorerCalls.length;
+      const resp8c = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: "Bearer sk-local-agent",
+          "x-session-id": "e2e-sticky-session-1",
+        },
+        body: JSON.stringify({
+          model: "auto",
+          messages: [
+            stickyFirstMsg,
+            {
+              role: "assistant",
+              content: "I found the lock inversion between ShardLock and TxLock. Shall I continue with the fix?",
+            },
+            {
+              role: "user",
+              content: "继续",
+            },
+          ],
+        }),
+      });
+      assert.equal(resp8c.status, 200);
+      const up8c = upstreamCalls[upstreamCalls.length - 1];
+      assert.equal(
+        scorerCalls.length,
+        scorerBefore8c,
+        "Short follow-up nudge ('继续') must make ZERO scorer calls"
+      );
+      assert.equal(up8c.model, "claude-opus-5-5", "Short follow-up nudge must hold claude-opus-5-5");
+      assert.equal(
+        up8c.reasoning_effort,
+        up8a.reasoning_effort,
+        "keepsEffort must preserve high/xhigh effort on short follow-up"
+      );
+
+      report.scenarios.scenario8_session_continuity_and_turn_lock = {
+        pass: true,
+        firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
+        midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
+        midTurnScorerCalls: scorerCalls.length - scorerBefore8b,
+        shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
+        shortFollowupScorerCalls: scorerCalls.length - scorerBefore8c,
+      };
+      report.steps.push({
+        test: "Scenario 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold (`keepsEffort`)",
+        firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
+        midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
+        shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
+        zeroScorerCallsOnHold: true,
+        pass: true,
+      });
+      console.log(
+        `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort} (0 scorer calls), followup=${up8c.model}:${up8c.reasoning_effort} (0 scorer calls)`
+      );
+    }
+
     // Save complete JSON report
     const reportPath = path.join(SANDBOX_ROOT, "e2e-report.json");
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
-    console.log(`\n[Linux Sandbox] ALL 7 FULL-CHAIN E2E SCENARIOS PASSED! Report written to ${reportPath}`);
+    console.log(`\n[Linux Sandbox] ALL 8 FULL-CHAIN E2E SCENARIOS PASSED! Report written to ${reportPath}`);
   } finally {
     if (magpieProc && !magpieProc.killed) {
       magpieProc.kill("SIGTERM");

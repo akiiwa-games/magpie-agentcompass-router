@@ -12,6 +12,7 @@ import {
   INTERACTION_STYLES,
   KIND_TRAITS,
 } from "./catalog.js";
+import { analyzeTurnState } from "./continuity.js";
 
 export const PROFILE_INTEGERS = {
   reasoning_depth: [1, 4],
@@ -184,12 +185,26 @@ export function extractRequestFacts(body, ctx = {}) {
     return {
       model: "",
       objective: "",
+      turnText: "",
+      lastUserText: "",
       previousUser: "",
+      previousUserText: "",
+      previousAssistantText: "",
       systemText: "",
       hasVisualInput: false,
+      hasVisual: false,
+      hasCurrentTurnVisual: false,
+      hasComputerUse: false,
       isToolFollowup: false,
+      within: false,
+      turn: 0,
+      isShortFollowup: false,
+      isCompacting: false,
       toolCount: 0,
       estimatedTokens: 0,
+      estimatedInputTokens: 0,
+      firstWords: "",
+      sessionKey: "",
       agent: ctx?.agent || "",
       protocol: ctx?.protocol || "",
     };
@@ -251,17 +266,48 @@ export function extractRequestFacts(body, ctx = {}) {
     }
   }
 
+  const turnState = analyzeTurnState(body, ctx);
+  const effectiveObjective = turnState.lastUserText || latestUserText;
+  const effectivePrevUser = turnState.previousUserText || previousUserText;
+  const hasVisual = Boolean(hasVisualInput || turnState.hasAnyVisual);
+  const hasComputerUse = GUI_WORDS.some((w) =>
+    ` ${String(effectiveObjective || "").toLowerCase()} `.includes(w)
+  );
+  const hasExplicitEstimatedTokens =
+    Number.isFinite(body?.estimated_input_tokens) ||
+    Number.isFinite(ctx?.estimated_input_tokens);
+  const estimatedTokens = Number(
+    body?.estimated_input_tokens ||
+      ctx?.estimated_input_tokens ||
+      Math.ceil(totalChars / 4)
+  );
+
   const tools = Array.isArray(body.tools) ? body.tools : [];
 
   return {
     model,
-    objective: latestUserText,
-    previousUser: previousUserText,
+    objective: effectiveObjective,
+    turnText: effectiveObjective,
+    lastUserText: effectiveObjective,
+    previousUser: effectivePrevUser,
+    previousUserText: effectivePrevUser,
+    previousAssistantText: turnState.previousAssistantText || "",
     systemText: systemText.slice(0, 2000),
-    hasVisualInput,
-    isToolFollowup,
+    hasVisualInput: hasVisual,
+    hasVisual,
+    hasCurrentTurnVisual: Boolean(turnState.hasCurrentTurnVisual),
+    hasComputerUse,
+    isToolFollowup: Boolean(isToolFollowup || turnState.within),
+    within: Boolean(turnState.within || isToolFollowup),
+    turn: turnState.turn,
+    isShortFollowup: Boolean(turnState.isShortFollowup),
+    isCompacting: Boolean(turnState.isCompacting),
     toolCount: tools.length,
-    estimatedTokens: Math.ceil(totalChars / 4),
+    estimatedTokens,
+    estimatedInputTokens: estimatedTokens,
+    hasExplicitEstimatedTokens,
+    firstWords: turnState.firstWords,
+    sessionKey: turnState.sessionKey,
     agent: ctx?.agent || "",
     protocol: ctx?.protocol || "",
   };

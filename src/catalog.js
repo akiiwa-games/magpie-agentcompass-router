@@ -199,6 +199,7 @@ export const DEFAULT_MODELS = {
     cost: 5,
     visual: false,
     usd_per_hour: 18.7,
+    context_window: 200000,
     disabled_by_default: true,
     efforts: ["low", "medium", "high", "max"],
     capabilities: {
@@ -220,6 +221,7 @@ export const DEFAULT_MODELS = {
     cost: 4,
     visual: 1.0,
     usd_per_hour: 7.5,
+    context_window: 200000,
     fast_capable: true,
     efforts: ["low", "medium", "high", "max"],
     capabilities: {
@@ -241,6 +243,7 @@ export const DEFAULT_MODELS = {
     cost: 4,
     visual: 0.8,
     usd_per_hour: 22.6,
+    context_window: 400000,
     fast_capable: true,
     efforts: ["low", "medium", "high", "xhigh"],
     capabilities: {
@@ -262,6 +265,7 @@ export const DEFAULT_MODELS = {
     cost: 3,
     visual: 0.75,
     usd_per_hour: 4.0,
+    context_window: 1000000,
     duration_multiplier: 1.35,
     efforts: ["low", "medium", "high", "max"],
     capabilities: {
@@ -283,6 +287,7 @@ export const DEFAULT_MODELS = {
     cost: 2,
     visual: 0.6,
     usd_per_hour: 4.4,
+    context_window: 200000,
     efforts: ["low", "medium", "high", "max"],
     capabilities: {
       reasoning: 0.74,
@@ -303,6 +308,7 @@ export const DEFAULT_MODELS = {
     cost: 3,
     visual: 0.72,
     usd_per_hour: 3.0,
+    context_window: 400000,
     fast_capable: true,
     efforts: ["low", "medium", "high", "xhigh"],
     capabilities: {
@@ -324,6 +330,7 @@ export const DEFAULT_MODELS = {
     cost: 3,
     visual: 0.7,
     usd_per_hour: 2.6,
+    context_window: 400000,
     duration_multiplier: 1.35,
     fast_capable: true,
     efforts: ["low", "medium", "high", "xhigh"],
@@ -346,6 +353,7 @@ export const DEFAULT_MODELS = {
     cost: 3,
     visual: 0.68,
     usd_per_hour: 2.6,
+    context_window: 400000,
     fast_capable: true,
     efforts: ["low", "medium", "high", "xhigh"],
     capabilities: {
@@ -367,6 +375,7 @@ export const DEFAULT_MODELS = {
     cost: 2,
     visual: false,
     usd_per_hour: 1.5,
+    context_window: 131072,
     efforts: ["low", "medium", "high", "xhigh"],
     capabilities: {
       reasoning: 0.59,
@@ -387,6 +396,7 @@ export const DEFAULT_MODELS = {
     cost: 1,
     visual: 0.48,
     usd_per_hour: 0.8,
+    context_window: 200000,
     efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.58,
@@ -407,6 +417,7 @@ export const DEFAULT_MODELS = {
     cost: 1,
     visual: 0.55,
     usd_per_hour: 0.8,
+    context_window: 128000,
     fast_capable: true,
     efforts: ["low", "medium", "high"],
     capabilities: {
@@ -428,6 +439,7 @@ export const DEFAULT_MODELS = {
     cost: 1,
     visual: 0.3,
     usd_per_hour: 0.5,
+    context_window: 1000000,
     efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.52,
@@ -448,6 +460,7 @@ export const DEFAULT_MODELS = {
     cost: 0,
     visual: false,
     usd_per_hour: 0.0,
+    context_window: 64000,
     efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.48,
@@ -485,10 +498,12 @@ export const MODEL_ALIASES = {
   "gpt-5.4": "gpt-6-astra",
   "gpt-5.3-codex": "gpt-6.1-sol",
   "gpt-5.4-mini": "gpt-6-luna",
+  "gpt-5.6-sol-mini": "gpt-6-luna",
   "grok-4.7-latest": "grok-4.7",
   "grok-4": "grok-4.7",
   "opencode/deepseek-v4.1-flash-free": "deepseek-v4.1-flash-free",
   "deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
+  "deepseek-v4.1-io": "deepseek-v4.1-flash-free",
   deepseek: "deepseek-v4.1-flash-free",
 };
 
@@ -662,6 +677,7 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
       cost: 2,
       visual: 0.5,
       usd_per_hour: 3.0,
+      context_window: 128000,
       efforts: ["low", "medium", "high"],
       capabilities: {
         reasoning: 0.65,

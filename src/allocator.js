@@ -352,6 +352,17 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (taskCtx.needs_visual && !info.visual) {
     excluded.push("task needs visual input");
   }
+  if (taskCtx.unhealthy_models && taskCtx.unhealthy_models.has(canonical)) {
+    excluded.push("model is currently marked unhealthy");
+  }
+  if (
+    taskCtx.min_context_tokens &&
+    Number(info.context_window || 128000) * 0.95 < taskCtx.min_context_tokens
+  ) {
+    excluded.push(
+      `context window ${info.context_window || 128000} outgrown by ${taskCtx.min_context_tokens} tokens`
+    );
+  }
   const ability = effortAbility(policy, curves, info, effort);
   const highAbility = effortAbility(policy, curves, info, "high");
   const demand = taskCtx.demand;
@@ -450,10 +461,41 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     );
   }
 
-  const weights = policy.weights || { fit: 0.3, ability: 0.1 };
+  const weights = policy.weights || { fit: 0.3, ability: 0.1, continuity: 0.25 };
+  let continuityBonus = 0.0;
+  const cont = taskCtx.continuity;
+  if (cont && cont.previousModel) {
+    const prevCanonical = canonicalModel(cont.previousModel, aliases);
+    if (canonical === prevCanonical && cont.active !== false) {
+      let coupling = 0.0;
+      if (Number.isFinite(cont.coupling)) {
+        coupling = clamp(Number(cont.coupling), 0.0, 1.0);
+      } else if (cont.cacheWarm === true) {
+        coupling = 1.0;
+      } else if (cont.why === "cold" || cont.why === "compacted") {
+        coupling = taskCtx.difficulty === "coupled" || taskCtx.difficulty === "frontier" ? 0.35 : 0.0;
+      } else if (
+        taskCtx.difficulty === "coupled" ||
+        taskCtx.difficulty === "frontier" ||
+        (taskCtx.profile?.context_scale ?? 1) >= 2
+      ) {
+        coupling = 0.65;
+      }
+      if (cont.cacheWarm && cont.previousEffort) {
+        const prevIdx = EFFORT_ORDER.indexOf(cont.previousEffort);
+        const curIdx = EFFORT_ORDER.indexOf(effort);
+        if (prevIdx >= 0 && curIdx >= 0 && curIdx < prevIdx) {
+          coupling *= 0.25;
+        }
+      }
+      continuityBonus = round4(Number(weights.continuity ?? 0.25) * coupling);
+    }
+  }
+
   const totalScore = round4(
     weights.fit * fit +
       weights.ability * abilityScore +
+      continuityBonus +
       qualityBonus -
       effortPenalty -
       overqualification -
@@ -476,6 +518,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       ability: round3(abilityScore),
       ability_value: round3(ability),
       required_ability: round3(target),
+      continuity: continuityBonus,
       quality_bonus: qualityBonus,
       effort_penalty: effortPenalty,
       overqualification,
@@ -516,6 +559,21 @@ export function rankCandidates(profileInput, options = {}) {
   const requirements = profileRequirements(profile, policy);
   const sWeights = subjectiveWeights(profile, kind);
 
+  const unhealthySet = new Set(
+    (options.unhealthyModels || []).map((m) => canonicalModel(m, aliases)).filter(Boolean)
+  );
+  const continuity =
+    options.continuity ||
+    (options.previousModel
+      ? {
+          previousModel: options.previousModel,
+          previousEffort: options.previousEffort,
+          cacheWarm: Boolean(options.cacheWarm),
+          why: options.why || "",
+          coupling: options.coupling,
+        }
+      : null);
+
   const taskCtx = {
     profile,
     kind,
@@ -527,6 +585,9 @@ export function rankCandidates(profileInput, options = {}) {
     demand,
     requirements,
     subjective_weights: sWeights,
+    unhealthy_models: unhealthySet,
+    min_context_tokens: Number(options.minContextTokens || 0),
+    continuity,
   };
 
   // Build candidate list from user-configured pool or default catalog

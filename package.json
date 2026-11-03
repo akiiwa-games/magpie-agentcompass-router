@@ -10,6 +10,7 @@
     "./hooks": "./src/hooks.js",
     "./middleware": "./src/middleware.js",
     "./allocator": "./src/allocator.js",
+    "./continuity": "./src/continuity.js",
     "./profiler": "./src/profiler-core.js",
     "./catalog": "./src/catalog.js"
   },

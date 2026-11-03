@@ -1,5 +1,5 @@
 {
-  "timestamp": "2026-11-03T07:13:58.790Z",
+  "timestamp": "2026-11-03T08:12:18.272Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
@@ -7,7 +7,7 @@
   "scenarios": {
     "scenario1_cli_lifecycle": {
       "pass": true,
-      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  async gateway hook  onRequest\n  gateway middleware  onRequest, onAccount · routings agentcompass/agentcompass, agentcompass/agentcompass-pure\n  agentcompass (AgentCompass, 1 models)  signed in",
+      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  async gateway hook  onRequest\n  gateway middleware  onRequest, onAccount, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure · onUsage\n  agentcompass (AgentCompass, 1 models)  signed in",
       "magpieName": "AgentCompass",
       "hasSvgDataUriIcon": true
     },
@@ -16,13 +16,13 @@
       "marketListingPackage": "agentcompass",
       "installedOwnName": "AgentCompass",
       "storedIconFile": "file:a100c6af45032ded.svg",
-      "readmeLength": 15217,
+      "readmeLength": 16299,
       "offBypassModel": "gpt-6-luna",
       "optionsUpdated": true
     },
     "scenario3_slow_scorer_tandem": {
       "pass": true,
-      "elapsedMs": 1705,
+      "elapsedMs": 1730,
       "scorerElapsedMs": 1601,
       "routedModel": "claude-opus-5-5",
       "routedEffort": "max",
@@ -46,26 +46,34 @@
       "pass": true,
       "http500FallbackModel": "claude-opus-5-5",
       "timeoutFallbackModel": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 354
+      "timeoutFallbackElapsedMs": 368
     },
     "scenario7_mode_b_systemone_group": {
       "pass": true,
       "directionReasoningRule": "gemini-4-argon-high:high",
       "debugReviewRule": "claude-opus-5-5:xhigh",
       "noneOfTheseFallback": "gpt-6-luna:null"
+    },
+    "scenario8_session_continuity_and_turn_lock": {
+      "pass": true,
+      "firstTurnRouted": "claude-opus-5-5:max",
+      "midTurnToolLoopRouted": "claude-opus-5-5:max",
+      "midTurnScorerCalls": 0,
+      "shortFollowupRouted": "claude-opus-5-5:max",
+      "shortFollowupScorerCalls": 0
     }
   },
   "steps": [
     {
       "test": "Scenario 2 — Plugin Market (`registry.json`), README Page, Icon Storage, Off/On Toggle & Options API",
       "storedIcon": "file:a100c6af45032ded.svg",
-      "readmeLength": 15217,
+      "readmeLength": 16299,
       "offBypassModel": "gpt-6-luna",
       "pass": true
     },
     {
       "test": "Scenario 3: Mode A (1,600ms Async System-One -> hooks.js [Bun] -> middleware.js [moejs]) — Root Cause Debugging",
-      "elapsedMs": 1705,
+      "elapsedMs": 1730,
       "scorerElapsedMs": 1601,
       "routedModel": "claude-opus-5-5",
       "routedEffort": "max",
@@ -89,7 +97,7 @@
       "test": "Scenario 6: Mode A — Fault Injection & Graceful Degradation (HTTP 500 & Scorer Timeout -> Local Heuristic `profileTask`)",
       "http500FallbackModel": "claude-opus-5-5",
       "timeoutFallbackModel": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 354,
+      "timeoutFallbackElapsedMs": 368,
       "pass": true
     },
     {
@@ -97,6 +105,14 @@
       "directionReasoningRule": "gemini-4-argon-high:high",
       "debugReviewRule": "claude-opus-5-5:xhigh",
       "noneOfTheseFallback": "gpt-6-luna:null",
+      "pass": true
+    },
+    {
+      "test": "Scenario 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold (`keepsEffort`)",
+      "firstTurnRouted": "claude-opus-5-5:max",
+      "midTurnToolLoopRouted": "claude-opus-5-5:max",
+      "shortFollowupRouted": "claude-opus-5-5:max",
+      "zeroScorerCallsOnHold": true,
       "pass": true
     }
   ]

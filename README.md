@@ -111,6 +111,20 @@ $$\text{pure\_intent\_score}(m, e) = \text{fit\_score}(m, e) - \text{overqual\_p
 - **双模融合权重**：收敛型任务（`convergence_weight = 0.80`）以硬指标为主；发散/脑暴型任务（`divergence_weight = 0.45`）大幅提升主观禀赋权重；
 - **防杀鸡用牛刀（Overqualification & Effort Selectivity）**：当任务需求（`task_demand`）较低时，自动惩罚过高模型与过高 `effort`（如 `xhigh` / `max` 仅在 `task_demand >= 82` 或 `reasoning_depth >= 4` 时解锁）。
 
+### 3. 对齐 Magpie 原生 Router 的会话粘性、轮内锁定与按需重选（[`src/continuity.js`](./src/continuity.js)）
+参考 Magpie 原生 `internal/gateway/affinity.go`、`rules.go` 与 `decide.go`，本插件**绝不在每次 HTTP 请求上无脑重复跑分类器**，而是严格遵循**“仅在需要选择/切换 Provider（或能力/上下文越界）时才做意图路由，其余情况锁定续用”**：
+- **会话与子 Agent 隔离标识（`computeSessionKey` & `firstWords`）**：结合 `session_id`、首条真实用户消息的纯 JS SHA-256 前 12 字节指纹（自动剥离 `<system-reminder>`、`<task-notification>`、`TodoWrite` 等 Agent 注入噪声）与 `x-claude-code-agent-id`，防止共享同一 `session` 的子代理覆盖主会话粘性状态。
+- **轮内工具循环 100% 锁定（`within: true` $\rightarrow$ `why: "turn"`）**：只要最后一条消息是工具返回（`role: "tool"`、`tool_result`、`function_call_output`）或仅含系统注入提醒而无新用户发言，**100% 锁定本轮选定的 `<model>:<effort>`，零外部评分调用**（保护 OpenAI `reasoning.encrypted_content`、Anthropic `thinking.signature` 签名块与 KV 缓存）。
+- **跨轮 KV 缓存保鲜续用与思考档位单调棘轮（`why: "cache" | "followup"` & `keepsEffort`）**：
+  - 当会话已建立有效前缀缓存（$\ge 1024$ tokens 或 `cached: true`）且未超过缓存冷化窗口（Anthropic/Gemini 默认 `5m`，ChatGPT/Codex Responses 与 DeepSeek 磁盘缓存 `1h`），或用户发送简短追问（`"继续"`、`"好的，按这个改"`、`"ok go ahead"`、`"lgtm"`），直接保持当前模型且 `keepsEffort` 保证思考档位单调不降级（如 `high/max` 不会掉回 `low`）。
+- **仅在 6 类信号触发时重新执行意图路由**：
+  1. `why: "first"` — 新会话首轮请求；
+  2. `why: "provider_unhealthy"` — `onResponse` / `onUsage` 捕获上游报错或限流（`status >= 400` / `rejected: true`），自动剔除故障模型并故障转移；
+  3. `why: "capability_outgrown"` — 新一轮引入图片/截图而当前模型不支持视觉，或轻量级模型（`tier < 3.5`）遭遇跨模块架构重构/深水区死锁排障；
+  4. `why: "outgrown"` — 当前输入超出模型 `context_window` 的 **95%**（如 200k 窗口达到 >190k），自动升级至 400k / 1M 大窗口模型；
+  5. `why: "worn"` — 遵循 AgentCompass 2M 累计未压缩上下文防失忆规则（`compactedTokens + tokens >= 2,000,000`）；
+  6. `why: "cold"` / `why: "compacted"` — 闲置超过缓存 TTL 或刚执行 `/compact`（Token 骤降 >50%），重新评估并允许在简单日常任务上顺滑降档省钱。
+
 ---
 
 ## 📦 安装与接入指南
@@ -220,37 +234,39 @@ node --test test/router.test.mjs
 ```text
 /run/magpie-sandbox/agentcompass  on
   async gateway hook  onRequest
-  gateway middleware  onRequest, onAccount · routings agentcompass/agentcompass, agentcompass/agentcompass-pure
+  gateway middleware  onRequest, onAccount, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure · onUsage
   agentcompass (AgentCompass, 1 models)  signed in
 ```
 
-#### 7 大场景全链路真实网关与插件市场端到端（E2E）验证结果
+#### 8 大场景全链路真实网关与插件市场端到端（E2E）验证结果
 
 | 场景 | 验证链路与协议 | 实测路由与市场合约结果 | 关键不变量验证 | 状态 |
 | :--- | :--- | :--- | :--- | :--- |
 | **Scenario 1: CLI 插件生命周期与元数据契约** | `magpie plugin add` · `magpie plugin login agentcompass` · `magpie plugin list` | `agentcompass (AgentCompass, 1 models) signed in` · `routings agentcompass/agentcompass, agentcompass/agentcompass-pure` | `magpie.name = "AgentCompass"` 与 `magpie.icon` (`data:image/svg+xml;base64,...`) 校验通过 | ✅ PASS |
-| **Scenario 2: 插件市场 (`registry.json`) 与 Web/GUI 管理 API** | `magpie web` · `GET /api/plugins/listings` · `GET /api/plugins` · `GET /api/plugins/page` · `POST /api/plugins/off` & `options` | 市场解析 `package: "agentcompass"`；图标落盘为 `file:a100c6af45032ded.svg`；README 渲染 `15,217 B`；`Off: true` 时请求保持原模型 `gpt-6-luna` 不改写 | 完整覆盖 `internal/plugin/market.go`、`github.go` 与 `internal/gui/plugins.go` | ✅ PASS |
-| **Scenario 3: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1601 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 载体被剥离，反递归头 `Magpie-Router/1.0` 生效 | ✅ PASS |
+| **Scenario 2: 插件市场 (`registry.json`) 与 Web/GUI 管理 API** | `magpie web` · `GET /api/plugins/listings` · `GET /api/plugins` · `GET /api/plugins/page` · `POST /api/plugins/off` & `options` | 市场解析 `package: "agentcompass"`；图标落盘为 `file:a100c6af45032ded.svg`；README 渲染 `16,299 B`；`Off: true` 时请求保持原模型 `gpt-6-luna` 不改写 | 完整覆盖 `internal/plugin/market.go`、`github.go` 与 `internal/gui/plugins.go` | ✅ PASS |
+| **Scenario 3: 1,600 ms 异步 System-One 长预算 + 复杂跨模块死锁排障** | **Mode A** (`hooks.js` [Bun] $\rightarrow$ `middleware.js` [`moejs`]) · `/v1/chat/completions` · `model="auto"` | `claude-opus-5-5` : `max` | 异步分类器耗时 `1730 ms`（突破 20ms/250ms/1200ms 限制），`__agentcompass_route` 载体被剥离，反递归头 `Magpie-Router/1.0` 生效 | ✅ PASS |
 | **Scenario 4: 5 维 Model DNA 区分度（发散创意 vs 独立模块编码 vs 日常批量降级）** | **Mode A** · `/v1/chat/completions` & `/v1/responses` | 发散脑暴 $\rightarrow$ `gemini-4-argon-high:high`<br/>独立模块 (`/v1/responses`) $\rightarrow$ `gpt-6.1-sol:high`<br/>机械批量重命名 $\rightarrow$ `gemini-3.8-flash-high:high` | `divergence`、`module_precision` 与 `overqualification` 过配惩罚同时生效 | ✅ PASS |
 | **Scenario 5: Anthropic `/v1/messages` 协议与 SSE 流式 (`stream: true`)** | **Mode A** · `POST /v1/messages` & `POST /v1/chat/completions` (`stream: true`) | `/v1/messages` $\rightarrow$ `claude-opus-5-5` (`type="message"`)<br/>SSE `stream: true` $\rightarrow$ `gpt-6.1-sol:high` (`text/event-stream` + `[DONE]`) | 流式请求与 Anthropic 协议均正常路由且不触发 `host.js:1411` 字段回滚 | ✅ PASS |
-| **Scenario 6: 故障演练与优雅降级（HTTP 500 & 评分超时）** | **Mode A** · 远程评分器注入 `HTTP 500` 与 `2000ms > 300ms` 超时 | `HTTP 500` $\rightarrow$ `claude-opus-5-5`<br/>`Timeout (354ms)` $\rightarrow$ `gemini-4-argon-high` | 远程 System-One 异常或超时时自动无缝回退至 `<1ms` 本地确定性 `profileTask`，网关请求零报错 | ✅ PASS |
+| **Scenario 6: 故障演练与优雅降级（HTTP 500 & 评分超时）** | **Mode A** · 远程评分器注入 `HTTP 500` 与 `2000ms > 300ms` 超时 | `HTTP 500` $\rightarrow$ `claude-opus-5-5`<br/>`Timeout (368ms)` $\rightarrow$ `gemini-4-argon-high` | 远程 System-One 异常或超时时自动无缝回退至 `<1ms` 本地确定性 `profileTask`，网关请求零报错 | ✅ PASS |
 | **Scenario 7: 原生路由组 `/v1/systemone` 决策（含规则命中、`"none of these"` 兜底与 `effort=auto`）** | **Mode B** (`group/compass-group` · `classifier=agentcompass/agentcompass-systemone` · `effort=auto`) | `direction_reasoning` $\rightarrow$ `gemini-4-argon-high:high`<br/>`debug_review` $\rightarrow$ `claude-opus-5-5:xhigh`<br/>未命中意图 (`"none of these"`) $\rightarrow$ 默认首模型 `gpt-6-luna` | 完整验证 `jevLevelled`、`jevBody`、`"none of these"` 兜底回退及 Jev 四档思考强度自动升级 | ✅ PASS |
+| **Scenario 8: 多轮会话粘性、轮内工具锁定 (`within: true`) 与短追问续用 (`keepsEffort`)** | **Mode A** · 同一 `x-session-id` 连续 3 轮：首轮死锁排障 $\rightarrow$ 轮内 `tool` + `<system-reminder>` $\rightarrow$ 短追问 `"继续"` | 首轮 $\rightarrow$ `claude-opus-5-5:max`（调用 1 次评分器）<br/>轮内工具循环 $\rightarrow$ `claude-opus-5-5:max`（**0 次评分调用**）<br/>短追问 `"继续"` $\rightarrow$ `claude-opus-5-5:max`（**0 次评分调用**） | 严格验证轮内锁定（`why: "turn"`）、短追问续用（`why: "followup"`）与 `keepsEffort` 单调棘轮 | ✅ PASS |
 
 ---
 
 ## 📂 仓库目录结构
 
-- [`package.json`](./package.json) — Magpie 插件清单（同时挂载 `main`、`magpie.hooks`、`magpie.middleware`）
-- [`src/catalog.js`](./src/catalog.js) — 16 类 `work_kind`、13 个核心模型 7D 能力向量 + 3D 主观禀赋（Model DNA）、Effort 投入曲线与默认策略
+- [`package.json`](./package.json) — Magpie 插件清单（同时挂载 `main`、`magpie.hooks`、`magpie.middleware`、`./continuity`）
+- [`src/catalog.js`](./src/catalog.js) — 16 类 `work_kind`、13 个核心模型 7D 能力向量 + 3D 主观禀赋（Model DNA）+ `context_window`、Effort 投入曲线与默认策略
+- [`src/continuity.js`](./src/continuity.js) — **会话粘性、轮内工具循环锁定（`within`）、KV 缓存温度保持（`cacheCold` / `chatGPTCold` / `deepseekCold`）、单调思考棘轮（`keepsEffort`）与能力/窗口/2M 越界判定引擎**（纯 ES2022，兼容 Bun 与 `moejs`）
 - [`src/profiler-core.js`](./src/profiler-core.js) — 四大协议（Anthropic / OpenAI Responses / Chat / Gemini）请求抽取器 + 确定性 10 维任务画像器
-- [`src/allocator.js`](./src/allocator.js) — AgentCompass 纯意图与能力矩阵选型核心算法实现
+- [`src/allocator.js`](./src/allocator.js) — AgentCompass 纯意图与能力矩阵选型核心算法实现（含 `continuity` 连续性权重与不健康模型剔除）
 - [`src/scorer-live.js`](./src/scorer-live.js) — 异步 System-One 10 维画像器（支持 Jev `/v1/systemone`、OpenAI 兼容接口、LRU 缓存与超时无损降级）
-- [`src/hooks.js`](./src/hooks.js) — **阶段一（Bun `magpie.hooks`，最长 10s 预算）**：执行异步 10D 画像与选型，注入 `body.__agentcompass_route`
-- [`src/middleware.js`](./src/middleware.js) — **阶段二（`moejs` `magpie.middleware`，250ms 预算）**：消费路由结果并改写 `body.model = "<model>:<effort>"`，同时导出 `agentcompass` / `agentcompass-pure` 账号池策略
-- [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled` 与 `jevBody`）
+- [`src/hooks.js`](./src/hooks.js) — **阶段一（Bun `magpie.hooks`，最长 10s 预算）**：先执行 `evaluateProviderContinuation`，仅在需要选模/换模时调用异步 10D 画像与选型，注入 `body.__agentcompass_route`
+- [`src/middleware.js`](./src/middleware.js) — **阶段二（`moejs` `magpie.middleware`，250ms 预算）**：消费路由结果并改写 `body.model = "<model>:<effort>"`，实现 `onResponse` / `onUsage` 故障与缓存水位追踪，并导出 `agentcompass` / `agentcompass-pure` 账号池策略
+- [`src/index.js`](./src/index.js) — **模式 B（OpenCode / Magpie Decision Provider，最高 60s 预算）**：注册 `agentcompass/agentcompass-systemone`，实现 `/v1/systemone`（兼容 `jevLevelled`、`jevBody` 与 `previous_message_kind` / `previous_message_reasoning` 短追问续用）
 - [`docs/RESEARCH_AND_SCHEME.md`](./docs/RESEARCH_AND_SCHEME.md) — **深度调研与架构设计报告**（含 Magpie 源码逐文件行号级分析、完整方案推导与 Linux 沙盒实测报告）
 - [`docs/magpie-community-registry-entry.json`](./docs/magpie-community-registry-entry.json) — **`magpie-community/plugins` 标准 `registry.json` 市场条目**
-- [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json) — **Linux 沙盒 7 大场景全链路真实网关与市场 E2E 实测 JSON 报告**
+- [`docs/linux-sandbox-e2e-report.json`](./docs/linux-sandbox-e2e-report.json) — **Linux 沙盒 8 大场景全链路真实网关与市场 E2E 实测 JSON 报告**
 - [`test/router.test.mjs`](./test/router.test.mjs) — 自动化单元测试套件
 - [`test/linux-sandbox-e2e.mjs`](./test/linux-sandbox-e2e.mjs) & [`test/run-linux-sandbox.sh`](./test/run-linux-sandbox.sh) — Linux 沙盒真实 `magpie serve` 全链路端到端验证套件
 

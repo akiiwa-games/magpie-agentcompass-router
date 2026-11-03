@@ -10,12 +10,29 @@
  *    up to 60,000 ms (60 seconds)** (`internal/gateway/classify.go:classifyTimeout()`).
  * 4. Handles all three `/v1/systemone` request shapes sent by Magpie:
  *    - Shape A (`jevLevelled` probe in `decide.go:310`): `state.kinds` + `questions.levels` + `questions.work0..N`
- *    - Shape B (`jevBody` turn classification in `decide.go:167`): `state.turn` + `questions.intent` / `questions.level` + `questions.effort`
+ *    - Shape B (`jevBody` turn classification in `decide.go:167`): `state.turn` / `state.message` +
+ *      `state.previous_message_kind` / `state.previous_message_reasoning` + `questions.intent` / `questions.level` + `questions.effort`
  *    - Shape C (Direct AgentCompass 10-field `/v1/systemone` query): `state.task` + `questions.work_kind` / `reasoning_depth` / etc.
  */
 
 import { rankCandidates, selectBestRoute } from "./allocator.js";
 import { CANONICAL_ROUTES, canonicalModel } from "./catalog.js";
+import {
+  SessionContinuityStore,
+  analyzeTurnState,
+  coldAfterMs,
+  computeSessionKey,
+  defaultContinuityStore,
+  evaluateProviderContinuation,
+  firstWords,
+  isCompactionText,
+  isShortFollowupMessage,
+  keepsEffort,
+  ratchetEffort,
+  sha256Hex,
+  stripAgentNoise,
+  userSaidFromText,
+} from "./continuity.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
 export const PROVIDER_ID = "agentcompass";
@@ -89,14 +106,41 @@ export function evaluateLevelsProbe(kinds = []) {
   };
 }
 
+function buildChoiceDistribution(choices, bestChoice, winnerProb = 0.88) {
+  const probabilities = {};
+  const restChoices = choices.filter((c) => c !== bestChoice);
+  const remainder = restChoices.length > 0 ? (1.0 - winnerProb) / restChoices.length : 0.0;
+  for (const c of choices) {
+    probabilities[c] =
+      c === bestChoice
+        ? restChoices.length > 0
+          ? winnerProb
+          : 1.0
+        : Math.round(remainder * 10000) / 10000;
+  }
+  return {
+    choice: bestChoice,
+    confidence: probabilities[bestChoice],
+    probabilities,
+  };
+}
+
 /**
  * Match a profiled AgentCompass task (`workKind`, `difficulty`, `targetModel`, `profile`)
  * against the user's Routing Group `intent` or `level` choices in Magpie (`decide.go:readJev`).
  */
-export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
+export function matchMagpieIntentChoice(criteriaObj, routeDecision, preferredChoice = "") {
   const choices = Object.keys(criteriaObj || {});
   if (choices.length === 0) {
-    return { choice: "none of these", confidence: 1.0, probabilities: { "none of these": 1.0 } };
+    return {
+      choice: "none of these",
+      confidence: 1.0,
+      probabilities: { "none of these": 1.0 },
+    };
+  }
+
+  if (preferredChoice && choices.includes(preferredChoice)) {
+    return buildChoiceDistribution(choices, preferredChoice, 0.94);
   }
 
   const noneKey = choices.find((c) => c === "none of these" || c === "none") || "none of these";
@@ -118,12 +162,19 @@ export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
     // 1. Exact or substring match with AgentCompass's 16 canonical `work_kind` routes
     if (lower === wk || lower.replace(/[-\s]/g, "_") === wk) {
       w = 10.0;
-    } else if (desc.includes(wk.replace(/_/g, " ")) || (wk && lower.includes(wk.split("_")[0]))) {
+    } else if (
+      desc.includes(wk.replace(/_/g, " ")) ||
+      (wk && lower.includes(wk.split("_")[0]))
+    ) {
       w = Math.max(w, 6.0);
     }
 
     // 2. Match by difficulty level (`routine`, `hard`, `coupled`, `frontier`, Chinese equivalents)
-    if (lower === diff || (DIFFICULTY_SCALE_WORDS[lower] !== undefined && DIFFICULTY_SCALE_WORDS[lower] === DIFFICULTY_SCALE_WORDS[diff])) {
+    if (
+      lower === diff ||
+      (DIFFICULTY_SCALE_WORDS[lower] !== undefined &&
+        DIFFICULTY_SCALE_WORDS[lower] === DIFFICULTY_SCALE_WORDS[diff])
+    ) {
       w = Math.max(w, 8.5);
     }
 
@@ -135,12 +186,16 @@ export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
       (wk === "frontend_implementation" && /frontend|ui|react|css|前端|界面/.test(lower)) ||
       (wk === "debug_review" && /debug|bug|fix|review|audit|排查|修复|审查|审计/.test(lower)) ||
       ((wk === "direction_reasoning" || wk === "complex_build_plan") &&
-        /direction|reason|brainstorm|creative|plan|architect|design|scheme|方案|架构|规划|创意|脑暴|推理/.test(lower)) ||
-      ((wk === "bounded_bulk_work" || wk === "tool_execution") && /fast|quick|routine|bulk|simple|简单|日常|批量|轻量/.test(lower)) ||
+        /direction|reason|brainstorm|creative|plan|architect|design|scheme|方案|架构|规划|创意|脑暴|推理/.test(
+          lower
+        )) ||
+      ((wk === "bounded_bulk_work" || wk === "tool_execution") &&
+        /fast|quick|routine|bulk|simple|简单|日常|批量|轻量/.test(lower)) ||
       (wk === "visual_analysis" && /vis|image|screenshot|看图|视觉|截图/.test(lower)) ||
       (wk === "computer_use" && /gui|desktop|browser|computer|桌面|点击/.test(lower)) ||
       (style === "exploration" && /explor|research|search|分析|调研|探索/.test(lower)) ||
-      ((wk === "self_contained_code" || wk === "general_implementation") && /code|coding|implement|dev|代码|开发|实现/.test(lower))
+      ((wk === "self_contained_code" || wk === "general_implementation") &&
+        /code|coding|implement|dev|代码|开发|实现/.test(lower))
     ) {
       w = Math.max(w, 7.5);
     }
@@ -156,19 +211,19 @@ export function matchMagpieIntentChoice(criteriaObj, routeDecision) {
     bestChoice = choices.includes(noneKey) ? noneKey : nonNone[0];
   }
 
-  // Build normalized probability distribution so Magpie's `sureOf` (`decide.go:257`, `jevSure = 0.6`) accepts the choice
-  const probabilities = {};
-  const winnerProb = 0.88;
-  const restChoices = choices.filter((c) => c !== bestChoice);
-  const remainder = restChoices.length > 0 ? (1.0 - winnerProb) / restChoices.length : 0.0;
-  for (const c of choices) {
-    probabilities[c] = c === bestChoice ? (restChoices.length > 0 ? winnerProb : 1.0) : Math.round(remainder * 10000) / 10000;
-  }
+  return buildChoiceDistribution(choices, bestChoice, 0.88);
+}
 
+function buildEffortAnswer(effort, confidence = 0.9) {
+  const effScore = EFFORT_TO_JEV_SCORE[effort] ?? 2.0;
+  const idx = String(Math.max(0, Math.min(3, Math.round(effScore))));
+  const rem = Math.round(((1.0 - confidence) / 3) * 10000) / 10000;
+  const probs = { "0": rem, "1": rem, "2": rem, "3": rem };
+  probs[idx] = confidence;
   return {
-    choice: bestChoice,
-    confidence: probabilities[bestChoice],
-    probabilities,
+    score: effScore,
+    confidence,
+    probabilities: probs,
   };
 }
 
@@ -214,6 +269,85 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       : typeof state.previous_user === "string"
         ? state.previous_user
         : "";
+  const prevKind =
+    typeof state.previous_message_kind === "string" ? state.previous_message_kind.trim() : "";
+  const prevReasoning =
+    typeof state.previous_message_reasoning === "string"
+      ? state.previous_message_reasoning.trim().toLowerCase()
+      : "";
+
+  // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)
+  // when Magpie's `decide.go` passes `previous_message_kind` / `previous_message_reasoning`.
+  if (
+    (prevKind || prevReasoning) &&
+    isShortFollowupMessage(turnText) &&
+    !isCompactionText(turnText)
+  ) {
+    const heldEffort = ratchetEffort(prevReasoning || "high", "medium", [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+    ]);
+    const answers = {};
+    const syntheticDecision = {
+      workKind: prevKind || "general_implementation",
+      difficulty: DIFFICULTY_SCALE_WORDS[prevKind.toLowerCase()] !== undefined ? prevKind : "hard",
+      targetModel: "",
+      targetEffort: heldEffort,
+    };
+
+    if (questions.intent?.criteria) {
+      answers.intent = matchMagpieIntentChoice(
+        questions.intent.criteria,
+        syntheticDecision,
+        prevKind
+      );
+    }
+    if (questions.level?.criteria) {
+      answers.level = matchMagpieIntentChoice(
+        questions.level.criteria,
+        syntheticDecision,
+        prevKind
+      );
+    }
+    if (questions.effort) {
+      answers.effort = buildEffortAnswer(heldEffort, 0.94);
+    }
+    if (questions.work_kind && !answers.work_kind) {
+      answers.work_kind = {
+        choice: prevKind || "general_implementation",
+        confidence: 0.94,
+      };
+    }
+
+    return {
+      model,
+      answers,
+      agentcompass: {
+        targetModel: null,
+        targetEffort: heldEffort,
+        workKind: prevKind || "general_implementation",
+        difficulty: syntheticDecision.difficulty,
+        continuation: {
+          held: true,
+          why: "followup",
+          previousKind: prevKind || null,
+          previousEffort: prevReasoning || null,
+        },
+        scorer: {
+          kind: "continuity_hold",
+          held: true,
+          why: "followup",
+          calls: 0,
+        },
+      },
+      usage: {
+        input_tokens: Math.max(8, Math.ceil(turnText.length / 4)),
+        output_tokens: 16,
+      },
+    };
+  }
 
   const taskFacts = {
     objective: turnText,
@@ -221,7 +355,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     hasVisualInput: Boolean(state.has_visual_input),
   };
 
-  const scorerCfg = pluginOptions.scorer && typeof pluginOptions.scorer === "object" ? pluginOptions.scorer : {};
+  const scorerCfg =
+    pluginOptions.scorer && typeof pluginOptions.scorer === "object" ? pluginOptions.scorer : {};
 
   const { profile, meta } = await scoreTaskLive(taskFacts, {
     scorerType: pluginOptions.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
@@ -241,23 +376,36 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   });
 
   const answers = {};
+  let matchedChoice = "";
 
   if (questions.intent?.criteria) {
     answers.intent = matchMagpieIntentChoice(questions.intent.criteria, decision);
+    matchedChoice = answers.intent.choice;
   }
   if (questions.level?.criteria) {
     answers.level = matchMagpieIntentChoice(questions.level.criteria, decision);
+    if (!matchedChoice) matchedChoice = answers.level.choice;
   }
+
+  // Monotonic effort ratchet (`keepsEffort`) when continuing on the same kind/intent
+  let effectiveEffort = decision.targetEffort;
+  if (
+    prevReasoning &&
+    !isCompactionText(turnText) &&
+    ((prevKind && matchedChoice && prevKind === matchedChoice) ||
+      (prevKind && prevKind === decision.workKind))
+  ) {
+    effectiveEffort = ratchetEffort(prevReasoning, effectiveEffort, [
+      "low",
+      "medium",
+      "high",
+      "xhigh",
+      "max",
+    ]);
+  }
+
   if (questions.effort) {
-    const effScore = EFFORT_TO_JEV_SCORE[decision.targetEffort] ?? 2.0;
-    const idx = String(Math.max(0, Math.min(3, Math.round(effScore))));
-    const probs = { "0": 0.02, "1": 0.03, "2": 0.03, "3": 0.02 };
-    probs[idx] = 0.9;
-    answers.effort = {
-      score: effScore,
-      confidence: 0.9,
-      probabilities: probs,
-    };
+    answers.effort = buildEffortAnswer(effectiveEffort, 0.9);
   }
 
   // Case 3: Direct 10-field System-One questions (when called as a general Jev endpoint)
@@ -267,7 +415,14 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   if (questions.interaction_style && !answers.interaction_style) {
     answers.interaction_style = { choice: profile.interaction_style, confidence: 0.9 };
   }
-  for (const dim of ["reasoning_depth", "code_complexity", "context_scale", "divergence", "hallucination_risk", "error_cost"]) {
+  for (const dim of [
+    "reasoning_depth",
+    "code_complexity",
+    "context_scale",
+    "divergence",
+    "hallucination_risk",
+    "error_cost",
+  ]) {
     if (questions[dim] && !answers[dim]) {
       const low = dim === "code_complexity" ? 0 : 1;
       answers[dim] = { score: Math.max(0, (profile[dim] ?? low) - low) };
@@ -284,10 +439,16 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     answers,
     agentcompass: {
       targetModel: decision.targetModel,
-      targetEffort: decision.targetEffort,
+      targetEffort: effectiveEffort,
       workKind: decision.workKind,
       difficulty: decision.difficulty,
       requiredAbility: decision.requiredAbility,
+      continuation: {
+        held: false,
+        why: prevKind ? "reclassified" : "first",
+        previousKind: prevKind || null,
+        previousEffort: prevReasoning || null,
+      },
       profile,
       scorer: meta,
     },
@@ -330,18 +491,24 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
         {
           key: "prefer_local_heuristic",
           label: "Prefer Local Deterministic Heuristic Profiler",
-          description: "Always use the <1ms local deterministic 10D profiler without calling an external System-One scorer.",
+          description:
+            "Always use the <1ms local deterministic 10D profiler without calling an external System-One scorer.",
           default: false,
           labels: { zh: "优先使用本地确定性 10 维启发式画像" },
-          descriptions: { zh: "始终使用 <1ms 零延迟的本地确定性 10 维画像与 Model DNA 选型，不调用外部评分接口。" },
+          descriptions: {
+            zh: "始终使用 <1ms 零延迟的本地确定性 10 维画像与 Model DNA 选型，不调用外部评分接口。",
+          },
         },
         {
           key: "live_scorer",
           label: "Use Live System-One LLM Scorer",
-          description: "Call the configured fast LLM or Jev endpoint before falling back to the deterministic profiler.",
+          description:
+            "Call the configured fast LLM or Jev endpoint before falling back to the deterministic profiler.",
           default: false,
           labels: { zh: "启用实时 System-One 评分模型" },
-          descriptions: { zh: "优先调用配置的轻量级评分模型或 Jev 接口生成 10 维任务画像，超时自动回退至确定性算法。" },
+          descriptions: {
+            zh: "优先调用配置的轻量级评分模型或 Jev 接口生成 10 维任务画像，超时自动回退至确定性算法。",
+          },
         },
       ],
       methods: [
@@ -404,4 +571,22 @@ export default {
   id: "agentcompass",
   server: AgentCompassRouterPlugin,
 };
-export { rankCandidates, selectBestRoute };
+export {
+  CANONICAL_ROUTES,
+  SessionContinuityStore,
+  analyzeTurnState,
+  coldAfterMs,
+  computeSessionKey,
+  defaultContinuityStore,
+  evaluateProviderContinuation,
+  firstWords,
+  isCompactionText,
+  isShortFollowupMessage,
+  keepsEffort,
+  rankCandidates,
+  ratchetEffort,
+  selectBestRoute,
+  sha256Hex,
+  stripAgentNoise,
+  userSaidFromText,
+};
