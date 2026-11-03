@@ -352,14 +352,17 @@ test("4. Native Magpie `/v1/systemone` Decision Provider (`decide: true` / `deci
   assert.equal(json.answers.intent.choice, "bounded_bulk_work");
 });
 
-test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting lowest-used seats first", () => {
+test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting lowest-used seat indexes first", () => {
   const seats = [
     { key: "seat-resting", used: 10, resting: true },
     { key: "seat-busy", used: 80, resting: false },
     { key: "seat-fresh", used: 20, resting: false },
   ];
-  assert.deepEqual(strategies.agentcompass("anthropic", seats, {}), ["seat-fresh", "seat-busy", "seat-resting"]);
-  assert.deepEqual(strategies["agentcompass-pure"]("anthropic", seats, {}), ["seat-fresh", "seat-busy", "seat-resting"]);
+  const order1 = strategies.agentcompass("anthropic", seats, {});
+  const order2 = strategies["agentcompass-pure"]("anthropic", seats, {});
+  assert.deepEqual(order1, [2, 1, 0]);
+  assert.deepEqual(order2, [2, 1, 0]);
+  assert.deepEqual(order1.map((i) => seats[i].key), ["seat-fresh", "seat-busy", "seat-resting"]);
 });
 
 test("6. Magpie Plugin Market & GitHub Topic Discovery Contract (`package.json`, `icon`, `options`, `registry.json`)", async () => {

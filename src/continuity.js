@@ -491,6 +491,7 @@ export function computeSessionKey(body = {}, ctx = {}) {
   const metadata = body?.metadata || ctx?.metadata || {};
 
   const explicitSession =
+    ctx?.session ||
     ctx?.session_id ||
     ctx?.sessionId ||
     ctx?.conversation_id ||

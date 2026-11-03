@@ -355,19 +355,24 @@ export function onAccount(account, ctx = {}) {
 /**
  * Optional pool seat-ordering strategy (`agentcompass/agentcompass` and `agentcompass/agentcompass-pure`).
  * Prefers non-resting seats with the lowest pace / usage pressure.
+ * Returns seat indexes `[0 .. seats.length - 1]` as required by `internal/middleware/points.go:232`
+ * and `magpie-community/plugins/scripts/middleware.mjs:order()`.
  */
 function agentcompassPureStrategy(_pool, seats, _options) {
-  if (!Array.isArray(seats) || seats.length <= 1) return seats;
-  return [...seats]
-    .sort((a, b) => {
+  if (!Array.isArray(seats)) return [];
+  if (seats.length <= 1) return seats.map((_, i) => i);
+  return seats
+    .map((_, i) => i)
+    .sort((ia, ib) => {
+      const a = seats[ia] || {};
+      const b = seats[ib] || {};
       if (Boolean(a.resting) !== Boolean(b.resting)) {
         return a.resting ? 1 : -1;
       }
       const aUsed = typeof a.used === "number" ? a.used : 50;
       const bUsed = typeof b.used === "number" ? b.used : 50;
-      return aUsed - bUsed;
-    })
-    .map((s) => s.key);
+      return aUsed - bUsed || ia - ib;
+    });
 }
 
 export const strategies = {
