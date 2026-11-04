@@ -47,7 +47,7 @@ import {
   onResponse as mwOnResponse,
   strategies,
 } from "../src/middleware.js";
-import { capProfileText, extractRequestFacts, inferTaskProfile, profileTask } from "../src/profiler-core.js";
+import { capProfileText, extractRequestFacts, inferKindFromObjective, inferTaskProfile, profileTask } from "../src/profiler-core.js";
 import { SCORER_SYSTEM_PROMPT, clearProfileCache, parseJevScorerAnswer, scoreTaskLive } from "../src/scorer-live.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -1464,6 +1464,65 @@ test("8.6 Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-acco
     );
     assert.equal(unlimitedDec.targetModel, "gpt-6.1-sol");
     assert.equal(unlimitedDec.components.free_usage, 0.18);
+
+    // Verify v0.3.7 + 54bb51e calibration parity:
+    assert.deepEqual(DEFAULT_SCORING_POLICY.ability_floor, {
+      routine: 2.3,
+      hard: 3.1,
+      coupled: 3.6,
+      frontier: 4.2,
+    });
+    assert.deepEqual(DEFAULT_SCORING_POLICY.ability_score_origin, {
+      routine: 3.0,
+      hard: 3.3,
+      coupled: 3.6,
+      frontier: 4.2,
+    });
+    assert.deepEqual(DEFAULT_SCORING_POLICY.critical_headroom_by_difficulty, {
+      frontier: 0.1,
+    });
+
+    // D (54bb51e): computer_use action phrases, CODE_FILE_RE, and translation-of narrowing
+    for (const prompt of [
+      "Fix the keyboard shortcuts in editor.py.",
+      "Fix mouse event handler in app.ts",
+      "Fix translation.py.",
+      "Debug translation pipeline",
+      "修复翻译模块的 bug",
+    ]) {
+      assert.equal(inferKindFromObjective(prompt), "debug_review", `Expected debug_review for: ${prompt}`);
+    }
+    assert.equal(inferKindFromObjective("用鼠标点击设置里的保存"), "computer_use");
+
+    // A3 (54bb51e): origin = max(floor, ability_score_origin[d]) so raising floor above origin does not hand out free ability score
+    const raisedFloorRanked = rankCandidates(
+      {
+        work_kind: "debug_review",
+        reasoning_depth: 2,
+        code_complexity: 2,
+        context_scale: 1,
+        divergence: 1,
+        hallucination_risk: 2,
+        error_cost: 3, // critical -> uses origin-based gradient
+        needs_visual: false,
+        needs_gui: false,
+        local_only: true,
+        interaction_style: "engineering",
+      },
+      {
+        candidateModels: ["claude-opus-5-5", "gpt-6.1-sol"],
+        catalog: {
+          policy: {
+            ...DEFAULT_SCORING_POLICY,
+            ability_floor: { ...DEFAULT_SCORING_POLICY.ability_floor, hard: 3.6 },
+            critical_headroom: 0.0,
+          },
+        },
+      }
+    );
+    const solHigh = raisedFloorRanked.ranking.find((c) => c.canonicalModel === "gpt-6.1-sol" && c.effort === "high");
+    assert.ok(solHigh, "gpt-6.1-sol:high (ability 3.6) clears floor=3.6 when critical_headroom=0");
+    assert.equal(solHigh.components.ability, 0, "Model right at raised floor (3.6 > origin 3.3) must not get free ability score");
   });
 
 test("9.1 PR #670 Review Guard: Default triggers ONLY claim `agentcompass` / `agentcompass/*` and never hijack `auto` or `group/intent`", async () => {
@@ -1741,7 +1800,7 @@ test("9.6 PR #670 Round 2 & 3 Guard: Client body injection (`__agentcompass_rout
   });
   assert.ok(claimedInCandidatesRes);
   assert.equal(ROUTE_CARRIER_KEY in claimedInCandidatesRes, false);
-  assert.equal(claimedInCandidatesRes.model, "claude-haiku-4-5:low");
+  assert.equal(claimedInCandidatesRes.model, "claude-haiku-4-5:medium");
 
   // 2b. Claimed model (`"agentcompass"`) where client `__agentcompass_route` names a model OUTSIDE `candidateModels`
   // and supplies a hostile `profile.work_kind`: MUST NOT pass `profile` to `selectBestRoute` or throw!
@@ -1764,7 +1823,7 @@ test("9.6 PR #670 Round 2 & 3 Guard: Client body injection (`__agentcompass_rout
     },
   });
   assert.ok(claimedOutsideCandidatesRes);
-  assert.equal(claimedOutsideCandidatesRes.model, "claude-haiku-4-5:low");
+  assert.equal(claimedOutsideCandidatesRes.model, "claude-haiku-4-5:medium");
 
   // 2c. Claimed model (`"agentcompass"`) with NO `candidateModels` (`allowUnconstrainedCatalog: true`) and `{ useRouteCarrier: true }`:
   // client `__agentcompass_route` (`targetModel: "evil"`) MUST be ignored and never steer routing to `"evil:max"`!
@@ -1840,8 +1899,8 @@ test("9.7 PR #670 Round 2 Guard: Mainstream real model IDs & trivial single-vari
     });
     assert.equal(
       renameOut.model,
-      "claude-haiku-4-5:low",
-      `Expected claude-haiku-4-5:low for permutation [${candidateModels.join(", ")}], got ${renameOut.model}`
+      "claude-haiku-4-5:medium",
+      `Expected claude-haiku-4-5:medium for permutation [${candidateModels.join(", ")}], got ${renameOut.model}`
     );
 
     const auditReq = {
