@@ -438,6 +438,7 @@ async function main() {
   const webCookie = `magpie_web_${webPort}=${webKey}`;
 
   let magpieProc = null;
+  const magpieLogs = [];
 
   try {
     const env = {
@@ -452,12 +453,6 @@ async function main() {
       MAGPIE_WEB_KEY: webKey,
       MAGPIE_PLUGIN_MARKET: `http://127.0.0.1:${upPort}/registry.json`,
       NO_COLOR: "1",
-      // Magpie hands every request a moejs runtime from a sync.Pool, and the middleware's continuity store lives in
-      // that runtime (Magpie gives middleware no cross-request storage). With several Ps the pool can give a later
-      // request of the same session a fresh runtime with no session state (observed: Scenario 8's short follow-up
-      // re-routed in 2 of 5 runs). One P makes the reuse deterministic so Scenario 8 tests the plugin's logic; the
-      // limitation itself is reported in the README.
-      GOMAXPROCS: "1",
     };
 
     // =========================================================================
@@ -557,7 +552,6 @@ async function main() {
     );
 
     // 6. Start real `magpie web` daemon (serves both Web GUI API on webPort and Gateway on gwPort)
-    const magpieLogs = [];
     magpieProc = spawn(MAGPIE_BIN, ["web", "--addr", `127.0.0.1:${webPort}`, "--no-open"], {
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -723,6 +717,23 @@ async function main() {
       });
       assert.equal(r.status, 200, `POST /api/plugins/options failed: ${r.status}`);
     };
+
+    // Magpie fits the effort it forwards to the levels its model catalog lists (`catalog.NearestEffort`), and
+    // fetches that catalog from models.dev in the background after it starts. Until the fetch lands, 0.1.2891
+    // sent `upstream/claude-opus-5-5:xhigh` on as `high`; once it lands, as `xhigh`, and runs flipped partway
+    // through. The scenarios start once Magpie forwards xhigh as asked, so what they check is the middleware's.
+    const catalogWaitStart = Date.now();
+    let opusXhighSent = null;
+    for (let n = 0; Date.now() - catalogWaitStart < 120_000; n++) {
+      const r = await postChat({ model: "upstream/claude-opus-5-5:xhigh", messages: [{ role: "user", content: `effort probe ${n}` }] });
+      assert.equal(r.status, 200, "a direct upstream/claude-opus-5-5:xhigh must be served");
+      opusXhighSent = upstreamCalls[upstreamCalls.length - 1].reasoning_effort;
+      if (opusXhighSent === "xhigh") break;
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    assert.equal(opusXhighSent, "xhigh", "Magpie must forward claude-opus-5-5:xhigh as xhigh within 120 s of starting (models.dev catalog)");
+    report.hostEffortReadyMs = Date.now() - catalogWaitStart;
+    console.log(`[Linux Sandbox] Magpie forwards claude-opus-5-5:xhigh as xhigh after ${report.hostEffortReadyMs}ms`);
 
     // =========================================================================
     // SCENARIO 3: Mode A latency / budget — `agentcompass/auto` never waits for System One
@@ -1123,66 +1134,95 @@ async function main() {
     // =========================================================================
     // SCENARIO 8: Mode A — session affinity, mid-turn tool lock (`within: true`) & short follow-up hold
     // =========================================================================
+    // Magpie hands each request a moejs runtime from a sync.Pool, so a session's requests land on different
+    // runtimes. The middleware decides the turn a request continues again from the history the client resends,
+    // so the route holds whichever runtime serves it. The sessions below are run SCENARIO8_REPEATS times on the
+    // default GOMAXPROCS, each its own session, and every tool-loop step and follow-up is counted.
     {
-      const sid = "e2e-sticky-session-1";
-      const sessionHeaders = { "x-session-id": sid };
-      const stickyFirstMsg = {
-        role: "user",
-        content:
-          "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.",
-      };
+      const repeats = Math.max(1, Number(process.env.SCENARIO8_REPEATS || 20));
       const scorerBefore8 = scorerCalls.length;
+      const runs = [];
+      let toolLoopReroutes = 0;
+      let followupReroutes = 0;
+      let up8a;
+      let up8b;
+      let up8c;
 
-      // 8a. Turn 1 (`why: "first"`): routed by the middleware
-      const resp8a = await postChat({ model: "agentcompass/auto", messages: [stickyFirstMsg] }, sessionHeaders);
-      assert.equal(resp8a.status, 200);
-      const up8a = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up8a.model, "claude-opus-5-5");
-      assert.equal(up8a.reasoning_effort, "xhigh");
+      for (let i = 0; i < repeats; i++) {
+        // the session is known by its first message (Magpie gives middleware no headers); run 0 is the original
+        const stickyFirstMsg = {
+          role: "user",
+          content:
+            "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition." +
+            (i === 0 ? "" : ` Start with shard set ${i}.`),
+        };
+        const sessionHeaders = { "x-session-id": `e2e-sticky-session-${i + 1}` };
 
-      // 8b. Mid-turn tool result + agent `<system-reminder>` (`within: true`): hold model and effort
-      const resp8b = await postChat(
-        {
-          model: "agentcompass/auto",
-          messages: [
-            stickyFirstMsg,
-            {
-              role: "assistant",
-              content: null,
-              tool_calls: [
-                { id: "call_lock_1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"lock.go\"}" } },
-              ],
-            },
-            { role: "tool", tool_call_id: "call_lock_1", content: "package lock // simple utility" },
-            {
-              role: "user",
-              content: "<system-reminder>The TodoWrite tool hasn't been used recently.</system-reminder>",
-            },
-          ],
-        },
-        sessionHeaders
+        // 8a. Turn 1 (`why: "first"`): routed by the middleware
+        const resp8a = await postChat({ model: "agentcompass/auto", messages: [stickyFirstMsg] }, sessionHeaders);
+        assert.equal(resp8a.status, 200);
+        const a = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(a.model, "claude-opus-5-5", `run ${i}: turn 1 routes to claude-opus-5-5`);
+        assert.equal(a.reasoning_effort, "xhigh", `run ${i}: turn 1 effort xhigh`);
+
+        // 8b. Mid-turn tool result + agent `<system-reminder>` (`within: true`): hold model and effort
+        const resp8b = await postChat(
+          {
+            model: "agentcompass/auto",
+            messages: [
+              stickyFirstMsg,
+              {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  { id: "call_lock_1", type: "function", function: { name: "read_file", arguments: "{\"path\":\"lock.go\"}" } },
+                ],
+              },
+              { role: "tool", tool_call_id: "call_lock_1", content: "package lock // simple utility" },
+              {
+                role: "user",
+                content: "<system-reminder>The TodoWrite tool hasn't been used recently.</system-reminder>",
+              },
+            ],
+          },
+          sessionHeaders
+        );
+        assert.equal(resp8b.status, 200);
+        const b = upstreamCalls[upstreamCalls.length - 1];
+
+        // 8c. Short conversational follow-up ("继续"): hold model and effort
+        const resp8c = await postChat(
+          {
+            model: "agentcompass/auto",
+            messages: [
+              stickyFirstMsg,
+              { role: "assistant", content: "I found the lock inversion between ShardLock and TxLock. Shall I continue with the fix?" },
+              { role: "user", content: "继续" },
+            ],
+          },
+          sessionHeaders
+        );
+        assert.equal(resp8c.status, 200);
+        const c = upstreamCalls[upstreamCalls.length - 1];
+
+        const loopHeld = b.model === a.model && b.reasoning_effort === a.reasoning_effort;
+        const followHeld = c.model === a.model && c.reasoning_effort === a.reasoning_effort;
+        if (!loopHeld) toolLoopReroutes += 1;
+        if (!followHeld) followupReroutes += 1;
+        runs.push({
+          turn1: `${a.model}:${a.reasoning_effort}`,
+          toolLoop: `${b.model}:${b.reasoning_effort}`,
+          followup: `${c.model}:${c.reasoning_effort}`,
+        });
+        if (i === 0) [up8a, up8b, up8c] = [a, b, c];
+      }
+
+      const rerouted = runs.filter((r) => r.toolLoop !== r.turn1 || r.followup !== r.turn1);
+      assert.equal(
+        toolLoopReroutes + followupReroutes,
+        0,
+        `Mid-turn tool loop and short follow-up must hold turn 1's model and effort in every run: ${toolLoopReroutes} tool-loop and ${followupReroutes} follow-up re-routes in ${repeats} runs ${JSON.stringify(rerouted)}`
       );
-      assert.equal(resp8b.status, 200);
-      const up8b = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up8b.model, up8a.model, "Mid-turn tool loop must hold the model");
-      assert.equal(up8b.reasoning_effort, up8a.reasoning_effort, "Mid-turn tool loop must lock reasoning_effort");
-
-      // 8c. Short conversational follow-up ("继续"): hold model and effort
-      const resp8c = await postChat(
-        {
-          model: "agentcompass/auto",
-          messages: [
-            stickyFirstMsg,
-            { role: "assistant", content: "I found the lock inversion between ShardLock and TxLock. Shall I continue with the fix?" },
-            { role: "user", content: "继续" },
-          ],
-        },
-        sessionHeaders
-      );
-      assert.equal(resp8c.status, 200);
-      const up8c = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up8c.model, up8a.model, `Short follow-up nudge must hold the model (turn1=${up8a.model}:${up8a.reasoning_effort} toolLoop=${up8b.model}:${up8b.reasoning_effort} followup=${up8c.model}:${up8c.reasoning_effort})`);
-      assert.equal(up8c.reasoning_effort, up8a.reasoning_effort, "keepsEffort must preserve effort on short follow-up");
 
       // 8d. A different session is not pinned to this session's choice: a bulk task still routes on its own merits
       const resp8d = await postChat(
@@ -1202,6 +1242,10 @@ async function main() {
 
       report.scenarios.scenario8_session_continuity_and_turn_lock = {
         pass: true,
+        gomaxprocs: process.env.GOMAXPROCS || "default",
+        repeats,
+        toolLoopReroutes,
+        followupReroutes,
         firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
         midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
         shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
@@ -1209,11 +1253,11 @@ async function main() {
         scorerCalls: scorerCalls.length - scorerBefore8,
       };
       report.steps.push({
-        test: "Scenario 8: Mode A — session affinity, mid-turn tool lock (`within: true`) & short follow-up hold (`keepsEffort`)",
+        test: "Scenario 8: Mode A — session affinity, mid-turn tool lock (`within: true`) & short follow-up hold (`keepsEffort`), repeated on pooled runtimes",
         ...report.scenarios.scenario8_session_continuity_and_turn_lock,
       });
       console.log(
-        `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort}, followup=${up8c.model}:${up8c.reasoning_effort}, otherSession=${up8d.model}`
+        `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): ${repeats} sessions, ${toolLoopReroutes} tool-loop / ${followupReroutes} follow-up re-routes; turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort}, followup=${up8c.model}:${up8c.reasoning_effort}, otherSession=${up8d.model}`
       );
     }
 
@@ -1221,6 +1265,15 @@ async function main() {
     const reportPath = path.join(SANDBOX_ROOT, "e2e-report.json");
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
     console.log(`\n[Linux Sandbox] FULL-CHAIN E2E RUN PASSED! Report written to ${reportPath}`);
+  } catch (err) {
+    // what Magpie said, and the last requests it sent upstream, for the failure to be read without a rerun
+    console.error(`[Linux Sandbox] magpie web log (tail):
+${magpieLogs.join("").slice(-6000)}`);
+    for (const u of upstreamCalls.slice(-3)) {
+      const { messages, input, ...rest } = u.body || {};
+      console.error(`[Linux Sandbox] upstream ${u.path}: ${JSON.stringify(rest).slice(0, 600)}`);
+    }
+    throw err;
   } finally {
     if (magpieProc && !magpieProc.killed) {
       magpieProc.kill("SIGTERM");
