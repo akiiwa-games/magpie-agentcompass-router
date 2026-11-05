@@ -148,21 +148,20 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 
 | Path | Description |
 |---|---|
-| [`src/middleware.js`](src/middleware.js) | Synchronous `moejs` gateway middleware (`onRequest`, `onProvider`, `onAccount`, `onResponse`) and pool `strategies`. |
-| [`src/index.js`](src/index.js) | Mode B Decision Provider (`agentcompass/agentcompass-systemone`, `/v1/systemone`, `jevLevelled` and `jevBody`). |
-| [`src/continuity.js`](src/continuity.js) | Session key fingerprinting, tool-loop lock, KV cache TTLs, monotonic effort ratchet, and stateless history replay. |
-| [`src/profiler-core.js`](src/profiler-core.js) | Single-pass multi-protocol request fact extractor and deterministic 10D task profiler. |
-| [`src/allocator.js`](src/allocator.js) | 7D capability + 3D Model DNA + effort-curve candidate ranker. |
-| [`src/quota.js`](src/quota.js), [`src/quota-loader.js`](src/quota-loader.js) | 5h/7d window opportunity-cost model, pre-reset surplus sprint, and Magpie pool seat ordering. |
-| [`src/catalog.js`](src/catalog.js) | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. |
-| [`src/scorer-live.js`](src/scorer-live.js), [`src/hooks.js`](src/hooks.js) | Optional external System-One scorer client (LRU + timeout fallback) and programmatic Bun hook helper. |
-| [`docs/`](docs/) | Architecture notes ([`RESEARCH_AND_SCHEME.md`](docs/RESEARCH_AND_SCHEME.md)), market registry entry, and Linux sandbox E2E report ([`linux-sandbox-e2e-report.json`](docs/linux-sandbox-e2e-report.json)). |
+| `src/middleware.js` | Synchronous `moejs` gateway middleware (`onRequest`, `onProvider`, `onAccount`, `onResponse`) and pool `strategies`. |
+| `src/index.js` | Mode B Decision Provider (`agentcompass/agentcompass-systemone`, `/v1/systemone`, `jevLevelled` and `jevBody`). |
+| `src/continuity.js` | Session key fingerprinting, tool-loop lock, KV cache TTLs, monotonic effort ratchet, and stateless history replay. |
+| `src/profiler-core.js` | Single-pass multi-protocol request fact extractor and deterministic 10D task profiler. |
+| `src/allocator.js` | 7D capability + 3D Model DNA + effort-curve candidate ranker. |
+| `src/quota.js`, `src/quota-loader.js` | 5h/7d window opportunity-cost model, pre-reset surplus sprint, and Magpie pool seat ordering. |
+| `src/catalog.js` | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. |
+| `src/scorer-live.js`, `src/hooks.js` | Optional external System-One scorer client (LRU + timeout fallback) and programmatic Bun hook helper. |
+| `test/router.test.mjs` | Unit test suite (`npm test` / `bun test`). |
 
 ## Tests
 
 ```sh
-npm test                                                         # unit tests
-MAGPIE_LINUX_BIN=/path/to/magpie sh test/run-linux-sandbox.sh    # 8-scenario Linux sandbox E2E
+npm test                       # or: bun test
 ```
 
 ---
@@ -217,7 +216,7 @@ Magpie 会用包名前缀命名号池策略（`routings`），而客户端请求
 |---|---|---|
 | 插件市场 `@magpie-community/gateway-agentcompass` | `gateway-agentcompass/agentcompass`、`gateway-agentcompass/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
 | GitHub `github:akiiwa-games/magpie-agentcompass-router` | `agentcompass/agentcompass`、`agentcompass/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
-| 本地目录 | `<目录名>/agentcompass`、` <目录名>/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
+| 本地目录 | `<目录名>/agentcompass`、`<目录名>/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
 
 可通过 `magpie plugin list` 查看本机实际注册的名称。
 
