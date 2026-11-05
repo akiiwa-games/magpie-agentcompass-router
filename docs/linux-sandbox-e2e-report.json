@@ -1,52 +1,48 @@
 {
-  "timestamp": "2026-11-03T08:12:18.272Z",
+  "timestamp": "2026-11-05T00:48:38.769Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
+  "magpieVersion": "magpie 0.1.2891",
   "scenarios": {
     "scenario1_cli_lifecycle": {
       "pass": true,
-      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  async gateway hook  onRequest\n  gateway middleware  onRequest, onAccount, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure · onUsage\n  agentcompass (AgentCompass, 1 models)  signed in",
+      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  gateway middleware  onRequest, onAccount, onProvider, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure\n  agentcompass (AgentCompass, 1 models)  signed in",
       "magpieName": "AgentCompass",
       "hasSvgDataUriIcon": true
     },
     "scenario2_market_and_gui_api": {
       "pass": true,
-      "marketListingPackage": "agentcompass",
+      "marketListingPackage": "@magpie-community/gateway-agentcompass",
       "installedOwnName": "AgentCompass",
       "storedIconFile": "file:a100c6af45032ded.svg",
-      "readmeLength": 16299,
+      "readmeLength": 21217,
       "offBypassModel": "gpt-6-luna",
       "optionsUpdated": true
     },
     "scenario3_slow_scorer_tandem": {
+      "pass": null,
+      "skipped": "package.json declares no magpie.hooks (removed in 7c2dd6d); Mode A is the middleware alone"
+    },
+    "scenario4_model_dna": {
+      "pass": null,
+      "skipped": "package.json declares no magpie.hooks (removed in 7c2dd6d); Mode A is the middleware alone"
+    },
+    "scenario5_protocols_and_streaming": {
+      "pass": null,
+      "skipped": "package.json declares no magpie.hooks (removed in 7c2dd6d); Mode A is the middleware alone"
+    },
+    "scenario6_fault_injection": {
+      "pass": null,
+      "skipped": "package.json declares no magpie.hooks (removed in 7c2dd6d); Mode A is the middleware alone"
+    },
+    "scenario3a_mode_a_middleware": {
       "pass": true,
-      "elapsedMs": 1730,
-      "scorerElapsedMs": 1601,
       "routedModel": "claude-opus-5-5",
-      "routedEffort": "max",
-      "carrierStripped": true
-    },
-    "scenario4_model_dna_differentiation": {
-      "pass": true,
-      "divergentIdeation": "gemini-4-argon-high:high",
-      "selfContainedResponses": "gpt-6.1-sol:high",
-      "routineBulkWork": "gemini-3.8-flash-high:high"
-    },
-    "scenario5_anthropic_and_sse_streaming": {
-      "pass": true,
-      "anthropicEndpoint": "/v1/chat/completions",
-      "anthropicRoutedModel": "claude-opus-5-5",
-      "anthropicEffort": null,
-      "sseStreamRoutedModel": "gpt-6.1-sol",
-      "sseReceivedDone": true
-    },
-    "scenario6_fault_degradation": {
-      "pass": true,
-      "http500FallbackModel": "claude-opus-5-5",
-      "timeoutFallbackModel": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 368
+      "routedEffort": "xhigh",
+      "carrierStripped": true,
+      "scorerCalls": 0
     },
     "scenario7_mode_b_systemone_group": {
       "pass": true,
@@ -55,49 +51,22 @@
       "noneOfTheseFallback": "gpt-6-luna:null"
     },
     "scenario8_session_continuity_and_turn_lock": {
-      "pass": true,
-      "firstTurnRouted": "claude-opus-5-5:max",
-      "midTurnToolLoopRouted": "claude-opus-5-5:max",
-      "midTurnScorerCalls": 0,
-      "shortFollowupRouted": "claude-opus-5-5:max",
-      "shortFollowupScorerCalls": 0
+      "pass": null,
+      "skipped": "package.json declares no magpie.hooks (removed in 7c2dd6d); Mode A is the middleware alone"
     }
   },
   "steps": [
     {
       "test": "Scenario 2 — Plugin Market (`registry.json`), README Page, Icon Storage, Off/On Toggle & Options API",
       "storedIcon": "file:a100c6af45032ded.svg",
-      "readmeLength": 16299,
+      "readmeLength": 21217,
       "offBypassModel": "gpt-6-luna",
       "pass": true
     },
     {
-      "test": "Scenario 3: Mode A (1,600ms Async System-One -> hooks.js [Bun] -> middleware.js [moejs]) — Root Cause Debugging",
-      "elapsedMs": 1730,
-      "scorerElapsedMs": 1601,
+      "test": "Scenario 3A: Mode A (`agentcompass/auto` -> middleware.js [moejs], no hooks, no external scorer)",
       "routedModel": "claude-opus-5-5",
-      "routedEffort": "max",
-      "carrierStripped": true,
-      "pass": true
-    },
-    {
-      "test": "Scenario 4: Mode A — 5D Model DNA Differentiation (Argon vs Sol 6.1 vs Flash 3.8)",
-      "divergentIdeation": "gemini-4-argon-high:high",
-      "selfContainedResponses": "gpt-6.1-sol:high",
-      "routineBulkWork": "gemini-3.8-flash-high:high",
-      "pass": true
-    },
-    {
-      "test": "Scenario 5: Mode A — Anthropic `/v1/messages` & SSE Streaming (`stream: true`)",
-      "anthropicRouted": "claude-opus-5-5:null",
-      "sseStreamRouted": "gpt-6.1-sol:high",
-      "pass": true
-    },
-    {
-      "test": "Scenario 6: Mode A — Fault Injection & Graceful Degradation (HTTP 500 & Scorer Timeout -> Local Heuristic `profileTask`)",
-      "http500FallbackModel": "claude-opus-5-5",
-      "timeoutFallbackModel": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 368,
+      "routedEffort": "xhigh",
       "pass": true
     },
     {
@@ -105,14 +74,6 @@
       "directionReasoningRule": "gemini-4-argon-high:high",
       "debugReviewRule": "claude-opus-5-5:xhigh",
       "noneOfTheseFallback": "gpt-6-luna:null",
-      "pass": true
-    },
-    {
-      "test": "Scenario 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold (`keepsEffort`)",
-      "firstTurnRouted": "claude-opus-5-5:max",
-      "midTurnToolLoopRouted": "claude-opus-5-5:max",
-      "shortFollowupRouted": "claude-opus-5-5:max",
-      "zeroScorerCallsOnHold": true,
       "pass": true
     }
   ]

@@ -24,7 +24,8 @@ trap cleanup EXIT
 rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX/home" "$SANDBOX/config" "$SANDBOX/cache" "$SANDBOX/data" "$SANDBOX/state" "$SANDBOX/tmp" "$SANDBOX/agentcompass"
 
-cp "$SCRATCH/magpie-linux-amd64" "$SANDBOX/magpie"
+# MAGPIE_LINUX_BIN: the Magpie build under test (a release's static magpie-cli-linux-amd64, e.g. 0.1.2891)
+cp "${MAGPIE_LINUX_BIN:-$SCRATCH/magpie-linux-amd64}" "$SANDBOX/magpie"
 chmod +x "$SANDBOX/magpie"
 cp -r "$REPO"/* "$SANDBOX/agentcompass/"
 
@@ -50,6 +51,8 @@ cat /etc/os-release | head -n 4
 
 echo "=== [2/4] Installing & Signing In Plugin in Real Linux Magpie ==="
 "$SANDBOX/magpie" plugin add "$PLUGIN_DIR"
+# The decision provider (Mode B) exists only with enableDecisionProvider on, so set it before signing in
+"$SANDBOX/magpie" plugin options "$PLUGIN_DIR" '{"enableDecisionProvider": true}'
 "$SANDBOX/magpie" plugin login agentcompass
 "$SANDBOX/magpie" plugin list
 

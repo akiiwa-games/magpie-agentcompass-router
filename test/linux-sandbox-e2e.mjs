@@ -5,7 +5,11 @@
  * against the compiled static Linux `magpie` binary (`magpie web` + gateway daemon)
  * + Linux `bun` plugin host + embedded `moejs` runtime.
  *
- * Covers all 7 End-to-End Scenarios:
+ * Records the Magpie version it ran (`magpie --version`) in the report. Scenarios 3-6 and 8 exercise the
+ * hooks.js scorer and run only when package.json declares `magpie.hooks` (it has not since 7c2dd6d);
+ * otherwise Scenario 3A checks Mode A through the shipped middleware.
+ *
+ * Scenarios:
  * - Scenario 1: CLI Plugin Lifecycle (`magpie plugin add`, `login`, `list`, `magpie.name`, `magpie.icon`)
  * - Scenario 2: Plugin Market (`MAGPIE_PLUGIN_MARKET` registry.json) & Web/GUI API (`/api/plugins/listings`,
  *   `/api/plugins`, `/api/plugins/page`, `POST /api/plugins/off` toggle, `POST /api/plugins/options`)
@@ -107,6 +111,7 @@ async function main() {
     arch: process.arch,
     release: os.release(),
     sandboxRoot: SANDBOX_ROOT,
+    magpieVersion: null,
     scenarios: {},
     steps: [],
   };
@@ -451,6 +456,8 @@ async function main() {
     // =========================================================================
     // SCENARIO 1: CLI Plugin Lifecycle & Metadata Contract
     // =========================================================================
+    report.magpieVersion = (await runMagpieCli(["--version"], env)).trim();
+    console.log(`[Linux Sandbox] ${report.magpieVersion}`);
     const listText = await runMagpieCli(["plugin", "list"], env);
     assert.ok(
       listText.includes("agentcompass (AgentCompass, 1 models)  signed in"),
@@ -496,6 +503,10 @@ async function main() {
       scorerModel: "systemone-10d",
       useCache: false,
       injectProtocolEffort: true,
+      // Mode B: the decision provider exists only when this is on (issue #1)
+      enableDecisionProvider: true,
+      // Mode A: the pool `agentcompass/*` picks from (it rejects the request when none is set)
+      candidateModels: ALL_MODELS.map((m) => `upstream/${m}`),
     };
     await runMagpieCli(["plugin", "options", PLUGIN_DIR, JSON.stringify(basePluginOptions)], env);
 
@@ -579,11 +590,12 @@ async function main() {
       });
       assert.equal(listingsRes.status, 200);
       const listingsData = await listingsRes.json();
-      const marketItem = listingsData.listings?.find((l) => l.package === "agentcompass");
-      assert.ok(marketItem, "Market listings must include package 'agentcompass' from MAGPIE_PLUGIN_MARKET");
+      const marketItem = listingsData.listings?.find((l) => l.package === registryEntry.package);
+      assert.ok(marketItem, `Market listings must include package '${registryEntry.package}' from MAGPIE_PLUGIN_MARKET`);
       assert.equal(marketItem.name, "AgentCompass");
       assert.equal(marketItem.kind, "middleware");
-      assert.deepEqual(marketItem.providers, ["agentcompass"]);
+      // The decision provider is opt-in (enableDecisionProvider), so the listing claims no provider
+      assert.deepEqual(marketItem.providers, registryEntry.providers);
 
       // 2b. Verify Installed Plugin State, OwnName, Stored SVG Icon & OptionsExample via GET /api/plugins
       // Wait briefly so RepoIcons background store completes on the data:image/svg+xml icon
@@ -600,7 +612,8 @@ async function main() {
         installed.icon?.startsWith("file:") && installed.icon?.endsWith(".svg"),
         `Expected Magpie StoreIcon to persist SVG icon as file:<hash>.svg, got: ${installed.icon}`
       );
-      assert.equal(installed.isGateway, true);
+      // isGateway means request hooks (magpie.hooks); the package ships middleware alone since 7c2dd6d
+      assert.equal(Boolean(installed.isGateway), Boolean(pkgJson.magpie?.hooks));
       assert.equal(installed.isMiddleware, true);
       assert.ok(installed.optionsExample && typeof installed.optionsExample === "object");
 
@@ -679,73 +692,339 @@ async function main() {
         pass: true,
       });
       console.log(
-        `[PASS] Scenario 2 (Market & Web GUI API): listing='agentcompass', icon='${installed.icon}', README=${pageData.readme.length}B, Off/On & Options verified`
+        `[PASS] Scenario 2 (Market & Web GUI API): listing='${marketItem.package}', icon='${installed.icon}', README=${pageData.readme.length}B, Off/On & Options verified`
       );
     }
 
-    // =========================================================================
-    // SCENARIO 3: Mode A Two-Stage Tandem — 1,600ms Slow Async System-One Scorer
-    // =========================================================================
-    scorerDelayMs = 1600;
-    scorerForceStatus = 200;
-    {
-      const t0 = Date.now();
-      const resp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [
-            {
-              role: "user",
-              content:
-                "Investigate a complex cross-module distributed lock race condition and deadlock root cause across 15 microservices with zero regression.",
+    // Scenarios 3-6 and 8 drive Mode A on `model: "auto"` through the async hooks.js scorer. Since 7c2dd6d
+    // (PR #670 review) the package declares no `magpie.hooks` and claims only `agentcompass` / `agentcompass/*`,
+    // so they run only for a package that still declares hooks; otherwise the report records them as skipped
+    // and Scenario 3A checks Mode A through the shipped middleware instead.
+    const HOOKS_SHIPPED = Boolean(pkgJson.magpie?.hooks);
+    const HOOKS_SKIP_REASON = "package.json declares no magpie.hooks (removed in 7c2dd6d); Mode A is the middleware alone";
+    if (HOOKS_SHIPPED) {
+      // =========================================================================
+      // SCENARIO 3: Mode A Two-Stage Tandem — 1,600ms Slow Async System-One Scorer
+      // =========================================================================
+      scorerDelayMs = 1600;
+      scorerForceStatus = 200;
+      {
+        const t0 = Date.now();
+        const resp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Investigate a complex cross-module distributed lock race condition and deadlock root cause across 15 microservices with zero regression.",
+              },
+            ],
+          }),
+        });
+        const elapsedMs = Date.now() - t0;
+        const data = await resp.json();
+        assert.equal(resp.status, 200, `Expected 200, got ${resp.status}: ${JSON.stringify(data)}`);
+
+        const lastUp = upstreamCalls[upstreamCalls.length - 1];
+        const lastScorer = scorerCalls[scorerCalls.length - 1];
+        assert.ok(lastScorer, "Async System-One scorer must be called by hooks.js in Bun");
+        assert.equal(lastScorer.userAgent, "Magpie-Router/1.0", "Must send anti-recursion User-Agent header");
+        assert.ok(lastScorer.elapsedMs >= 1500, `Scorer took ${lastScorer.elapsedMs}ms (>= 1500ms budget proof)`);
+        assert.equal(lastUp.model, "claude-opus-5-5", "Should route complex root-cause debugging to claude-opus-5-5");
+        assert.equal(lastUp.reasoning_effort, "max", "Frontier root-cause debugging (depth=4) selects claude-opus-5-5:max");
+        assert.equal(lastUp.hasRouteCarrier, false, "middleware.js in moejs must strip __agentcompass_route");
+
+        report.scenarios.scenario3_slow_scorer_tandem = {
+          pass: true,
+          elapsedMs,
+          scorerElapsedMs: lastScorer.elapsedMs,
+          routedModel: lastUp.model,
+          routedEffort: lastUp.reasoning_effort,
+          carrierStripped: !lastUp.hasRouteCarrier,
+        };
+        report.steps.push({
+          test: "Scenario 3: Mode A (1,600ms Async System-One -> hooks.js [Bun] -> middleware.js [moejs]) — Root Cause Debugging",
+          elapsedMs,
+          scorerElapsedMs: lastScorer.elapsedMs,
+          routedModel: lastUp.model,
+          routedEffort: lastUp.reasoning_effort,
+          carrierStripped: !lastUp.hasRouteCarrier,
+          pass: true,
+        });
+        console.log(
+          `[PASS] Scenario 3 (Mode A 1.6s Async Budget): model="auto" -> ${lastUp.model}:${lastUp.reasoning_effort} in ${elapsedMs}ms`
+        );
+      }
+
+      // =========================================================================
+      // SCENARIO 4: Mode A — 5D Model DNA Differentiation
+      // =========================================================================
+      scorerDelayMs = 120;
+      {
+        // 4a. Creative First-Principles Brainstorming -> gemini-4-argon-high
+        const resp1 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "agentcompass/auto",
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Brainstorm 5 unconventional first-principles creative architectural directions and novel product mechanics.",
+              },
+            ],
+          }),
+        });
+        assert.equal(resp1.status, 200);
+        const up1 = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(up1.model, "gemini-4-argon-high");
+        assert.equal(up1.reasoning_effort, "high");
+
+        // 4b. OpenAI /v1/responses Protocol — Self-Contained Module Coding -> gpt-6.1-sol
+        const resp2 = await fetch(`http://127.0.0.1:${gwPort}/v1/responses`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "auto",
+            input: [
+              {
+                role: "user",
+                content: [
+                  {
+                    type: "input_text",
+                    text: "Implement a standalone self-contained LRU cache module in TypeScript with unit tests.",
+                  },
+                ],
+              },
+            ],
+          }),
+        });
+        assert.equal(resp2.status, 200);
+        const up2 = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(up2.path, "/v1/responses");
+        assert.equal(up2.model, "gpt-6.1-sol");
+        assert.equal(up2.reasoning_effort, "high");
+
+        // 4c. Routine Bounded Bulk Work -> gemini-3.8-flash-high (Overqualification Penalty)
+        const resp3 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [
+              {
+                role: "user",
+                content: "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures.",
+              },
+            ],
+          }),
+        });
+        assert.equal(resp3.status, 200);
+        const up3 = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(up3.model, "gemini-3.8-flash-high");
+
+        report.scenarios.scenario4_model_dna_differentiation = {
+          pass: true,
+          divergentIdeation: `${up1.model}:${up1.reasoning_effort}`,
+          selfContainedResponses: `${up2.model}:${up2.reasoning_effort}`,
+          routineBulkWork: `${up3.model}:${up3.reasoning_effort}`,
+        };
+        report.steps.push({
+          test: "Scenario 4: Mode A — 5D Model DNA Differentiation (Argon vs Sol 6.1 vs Flash 3.8)",
+          divergentIdeation: `${up1.model}:${up1.reasoning_effort}`,
+          selfContainedResponses: `${up2.model}:${up2.reasoning_effort}`,
+          routineBulkWork: `${up3.model}:${up3.reasoning_effort}`,
+          pass: true,
+        });
+        console.log(
+          `[PASS] Scenario 4 (Mode A Model DNA): ideation=${up1.model}, coding=${up2.model}, bulk=${up3.model}`
+        );
+      }
+
+      // =========================================================================
+      // SCENARIO 5: Mode A — Anthropic `/v1/messages` & SSE Streaming (`stream: true`)
+      // =========================================================================
+      {
+        // 5a. Anthropic `/v1/messages` request
+        const anthResp = await fetch(`http://127.0.0.1:${gwPort}/v1/messages`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": "sk-local-agent",
+            "anthropic-version": "2023-06-01",
+          },
+          body: JSON.stringify({
+            model: "auto",
+            max_tokens: 1024,
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Conduct a cross-module deadlock and race condition security audit across the distributed transaction coordinator.",
+              },
+            ],
+          }),
+        });
+        const anthData = await anthResp.json();
+        assert.equal(anthResp.status, 200, `Anthropic /v1/messages failed: ${JSON.stringify(anthData)}`);
+        assert.equal(anthData.type, "message", "Anthropic /v1/messages response must have type='message'");
+        const anthUp = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(anthUp.model, "claude-opus-5-5");
+        assert.equal(anthUp.hasRouteCarrier, false);
+
+        // 5b. OpenAI `/v1/chat/completions` with `stream: true` (SSE streaming)
+        const streamResp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "auto",
+            stream: true,
+            messages: [
+              {
+                role: "user",
+                content: "Implement a standalone self-contained LRU cache algorithm in TypeScript.",
+              },
+            ],
+          }),
+        });
+        assert.equal(streamResp.status, 200);
+        assert.ok(
+          streamResp.headers.get("content-type")?.includes("text/event-stream"),
+          `Expected text/event-stream, got ${streamResp.headers.get("content-type")}`
+        );
+        const sseText = await streamResp.text();
+        assert.ok(sseText.includes("data: ") && sseText.includes("[DONE]"), "SSE stream must contain data chunks and [DONE]");
+        const streamUp = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(streamUp.stream, true);
+        assert.equal(streamUp.model, "gpt-6.1-sol");
+        assert.equal(streamUp.hasRouteCarrier, false);
+
+        report.scenarios.scenario5_anthropic_and_sse_streaming = {
+          pass: true,
+          anthropicEndpoint: anthUp.path,
+          anthropicRoutedModel: anthUp.model,
+          anthropicEffort: anthUp.reasoning_effort,
+          sseStreamRoutedModel: streamUp.model,
+          sseReceivedDone: sseText.includes("[DONE]"),
+        };
+        report.steps.push({
+          test: "Scenario 5: Mode A — Anthropic `/v1/messages` & SSE Streaming (`stream: true`)",
+          anthropicRouted: `${anthUp.model}:${anthUp.reasoning_effort}`,
+          sseStreamRouted: `${streamUp.model}:${streamUp.reasoning_effort}`,
+          pass: true,
+        });
+        console.log(
+          `[PASS] Scenario 5 (Anthropic /v1/messages & SSE Stream): /v1/messages -> ${anthUp.model}, SSE stream -> ${streamUp.model}`
+        );
+      }
+
+      // =========================================================================
+      // SCENARIO 6: Mode A — Fault Injection & Graceful Degradation (HTTP 500 & Timeout)
+      // =========================================================================
+      {
+        // 6a. Scorer returns HTTP 500 -> seamless fallback to local `profileTask` (`inferTaskProfile`)
+        scorerDelayMs = 20;
+        scorerForceStatus = 500;
+        const err500Resp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Conduct a read-only security audit and cross-module deadlock root-cause review across the gateway subsystem.",
+              },
+            ],
+          }),
+        });
+        assert.equal(err500Resp.status, 200, "Gateway request must succeed via heuristic fallback when scorer returns HTTP 500");
+        const up500 = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(up500.model, "claude-opus-5-5", "Heuristic fallback should route coupled deadlock review to claude-opus-5-5");
+
+        // 6b. Scorer times out (scorerDelayMs=2000ms > scorerTimeoutMs=300ms) -> seamless fallback to local `profileTask`
+        scorerForceStatus = 200;
+        scorerDelayMs = 2000;
+        await fetch(`http://127.0.0.1:${webPort}/api/plugins/options`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: webCookie },
+          body: JSON.stringify({
+            Spec: PLUGIN_DIR,
+            Options: {
+              ...basePluginOptions,
+              scorerTimeoutMs: 300,
             },
-          ],
-        }),
-      });
-      const elapsedMs = Date.now() - t0;
-      const data = await resp.json();
-      assert.equal(resp.status, 200, `Expected 200, got ${resp.status}: ${JSON.stringify(data)}`);
+          }),
+        });
 
-      const lastUp = upstreamCalls[upstreamCalls.length - 1];
-      const lastScorer = scorerCalls[scorerCalls.length - 1];
-      assert.ok(lastScorer, "Async System-One scorer must be called by hooks.js in Bun");
-      assert.equal(lastScorer.userAgent, "Magpie-Router/1.0", "Must send anti-recursion User-Agent header");
-      assert.ok(lastScorer.elapsedMs >= 1500, `Scorer took ${lastScorer.elapsedMs}ms (>= 1500ms budget proof)`);
-      assert.equal(lastUp.model, "claude-opus-5-5", "Should route complex root-cause debugging to claude-opus-5-5");
-      assert.equal(lastUp.reasoning_effort, "max", "Frontier root-cause debugging (depth=4) selects claude-opus-5-5:max");
-      assert.equal(lastUp.hasRouteCarrier, false, "middleware.js in moejs must strip __agentcompass_route");
+        const tTimeout0 = Date.now();
+        const timeoutResp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [
+              {
+                role: "user",
+                content:
+                  "Brainstorm a novel creative gameplay scheme and first-principles roadmap for an AI simulation game.",
+              },
+            ],
+          }),
+        });
+        const timeoutElapsedMs = Date.now() - tTimeout0;
+        assert.equal(timeoutResp.status, 200, "Gateway request must succeed via heuristic fallback when scorer times out");
+        const upTimeout = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(
+          upTimeout.model,
+          "gemini-4-argon-high",
+          "Heuristic fallback on scorer timeout should route creative brainstorming to gemini-4-argon-high"
+        );
+        assert.ok(timeoutElapsedMs < 1500, `Scorer timeout fallback should complete quickly (<1500ms), took ${timeoutElapsedMs}ms`);
 
-      report.scenarios.scenario3_slow_scorer_tandem = {
-        pass: true,
-        elapsedMs,
-        scorerElapsedMs: lastScorer.elapsedMs,
-        routedModel: lastUp.model,
-        routedEffort: lastUp.reasoning_effort,
-        carrierStripped: !lastUp.hasRouteCarrier,
-      };
-      report.steps.push({
-        test: "Scenario 3: Mode A (1,600ms Async System-One -> hooks.js [Bun] -> middleware.js [moejs]) — Root Cause Debugging",
-        elapsedMs,
-        scorerElapsedMs: lastScorer.elapsedMs,
-        routedModel: lastUp.model,
-        routedEffort: lastUp.reasoning_effort,
-        carrierStripped: !lastUp.hasRouteCarrier,
-        pass: true,
-      });
-      console.log(
-        `[PASS] Scenario 3 (Mode A 1.6s Async Budget): model="auto" -> ${lastUp.model}:${lastUp.reasoning_effort} in ${elapsedMs}ms`
-      );
+        // Restore normal scorer settings
+        scorerDelayMs = 100;
+        await fetch(`http://127.0.0.1:${webPort}/api/plugins/options`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: webCookie },
+          body: JSON.stringify({ Spec: PLUGIN_DIR, Options: basePluginOptions }),
+        });
+
+        report.scenarios.scenario6_fault_degradation = {
+          pass: true,
+          http500FallbackModel: up500.model,
+          timeoutFallbackModel: upTimeout.model,
+          timeoutFallbackElapsedMs: timeoutElapsedMs,
+        };
+        report.steps.push({
+          test: "Scenario 6: Mode A — Fault Injection & Graceful Degradation (HTTP 500 & Scorer Timeout -> Local Heuristic `profileTask`)",
+          http500FallbackModel: up500.model,
+          timeoutFallbackModel: upTimeout.model,
+          timeoutFallbackElapsedMs: timeoutElapsedMs,
+          pass: true,
+        });
+        console.log(
+          `[PASS] Scenario 6 (Fault Injection & Degradation): HTTP 500 -> ${up500.model}, Timeout (${timeoutElapsedMs}ms) -> ${upTimeout.model}`
+        );
+      }
+    } else {
+      for (const name of ["scenario3_slow_scorer_tandem", "scenario4_model_dna", "scenario5_protocols_and_streaming", "scenario6_fault_injection"]) {
+        report.scenarios[name] = { pass: null, skipped: HOOKS_SKIP_REASON };
+      }
+      console.log(`[SKIP] [scenario3_slow_scorer_tandem, scenario4_model_dna, scenario5_protocols_and_streaming, scenario6_fault_injection]: ${HOOKS_SKIP_REASON}`);
     }
 
     // =========================================================================
-    // SCENARIO 4: Mode A — 5D Model DNA Differentiation
+    // SCENARIO 3A: Mode A through the shipped middleware alone (`agentcompass/auto`, no hooks, no scorer)
     // =========================================================================
-    scorerDelayMs = 120;
     {
-      // 4a. Creative First-Principles Brainstorming -> gemini-4-argon-high
-      const resp1 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+      const scorerBefore = scorerCalls.length;
+      const resp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
         body: JSON.stringify({
@@ -754,243 +1033,32 @@ async function main() {
             {
               role: "user",
               content:
-                "Brainstorm 5 unconventional first-principles creative architectural directions and novel product mechanics.",
+                "Investigate a cross-module distributed lock race condition and deadlock root cause across 15 microservices.",
             },
           ],
         }),
       });
-      assert.equal(resp1.status, 200);
-      const up1 = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up1.model, "gemini-4-argon-high");
-      assert.equal(up1.reasoning_effort, "high");
+      const data = await resp.json();
+      assert.equal(resp.status, 200, `Expected 200, got ${resp.status}: ${JSON.stringify(data)}`);
+      const up = upstreamCalls[upstreamCalls.length - 1];
+      assert.ok(ALL_MODELS.includes(up.model), `Mode A must route agentcompass/auto to a catalog model, got ${up.model}`);
+      assert.equal(up.hasRouteCarrier, false, "middleware.js must not leave __agentcompass_route in the body");
+      assert.equal(scorerCalls.length, scorerBefore, "Mode A must not call an external scorer unless allowExternalScorer is on");
 
-      // 4b. OpenAI /v1/responses Protocol — Self-Contained Module Coding -> gpt-6.1-sol
-      const resp2 = await fetch(`http://127.0.0.1:${gwPort}/v1/responses`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
-        body: JSON.stringify({
-          model: "auto",
-          input: [
-            {
-              role: "user",
-              content: [
-                {
-                  type: "input_text",
-                  text: "Implement a standalone self-contained LRU cache module in TypeScript with unit tests.",
-                },
-              ],
-            },
-          ],
-        }),
-      });
-      assert.equal(resp2.status, 200);
-      const up2 = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up2.path, "/v1/responses");
-      assert.equal(up2.model, "gpt-6.1-sol");
-      assert.equal(up2.reasoning_effort, "high");
-
-      // 4c. Routine Bounded Bulk Work -> gemini-3.8-flash-high (Overqualification Penalty)
-      const resp3 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [
-            {
-              role: "user",
-              content: "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures.",
-            },
-          ],
-        }),
-      });
-      assert.equal(resp3.status, 200);
-      const up3 = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up3.model, "gemini-3.8-flash-high");
-
-      report.scenarios.scenario4_model_dna_differentiation = {
+      report.scenarios.scenario3a_mode_a_middleware = {
         pass: true,
-        divergentIdeation: `${up1.model}:${up1.reasoning_effort}`,
-        selfContainedResponses: `${up2.model}:${up2.reasoning_effort}`,
-        routineBulkWork: `${up3.model}:${up3.reasoning_effort}`,
+        routedModel: up.model,
+        routedEffort: up.reasoning_effort,
+        carrierStripped: !up.hasRouteCarrier,
+        scorerCalls: 0,
       };
       report.steps.push({
-        test: "Scenario 4: Mode A — 5D Model DNA Differentiation (Argon vs Sol 6.1 vs Flash 3.8)",
-        divergentIdeation: `${up1.model}:${up1.reasoning_effort}`,
-        selfContainedResponses: `${up2.model}:${up2.reasoning_effort}`,
-        routineBulkWork: `${up3.model}:${up3.reasoning_effort}`,
+        test: "Scenario 3A: Mode A (`agentcompass/auto` -> middleware.js [moejs], no hooks, no external scorer)",
+        routedModel: up.model,
+        routedEffort: up.reasoning_effort,
         pass: true,
       });
-      console.log(
-        `[PASS] Scenario 4 (Mode A Model DNA): ideation=${up1.model}, coding=${up2.model}, bulk=${up3.model}`
-      );
-    }
-
-    // =========================================================================
-    // SCENARIO 5: Mode A — Anthropic `/v1/messages` & SSE Streaming (`stream: true`)
-    // =========================================================================
-    {
-      // 5a. Anthropic `/v1/messages` request
-      const anthResp = await fetch(`http://127.0.0.1:${gwPort}/v1/messages`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "x-api-key": "sk-local-agent",
-          "anthropic-version": "2023-06-01",
-        },
-        body: JSON.stringify({
-          model: "auto",
-          max_tokens: 1024,
-          messages: [
-            {
-              role: "user",
-              content:
-                "Conduct a cross-module deadlock and race condition security audit across the distributed transaction coordinator.",
-            },
-          ],
-        }),
-      });
-      const anthData = await anthResp.json();
-      assert.equal(anthResp.status, 200, `Anthropic /v1/messages failed: ${JSON.stringify(anthData)}`);
-      assert.equal(anthData.type, "message", "Anthropic /v1/messages response must have type='message'");
-      const anthUp = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(anthUp.model, "claude-opus-5-5");
-      assert.equal(anthUp.hasRouteCarrier, false);
-
-      // 5b. OpenAI `/v1/chat/completions` with `stream: true` (SSE streaming)
-      const streamResp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
-        body: JSON.stringify({
-          model: "auto",
-          stream: true,
-          messages: [
-            {
-              role: "user",
-              content: "Implement a standalone self-contained LRU cache algorithm in TypeScript.",
-            },
-          ],
-        }),
-      });
-      assert.equal(streamResp.status, 200);
-      assert.ok(
-        streamResp.headers.get("content-type")?.includes("text/event-stream"),
-        `Expected text/event-stream, got ${streamResp.headers.get("content-type")}`
-      );
-      const sseText = await streamResp.text();
-      assert.ok(sseText.includes("data: ") && sseText.includes("[DONE]"), "SSE stream must contain data chunks and [DONE]");
-      const streamUp = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(streamUp.stream, true);
-      assert.equal(streamUp.model, "gpt-6.1-sol");
-      assert.equal(streamUp.hasRouteCarrier, false);
-
-      report.scenarios.scenario5_anthropic_and_sse_streaming = {
-        pass: true,
-        anthropicEndpoint: anthUp.path,
-        anthropicRoutedModel: anthUp.model,
-        anthropicEffort: anthUp.reasoning_effort,
-        sseStreamRoutedModel: streamUp.model,
-        sseReceivedDone: sseText.includes("[DONE]"),
-      };
-      report.steps.push({
-        test: "Scenario 5: Mode A — Anthropic `/v1/messages` & SSE Streaming (`stream: true`)",
-        anthropicRouted: `${anthUp.model}:${anthUp.reasoning_effort}`,
-        sseStreamRouted: `${streamUp.model}:${streamUp.reasoning_effort}`,
-        pass: true,
-      });
-      console.log(
-        `[PASS] Scenario 5 (Anthropic /v1/messages & SSE Stream): /v1/messages -> ${anthUp.model}, SSE stream -> ${streamUp.model}`
-      );
-    }
-
-    // =========================================================================
-    // SCENARIO 6: Mode A — Fault Injection & Graceful Degradation (HTTP 500 & Timeout)
-    // =========================================================================
-    {
-      // 6a. Scorer returns HTTP 500 -> seamless fallback to local `profileTask` (`inferTaskProfile`)
-      scorerDelayMs = 20;
-      scorerForceStatus = 500;
-      const err500Resp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [
-            {
-              role: "user",
-              content:
-                "Conduct a read-only security audit and cross-module deadlock root-cause review across the gateway subsystem.",
-            },
-          ],
-        }),
-      });
-      assert.equal(err500Resp.status, 200, "Gateway request must succeed via heuristic fallback when scorer returns HTTP 500");
-      const up500 = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up500.model, "claude-opus-5-5", "Heuristic fallback should route coupled deadlock review to claude-opus-5-5");
-
-      // 6b. Scorer times out (scorerDelayMs=2000ms > scorerTimeoutMs=300ms) -> seamless fallback to local `profileTask`
-      scorerForceStatus = 200;
-      scorerDelayMs = 2000;
-      await fetch(`http://127.0.0.1:${webPort}/api/plugins/options`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Cookie: webCookie },
-        body: JSON.stringify({
-          Spec: PLUGIN_DIR,
-          Options: {
-            ...basePluginOptions,
-            scorerTimeoutMs: 300,
-          },
-        }),
-      });
-
-      const tTimeout0 = Date.now();
-      const timeoutResp = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [
-            {
-              role: "user",
-              content:
-                "Brainstorm a novel creative gameplay scheme and first-principles roadmap for an AI simulation game.",
-            },
-          ],
-        }),
-      });
-      const timeoutElapsedMs = Date.now() - tTimeout0;
-      assert.equal(timeoutResp.status, 200, "Gateway request must succeed via heuristic fallback when scorer times out");
-      const upTimeout = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(
-        upTimeout.model,
-        "gemini-4-argon-high",
-        "Heuristic fallback on scorer timeout should route creative brainstorming to gemini-4-argon-high"
-      );
-      assert.ok(timeoutElapsedMs < 1500, `Scorer timeout fallback should complete quickly (<1500ms), took ${timeoutElapsedMs}ms`);
-
-      // Restore normal scorer settings
-      scorerDelayMs = 100;
-      await fetch(`http://127.0.0.1:${webPort}/api/plugins/options`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Cookie: webCookie },
-        body: JSON.stringify({ Spec: PLUGIN_DIR, Options: basePluginOptions }),
-      });
-
-      report.scenarios.scenario6_fault_degradation = {
-        pass: true,
-        http500FallbackModel: up500.model,
-        timeoutFallbackModel: upTimeout.model,
-        timeoutFallbackElapsedMs: timeoutElapsedMs,
-      };
-      report.steps.push({
-        test: "Scenario 6: Mode A — Fault Injection & Graceful Degradation (HTTP 500 & Scorer Timeout -> Local Heuristic `profileTask`)",
-        http500FallbackModel: up500.model,
-        timeoutFallbackModel: upTimeout.model,
-        timeoutFallbackElapsedMs: timeoutElapsedMs,
-        pass: true,
-      });
-      console.log(
-        `[PASS] Scenario 6 (Fault Injection & Degradation): HTTP 500 -> ${up500.model}, Timeout (${timeoutElapsedMs}ms) -> ${upTimeout.model}`
-      );
+      console.log(`[PASS] Scenario 3A (Mode A middleware): agentcompass/auto -> ${up.model}:${up.reasoning_effort}`);
     }
 
     // =========================================================================
@@ -1077,146 +1145,153 @@ async function main() {
       );
     }
 
-    // =========================================================================
-    // SCENARIO 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold
-    // =========================================================================
-    {
-      const stickyFirstMsg = {
-        role: "user",
-        content:
-          "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.",
-      };
+    if (HOOKS_SHIPPED) {
+      // =========================================================================
+      // SCENARIO 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold
+      // =========================================================================
+      {
+        const stickyFirstMsg = {
+          role: "user",
+          content:
+            "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.",
+        };
 
-      // 8a. Turn 1 (`why: "first"`): Calls System-One scorer and routes to `claude-opus-5-5`
-      const scorerBefore8a = scorerCalls.length;
-      const resp8a = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer sk-local-agent",
-          "x-session-id": "e2e-sticky-session-1",
-        },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [stickyFirstMsg],
-        }),
-      });
-      assert.equal(resp8a.status, 200);
-      const up8a = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up8a.model, "claude-opus-5-5");
-      assert.equal(scorerCalls.length, scorerBefore8a + 1, "Turn 1 of new session must call scorer once");
+        // 8a. Turn 1 (`why: "first"`): Calls System-One scorer and routes to `claude-opus-5-5`
+        const scorerBefore8a = scorerCalls.length;
+        const resp8a = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer sk-local-agent",
+            "x-session-id": "e2e-sticky-session-1",
+          },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [stickyFirstMsg],
+          }),
+        });
+        assert.equal(resp8a.status, 200);
+        const up8a = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(up8a.model, "claude-opus-5-5");
+        assert.equal(scorerCalls.length, scorerBefore8a + 1, "Turn 1 of new session must call scorer once");
 
-      // 8b. Mid-turn tool result + agent `<system-reminder>` (`within: true` -> `why: "turn"`):
-      // Must hold `claude-opus-5-5` and effort with ZERO scorer calls!
-      const scorerBefore8b = scorerCalls.length;
-      const resp8b = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer sk-local-agent",
-          "x-session-id": "e2e-sticky-session-1",
-        },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [
-            stickyFirstMsg,
-            {
-              role: "assistant",
-              content: null,
-              tool_calls: [
-                {
-                  id: "call_lock_1",
-                  type: "function",
-                  function: { name: "read_file", arguments: "{\"path\":\"lock.go\"}" },
-                },
-              ],
-            },
-            {
-              role: "tool",
-              tool_call_id: "call_lock_1",
-              content: "package lock // simple utility",
-            },
-            {
-              role: "user",
-              content: "<system-reminder>The TodoWrite tool hasn't been used recently.</system-reminder>",
-            },
-          ],
-        }),
-      });
-      assert.equal(resp8b.status, 200);
-      const up8b = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(
-        scorerCalls.length,
-        scorerBefore8b,
-        "Mid-turn tool result + <system-reminder> must make ZERO scorer calls"
-      );
-      assert.equal(up8b.model, "claude-opus-5-5", "Mid-turn tool loop must hold claude-opus-5-5");
-      assert.equal(up8b.reasoning_effort, up8a.reasoning_effort, "Mid-turn tool loop must lock reasoning_effort");
+        // 8b. Mid-turn tool result + agent `<system-reminder>` (`within: true` -> `why: "turn"`):
+        // Must hold `claude-opus-5-5` and effort with ZERO scorer calls!
+        const scorerBefore8b = scorerCalls.length;
+        const resp8b = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer sk-local-agent",
+            "x-session-id": "e2e-sticky-session-1",
+          },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [
+              stickyFirstMsg,
+              {
+                role: "assistant",
+                content: null,
+                tool_calls: [
+                  {
+                    id: "call_lock_1",
+                    type: "function",
+                    function: { name: "read_file", arguments: "{\"path\":\"lock.go\"}" },
+                  },
+                ],
+              },
+              {
+                role: "tool",
+                tool_call_id: "call_lock_1",
+                content: "package lock // simple utility",
+              },
+              {
+                role: "user",
+                content: "<system-reminder>The TodoWrite tool hasn't been used recently.</system-reminder>",
+              },
+            ],
+          }),
+        });
+        assert.equal(resp8b.status, 200);
+        const up8b = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(
+          scorerCalls.length,
+          scorerBefore8b,
+          "Mid-turn tool result + <system-reminder> must make ZERO scorer calls"
+        );
+        assert.equal(up8b.model, "claude-opus-5-5", "Mid-turn tool loop must hold claude-opus-5-5");
+        assert.equal(up8b.reasoning_effort, up8a.reasoning_effort, "Mid-turn tool loop must lock reasoning_effort");
 
-      // 8c. Short conversational follow-up nudge ("继续" -> `why: "followup"`):
-      // Even though "继续" alone looks like trivial text, it must hold `claude-opus-5-5` and effort with ZERO scorer calls!
-      const scorerBefore8c = scorerCalls.length;
-      const resp8c = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: "Bearer sk-local-agent",
-          "x-session-id": "e2e-sticky-session-1",
-        },
-        body: JSON.stringify({
-          model: "auto",
-          messages: [
-            stickyFirstMsg,
-            {
-              role: "assistant",
-              content: "I found the lock inversion between ShardLock and TxLock. Shall I continue with the fix?",
-            },
-            {
-              role: "user",
-              content: "继续",
-            },
-          ],
-        }),
-      });
-      assert.equal(resp8c.status, 200);
-      const up8c = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(
-        scorerCalls.length,
-        scorerBefore8c,
-        "Short follow-up nudge ('继续') must make ZERO scorer calls"
-      );
-      assert.equal(up8c.model, "claude-opus-5-5", "Short follow-up nudge must hold claude-opus-5-5");
-      assert.equal(
-        up8c.reasoning_effort,
-        up8a.reasoning_effort,
-        "keepsEffort must preserve high/xhigh effort on short follow-up"
-      );
+        // 8c. Short conversational follow-up nudge ("继续" -> `why: "followup"`):
+        // Even though "继续" alone looks like trivial text, it must hold `claude-opus-5-5` and effort with ZERO scorer calls!
+        const scorerBefore8c = scorerCalls.length;
+        const resp8c = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: "Bearer sk-local-agent",
+            "x-session-id": "e2e-sticky-session-1",
+          },
+          body: JSON.stringify({
+            model: "auto",
+            messages: [
+              stickyFirstMsg,
+              {
+                role: "assistant",
+                content: "I found the lock inversion between ShardLock and TxLock. Shall I continue with the fix?",
+              },
+              {
+                role: "user",
+                content: "继续",
+              },
+            ],
+          }),
+        });
+        assert.equal(resp8c.status, 200);
+        const up8c = upstreamCalls[upstreamCalls.length - 1];
+        assert.equal(
+          scorerCalls.length,
+          scorerBefore8c,
+          "Short follow-up nudge ('继续') must make ZERO scorer calls"
+        );
+        assert.equal(up8c.model, "claude-opus-5-5", "Short follow-up nudge must hold claude-opus-5-5");
+        assert.equal(
+          up8c.reasoning_effort,
+          up8a.reasoning_effort,
+          "keepsEffort must preserve high/xhigh effort on short follow-up"
+        );
 
-      report.scenarios.scenario8_session_continuity_and_turn_lock = {
-        pass: true,
-        firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
-        midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
-        midTurnScorerCalls: scorerCalls.length - scorerBefore8b,
-        shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
-        shortFollowupScorerCalls: scorerCalls.length - scorerBefore8c,
-      };
-      report.steps.push({
-        test: "Scenario 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold (`keepsEffort`)",
-        firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
-        midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
-        shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
-        zeroScorerCallsOnHold: true,
-        pass: true,
-      });
-      console.log(
-        `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort} (0 scorer calls), followup=${up8c.model}:${up8c.reasoning_effort} (0 scorer calls)`
-      );
+        report.scenarios.scenario8_session_continuity_and_turn_lock = {
+          pass: true,
+          firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
+          midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
+          midTurnScorerCalls: scorerCalls.length - scorerBefore8b,
+          shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
+          shortFollowupScorerCalls: scorerCalls.length - scorerBefore8c,
+        };
+        report.steps.push({
+          test: "Scenario 8: Live Multi-Turn Session Affinity, Mid-Turn Tool Lock (`within: true`) & Short Follow-up Hold (`keepsEffort`)",
+          firstTurnRouted: `${up8a.model}:${up8a.reasoning_effort}`,
+          midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
+          shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
+          zeroScorerCallsOnHold: true,
+          pass: true,
+        });
+        console.log(
+          `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort} (0 scorer calls), followup=${up8c.model}:${up8c.reasoning_effort} (0 scorer calls)`
+        );
+      }
+    } else {
+      for (const name of ["scenario8_session_continuity_and_turn_lock"]) {
+        report.scenarios[name] = { pass: null, skipped: HOOKS_SKIP_REASON };
+      }
+      console.log(`[SKIP] [scenario8_session_continuity_and_turn_lock]: ${HOOKS_SKIP_REASON}`);
     }
 
     // Save complete JSON report
     const reportPath = path.join(SANDBOX_ROOT, "e2e-report.json");
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
-    console.log(`\n[Linux Sandbox] ALL 8 FULL-CHAIN E2E SCENARIOS PASSED! Report written to ${reportPath}`);
+    console.log(`\n[Linux Sandbox] FULL-CHAIN E2E RUN PASSED! Report written to ${reportPath}`);
   } finally {
     if (magpieProc && !magpieProc.killed) {
       magpieProc.kill("SIGTERM");
