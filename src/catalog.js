@@ -1504,15 +1504,15 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
     }
   }
   if (aliases[clean]) return aliases[clean];
-  let unprefixed = clean;
-  while (unprefixed.includes("/")) {
-    unprefixed = unprefixed.slice(unprefixed.indexOf("/") + 1);
-    if (aliases[unprefixed]) return aliases[unprefixed];
-    const lowerStep = unprefixed.toLowerCase();
-    if (aliases[lowerStep]) return aliases[lowerStep];
+  const slashIdx = clean.indexOf("/");
+  const unprefixed = slashIdx >= 0 ? clean.slice(slashIdx + 1) : clean;
+  // A multi-prefix id (`openrouter/openai/gpt-5-mini`) also resolves by its last segment, as AgentCompass's
+  // `resolve_canonical_model` does. An unknown id keeps only its first prefix stripped (`openrouter/qwen/foo` ->
+  // `qwen/foo`), the key quota.js and continuity.js already match on.
+  const last = clean.slice(clean.lastIndexOf("/") + 1);
+  for (const name of [unprefixed, unprefixed.toLowerCase(), last, last.toLowerCase()]) {
+    if (aliases[name]) return aliases[name];
   }
-  const lower = unprefixed.toLowerCase();
-  if (aliases[lower]) return aliases[lower];
   return unprefixed;
 }
 

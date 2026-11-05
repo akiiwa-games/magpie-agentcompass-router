@@ -6,7 +6,12 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 import { burnScale, effortAbility, namedRoute, rankCandidates, selectBestRoute } from "../src/allocator.js";
-import { DEFAULT_MODELS, DEFAULT_SCORING_POLICY, EFFORT_CURVES } from "../src/catalog.js";
+import {
+  DEFAULT_MODELS,
+  DEFAULT_SCORING_POLICY,
+  EFFORT_CURVES,
+  canonicalModel,
+} from "../src/catalog.js";
 import {
   CACHE_COLD_MS,
   CHATGPT_CODEX_COLD_MS,
@@ -1693,6 +1698,12 @@ test("8.9 Effort fallback (plugin-side, not in AgentCompass): `:minimal` and `:u
   const cont = Object.fromEntries(held.allCandidates.map((c) => [c.effort, c.components.continuity]));
   assert.equal(cont.low, 0.25);
   assert.equal(cont.minimal, 0.0625);
+});
+
+test("8.10 canonicalModel: a multi-prefix id resolves by its last segment; an unknown one keeps only its first prefix stripped", () => {
+  assert.equal(canonicalModel("openrouter/openai/gpt-5-mini"), "gpt-6-luna");
+  assert.equal(canonicalModel("openrouter/qwen/foo"), "qwen/foo");
+  assert.equal(canonicalModel("qwen/foo"), "foo");
 });
 
 test("9.1 PR #670 Review Guard: Default triggers ONLY claim `agentcompass` / `agentcompass/*` and never hijack `auto` or `group/intent`", async () => {
