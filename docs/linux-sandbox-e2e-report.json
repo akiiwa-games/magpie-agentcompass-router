@@ -1,12 +1,13 @@
 {
-  "timestamp": "2026-11-05T01:10:33.529Z",
+  "timestamp": "2026-11-05T03:11:48.968Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
   "magpieVersion": "magpie 0.1.2891",
   "magpieBinary": "magpie-cli-linux-amd64 (yetone/magpie v0.1.2891), sha256 ffa0785ccc41d093c8fdbc96351372c5f2553dc2cb67e5b0ec2b0fa8e3488c09 (matches the release SHA256SUMS)",
-  "pluginCommit": "8e5fd23",
+  "pluginCommit": "d05f598",
+  "gomaxprocs": "default (unset)",
   "scenarios": {
     "scenario1_cli_lifecycle": {
       "pass": true,
@@ -31,8 +32,8 @@
       "scorerCalls": 0,
       "configuredScorerDelayMs": 1600,
       "routedElapsedMs": 6,
-      "baselineElapsedMs": 4,
-      "overheadMs": 2,
+      "baselineElapsedMs": 2,
+      "overheadMs": 4,
       "noCandidateModelsStatus": 400
     },
     "scenario4_model_dna_differentiation": {
@@ -64,7 +65,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 312,
+      "timeoutFallbackElapsedMs": 307,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     "scenario7_mode_b_systemone_group": {
@@ -75,11 +76,22 @@
     },
     "scenario8_session_continuity_and_turn_lock": {
       "pass": true,
+      "gomaxprocs": "default",
+      "repeats": 20,
+      "toolLoopReroutes": 0,
+      "followupReroutes": 0,
       "firstTurnRouted": "claude-opus-5-5:xhigh",
       "midTurnToolLoopRouted": "claude-opus-5-5:xhigh",
       "shortFollowupRouted": "claude-opus-5-5:xhigh",
       "otherSessionRouted": "gemini-3.8-flash-high:high",
-      "scorerCalls": 0
+      "scorerCalls": 0,
+      "baselineBeforeFix": {
+        "pluginSrc": "ee1691d (module-level continuity store only)",
+        "repeats": 20,
+        "toolLoopReroutes": 0,
+        "followupReroutes": 13,
+        "followupReroutedTo": "gpt-6.1-sol:high"
+      }
     }
   },
   "steps": [
@@ -95,7 +107,7 @@
       "routedModel": "claude-opus-5-5",
       "routedEffort": "xhigh",
       "routedElapsedMs": 6,
-      "overheadMs": 2,
+      "overheadMs": 4,
       "pass": true
     },
     {
@@ -118,7 +130,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 312,
+      "timeoutFallbackElapsedMs": 307,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     {
@@ -129,13 +141,18 @@
       "pass": true
     },
     {
-      "test": "Scenario 8: Mode A — session affinity, mid-turn tool lock (`within: true`) & short follow-up hold (`keepsEffort`)",
+      "test": "Scenario 8: Mode A — session affinity, mid-turn tool lock (`within: true`) & short follow-up hold (`keepsEffort`), repeated on pooled runtimes",
       "pass": true,
+      "gomaxprocs": "default",
+      "repeats": 20,
+      "toolLoopReroutes": 0,
+      "followupReroutes": 0,
       "firstTurnRouted": "claude-opus-5-5:xhigh",
       "midTurnToolLoopRouted": "claude-opus-5-5:xhigh",
       "shortFollowupRouted": "claude-opus-5-5:xhigh",
       "otherSessionRouted": "gemini-3.8-flash-high:high",
       "scorerCalls": 0
     }
-  ]
+  ],
+  "hostEffortReadyMs": 79
 }
