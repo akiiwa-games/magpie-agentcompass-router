@@ -546,7 +546,7 @@ export const DEFAULT_MODELS = {
     },
   },
   "gpt-6-luna": {
-    tier: 3.1,
+    tier: 3.2,
     cost: 1,
     visual: 0.55,
     usd_per_hour: 0.8,
@@ -1302,8 +1302,8 @@ export const EFFORT_CURVES = {
     burn: { low: 0.19, medium: 0.46, high: 0.7, xhigh: 1.08, max: 2.58 },
   },
   "gpt-6-luna": {
-    ability: { low: -0.54, medium: -0.15, high: 0, xhigh: 0.2, max: 0.35 },
-    burn: { low: 0.28, medium: 0.46, high: 0.7, xhigh: 0.85, max: 1.5 },
+    ability: { low: -0.54, medium: -0.15, high: 0, xhigh: 0.1, max: 0.35 },
+    burn: { low: 0.1, medium: 0.4, high: 0.7, xhigh: 1.0, max: 1.5 },
   },
   "claude-fable-5-1": {
     ability: { low: -0.4, medium: -0.2, high: 0, xhigh: 0.15, max: 0.15 },
