@@ -144,8 +144,6 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | `enableDecisionProvider` | `false` | Register the `agentcompass/agentcompass-systemone` Decision Provider (`/v1/systemone`) for Routing Groups. |
 | `allowExternalScorer` | `false` | Allow Mode B (`src/index.js`) or `src/hooks.js` to call an external `scorer` (`{ kind, baseUrl, apiKey, model, timeoutMs }`) with heuristic fallback on timeout/error. |
 
----
-
 ## Repository layout
 
 | Path | Description |
@@ -163,12 +161,73 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 ## Tests
 
 ```sh
-# Unit tests (multi-protocol extraction, 10D profiling, allocator, continuity replay, quota economics, /v1/systemone)
-npm test
-
-# End-to-end 8-scenario verification against a real Magpie Linux binary in an isolated tmpfs sandbox
-MAGPIE_LINUX_BIN=/path/to/magpie sh test/run-linux-sandbox.sh
+npm test                                                         # unit tests
+MAGPIE_LINUX_BIN=/path/to/magpie sh test/run-linux-sandbox.sh    # 8-scenario Linux sandbox E2E
 ```
+
+---
+
+## 中文说明
+
+基于 [AgentCompass](https://github.com/akiiwa-games/AgentCompass) 的 [Magpie](https://github.com/yetone/magpie) 网关路由插件：按任务意图、7 维客观能力、3 维模型禀赋（`divergence` 发散创意、`global_rigor` 全局严密、`module_precision` 单模块精准）、会话连续性与 5h/7d 订阅配额经济学选出 `<model>:<effort>` 并对号池席位排序。默认在 `moejs` 网关中间件内同步运行（`< 1 ms`，零网络请求），并可按需开启 `/v1/systemone` 决策 Provider 供路由组（Routing Groups）使用。
+
+### 快速上手
+
+#### 1. 安装
+
+```sh
+magpie plugin add @magpie-community/gateway-agentcompass          # 插件市场
+# 或：magpie plugin add github:akiiwa-games/magpie-agentcompass-router
+# 或：magpie plugin add /path/to/magpie-agentcompass-router
+magpie plugin list
+```
+
+#### 2. 网关中间件（模式 A，默认）
+
+在插件选项中配置 `candidateModels`（或 `availableModels` / `allowedModels`），客户端请求 `model: "agentcompass"`（或 `"agentcompass/auto"`，或设 `"routeAllModels": true`）：
+
+```sh
+magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","claude-sonnet-4-6","gpt-5.4","gemini-2.5-pro","gemini-2.5-flash"]}'
+```
+
+- 请求虚拟模型 `agentcompass` / `agentcompass/*` 时，中间件将 `body.model` 改写为 `<targetModel>:<targetEffort>`，并按协议注入思考档位字段（`reasoning_effort`、`reasoning.effort`、`output_config.effort`）。
+- 未配置 `candidateModels` 或 `defaultModel` 时请求虚拟模型会返回 HTTP 400（`agentcompass: set candidateModels in the plugin's options`），不猜测模型列表。
+- 开启 `routeAllModels: true` 且未配置候选列表时，具体模型名保持不变，仅自动注入思考档位。
+
+#### 3. 账号池席位排序（`routings`）
+
+在多账号池上选择本插件的路由策略（名称见下表），按「待探测新号 (`learns`) → 临期富余冲刺 (`36h` 内重置) → 低机会成本订阅 → 按量 API Key → 高占用储备 (`≥90%`) → 冷却/耗尽」排序。
+
+#### 4. 路由组分类器（模式 B，按需开启）
+
+在 Magpie 的 **Routing Groups** 中把本插件用作分类器（`/v1/systemone`，需 `0.1.1+`）：
+
+```sh
+magpie plugin options <plugin-spec> '{"enableDecisionProvider": true}'
+# 重启 Magpie（或 magpie web），然后免 Key 登录：
+magpie plugin login agentcompass
+magpie group set <group> effort=auto classifier=agentcompass/agentcompass-systemone
+```
+
+#### 各安装来源下的名称
+
+Magpie 会用包名前缀命名号池策略（`routings`），而客户端请求的虚拟模型（`agentcompass` / `agentcompass/auto`）与分类器模型（`agentcompass/agentcompass-systemone`）与安装来源无关：
+
+| 安装来源 | 号池策略（`routings`） | 路由组分类器（模式 B） |
+|---|---|---|
+| 插件市场 `@magpie-community/gateway-agentcompass` | `gateway-agentcompass/agentcompass`、`gateway-agentcompass/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
+| GitHub `github:akiiwa-games/magpie-agentcompass-router` | `agentcompass/agentcompass`、`agentcompass/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
+| 本地目录 | `<目录名>/agentcompass`、` <目录名>/agentcompass-pure` | `agentcompass/agentcompass-systemone` |
+
+可通过 `magpie plugin list` 查看本机实际注册的名称。
+
+### 决策流程简述
+
+1. **会话连续性优先（`src/continuity.js`）**：轮内工具循环（`within: true`）、KV 缓存温热期内（Anthropic/Gemini `5m`，ChatGPT/Codex Responses 与 DeepSeek `1h`）或短追问（`"继续"`、`"go ahead"`、`"lgtm"`）直接保持当前 `<model>:<effort>` 且思考档位单调不降级（`keepsEffort`）。跨 `sync.Pool` 池化 `moejs` 实例时，自动从客户端重发的对话历史回溯锚点轮次（最多 4 轮）重放决策，确保任意实例结果一致。仅在新会话、上游报错（`status >= 400`）、配额耗尽、新增视觉/GUI 或任务复杂度越界、输入超窗口 95%、累计上下文达 2M、或缓存冷化/压缩后重新路由。
+2. **10 维画像与能力选型（`src/profiler-core.js`、`src/allocator.js`）**：单遍有界解析 Anthropic / OpenAI Responses / Chat / Gemini 请求体，生成 10 维任务画像，结合 7 维客观能力、Effort 投入曲线、3 维 Model DNA 与防杀鸡用牛刀惩罚对 `candidateModels` 评分。
+3. **订阅配额精算（`src/quota.js`）**：过滤低于安全水位（长窗口 `5%`、短窗口 `10%`）或限流的窗口，计算期望短缺机会成本，并在距重置 36 小时内对富余额度给予冲刺加分（`reset_bonus` / `sprint_sunk`）。
+
+---
 
 ## Related projects
 
