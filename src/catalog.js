@@ -1418,7 +1418,6 @@ export const DEFAULT_SCORING_POLICY = {
     high: 0.0,
     xhigh: 0.15,
     max: 0.3,
-    ultra: 0.4,
   },
   effort_burn: {
     low: 0.2,

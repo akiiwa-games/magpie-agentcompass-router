@@ -5,8 +5,8 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { namedRoute, rankCandidates, selectBestRoute } from "../src/allocator.js";
-import { DEFAULT_SCORING_POLICY, EFFORT_CURVES } from "../src/catalog.js";
+import { burnScale, effortAbility, namedRoute, rankCandidates, selectBestRoute } from "../src/allocator.js";
+import { DEFAULT_MODELS, DEFAULT_SCORING_POLICY, EFFORT_CURVES } from "../src/catalog.js";
 import {
   CACHE_COLD_MS,
   CHATGPT_CODEX_COLD_MS,
@@ -1654,6 +1654,45 @@ test("8.8 tool_execution/hard uses its route floor 2.7, not the policy's hard fl
   assert.equal(impl.task.kind, "general_implementation");
   assert.equal(impl.task.difficulty, "hard");
   assert.match(impl.allCandidates[0].excluded.join("; "), /ability 3\.05 below the hard floor 3\.10/);
+});
+
+test("8.9 Effort fallback (plugin-side, not in AgentCompass): `:minimal` and `:ultra` parse as efforts, `ultra` reads as the model's Max and `minimal` sits below its Low", () => {
+  const astra = DEFAULT_MODELS["gpt-6-astra"];
+  const curves = EFFORT_CURVES["gpt-6-astra"];
+  const policy = DEFAULT_SCORING_POLICY;
+
+  // Parsing: each suffix is one candidate at that effort, not the model's whole effort list
+  const ranked = rankCandidates(
+    { ...GATE_PROFILE, work_kind: "general_implementation", reasoning_depth: 1, code_complexity: 1, error_cost: 1 },
+    { candidateModels: ["gpt-6-astra:minimal", "gpt-6-astra:ultra"] },
+  );
+  assert.deepEqual(ranked.allCandidates.map((c) => c.id).sort(), ["gpt-6-astra:minimal", "gpt-6-astra:ultra"]);
+
+  // Scoring: Astra has no `ultra` row, so ultra is its Max (4.2 + 0.1), not the policy table's generic Max
+  assert.equal(effortAbility(policy, curves, astra, "ultra"), effortAbility(policy, curves, astra, "max"));
+  assert.equal(burnScale(policy, curves, "ultra"), burnScale(policy, curves, "max"));
+  // minimal is Astra's own Low less the policy's Low->minimal step (-1.0 - -0.54), and burns less than Low
+  const low = effortAbility(policy, curves, astra, "low");
+  assert.ok(Math.abs(effortAbility(policy, curves, astra, "minimal") - (low - 0.46)) < 1e-9);
+  assert.ok(burnScale(policy, curves, "minimal") < burnScale(policy, curves, "low"));
+  // A model whose curve has no Low row takes the policy table's minimal step
+  const deepseek = DEFAULT_MODELS["deepseek-v4.1-flash-free"];
+  const deepseekCurves = EFFORT_CURVES["deepseek-v4.1-flash-free"];
+  assert.ok(Math.abs(effortAbility(policy, deepseekCurves, deepseek, "minimal") - (deepseek.tier - 1.0)) < 1e-9);
+
+  // Continuity: on a warm cache, minimal after low is a downgrade and keeps only a quarter of the continuity bonus
+  const held = rankCandidates(
+    { ...GATE_PROFILE, work_kind: "general_implementation", reasoning_depth: 1, code_complexity: 1, error_cost: 1, context_scale: 2 },
+    {
+      candidateModels: ["gpt-6-astra:low", "gpt-6-astra:minimal"],
+      previousModel: "gpt-6-astra",
+      previousEffort: "low",
+      cacheWarm: true,
+    },
+  );
+  const cont = Object.fromEntries(held.allCandidates.map((c) => [c.effort, c.components.continuity]));
+  assert.equal(cont.low, 0.25);
+  assert.equal(cont.minimal, 0.0625);
 });
 
 test("9.1 PR #670 Review Guard: Default triggers ONLY claim `agentcompass` / `agentcompass/*` and never hijack `auto` or `group/intent`", async () => {
