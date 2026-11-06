@@ -374,7 +374,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   const taskFacts = {
     objective: turnText,
     previousUser: prevUser,
-    hasVisualInput: Boolean(state.has_visual_input ?? rawTaskObj.hasVisualInput),
+    hasVisualInput: Boolean(state.has_visual_input),
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   };
 

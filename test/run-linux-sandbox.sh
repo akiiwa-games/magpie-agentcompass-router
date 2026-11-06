@@ -7,16 +7,14 @@ else
   SCRATCH="/mnt/host/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch"
 fi
 
-if [ -d "/mnt/e/PROJECTS/magpie-agentcompass-router" ]; then
-  REPO="/mnt/e/PROJECTS/magpie-agentcompass-router"
-else
-  REPO="/mnt/host/e/PROJECTS/magpie-agentcompass-router"
-fi
+# REPO: the checkout under test, by default the one this script is in
+REPO="${REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 
 SANDBOX="/run/magpie-sandbox"
 
 cleanup() {
   pkill -f "$SANDBOX/magpie" 2>/dev/null || true
+  pkill -f "$SANDBOX/baseline/magpie" 2>/dev/null || true
   rm -rf "$SANDBOX"
 }
 trap cleanup EXIT
@@ -28,6 +26,14 @@ mkdir -p "$SANDBOX/home" "$SANDBOX/config" "$SANDBOX/cache" "$SANDBOX/data" "$SA
 cp "${MAGPIE_LINUX_BIN:-$SCRATCH/magpie-linux-amd64}" "$SANDBOX/magpie"
 chmod +x "$SANDBOX/magpie"
 cp -r "$REPO"/* "$SANDBOX/agentcompass/"
+
+# BASELINE_SRC: an export of the build non-realtime routing is compared with in Scenario 9, made outside the sandbox
+# (it has no git): `git archive origin/main | tar -x -C <dir>`. Without it Scenario 9 is reported as skipped.
+if [ -n "${BASELINE_SRC:-}" ]; then
+  mkdir -p "$SANDBOX/agentcompass-main"
+  cp -r "$BASELINE_SRC"/* "$SANDBOX/agentcompass-main/"
+  export BASELINE_PLUGIN_DIR="$SANDBOX/agentcompass-main"
+fi
 
 export HOME="$SANDBOX/home"
 export TMPDIR="$SANDBOX/tmp"
@@ -48,6 +54,8 @@ echo "=== [1/4] Linux Sandbox System Info ==="
 uname -a
 cat /etc/os-release | head -n 4
 "$SANDBOX/magpie" --version
+export MAGPIE_BINARY_SHA256="$(sha256sum "$SANDBOX/magpie" | cut -d' ' -f1)"
+echo "sha256 $MAGPIE_BINARY_SHA256"
 
 echo "=== [2/4] Installing & Signing In Plugin in Real Linux Magpie ==="
 "$SANDBOX/magpie" plugin add "$PLUGIN_DIR"
@@ -64,7 +72,7 @@ export MAGPIE_BUN="$BUN_BIN"
 echo "Linux Bun runtime: $BUN_BIN ($("$BUN_BIN" --version))"
 
 echo "=== [3/4] Running Unit Tests Inside Linux Sandbox ==="
-"$BUN_BIN" test "$PLUGIN_DIR/test/router.test.mjs"
+"$BUN_BIN" test "$PLUGIN_DIR/test/router.test.mjs" "$PLUGIN_DIR/test/realtime-parity.test.mjs"
 
 echo "=== [4/4] Running Live Magpie Web + Gateway Full-Chain E2E Tests Inside Linux Sandbox ==="
 "$BUN_BIN" "$PLUGIN_DIR/test/linux-sandbox-e2e.mjs"

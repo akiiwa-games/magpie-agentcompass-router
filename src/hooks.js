@@ -6,11 +6,12 @@
  * without mutating client request body fields.
  */
 
-import { selectBestRoute } from "./allocator.js";
+import { pinOptionsOf, selectBestRoute } from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
   computeSessionKey,
   defaultContinuityStore,
+  effectiveRealtimeLoop,
   evaluateProviderContinuation,
   keepsEffort,
 } from "./continuity.js";
@@ -155,6 +156,9 @@ export async function onRequest(body, ctx = {}) {
   );
   const liveQuotas = loadLiveQuotas(options, now);
 
+  const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
+  const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
+
   const cont = evaluateProviderContinuation(facts, sessionState, {
     now,
     affinityMode: options.affinityMode || options.affinity || "cache",
@@ -177,6 +181,7 @@ export async function onRequest(body, ctx = {}) {
 
   // Fast path: Hold active session Provider/Model without calling the intent classifier
   if (cont.shouldHold && cont.model) {
+    const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
     const heldEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
@@ -184,19 +189,23 @@ export async function onRequest(body, ctx = {}) {
       now,
       {
         ...options,
+        ...realtimeOption,
         isShortFollowup: facts.isShortFollowup,
       }
     );
     const canonical = canonicalModel(cont.model, options.catalog?.aliases);
+    // A realtime session stays on the name it was routed to (`gpt-5.3-codex-spark`, not its canonical `gpt-6.1-sol`).
+    const heldModel = heldRealtime && sessionState?.target ? sessionState.target : cont.model;
     if (sessionKey) {
       store.recordRequest(
         sessionKey,
         {
-          model: cont.model,
+          model: heldModel,
           effort: heldEffort,
           provider: cont.provider || sessionState?.provider || "",
           workKind: sessionState?.workKind || "general_implementation",
           difficulty: sessionState?.difficulty || "routine",
+          realtimeLoop: heldRealtime,
           why: cont.why,
           held: true,
         },
@@ -207,14 +216,15 @@ export async function onRequest(body, ctx = {}) {
 
     const carrier = {
       v: 1,
-      targetModel: cont.model,
+      targetModel: heldModel,
       canonicalModel: canonical,
       targetEffort: heldEffort,
-      modelWithEffort: `${cont.model}:${heldEffort}`,
+      modelWithEffort: `${heldModel}:${heldEffort}`,
       canRewriteModel,
       hasExplicitCandidates,
       workKind: sessionState?.workKind || "general_implementation",
       difficulty: sessionState?.difficulty || "routine",
+      realtimeLoop: heldRealtime,
       requiredAbility: null,
       score: null,
       components: null,
@@ -296,11 +306,8 @@ export async function onRequest(body, ctx = {}) {
     quotas: liveQuotas,
     meteredOk: options.meteredOk,
     now,
-    ...(typeof facts.realtime_loop === "boolean"
-      ? { realtime_loop: facts.realtime_loop }
-      : typeof options.realtime_loop === "boolean"
-        ? { realtime_loop: options.realtime_loop }
-        : {}),
+    ...realtimeOption,
+    ...pinOptionsOf(options),
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -316,11 +323,8 @@ export async function onRequest(body, ctx = {}) {
       candidateModels,
       catalog: options.catalog,
       now,
-      ...(typeof facts.realtime_loop === "boolean"
-        ? { realtime_loop: facts.realtime_loop }
-        : typeof options.realtime_loop === "boolean"
-          ? { realtime_loop: options.realtime_loop }
-          : {}),
+      ...realtimeOption,
+      ...pinOptionsOf(options),
     });
   }
 
@@ -344,7 +348,7 @@ export async function onRequest(body, ctx = {}) {
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
-      options
+      { ...options, ...realtimeOption }
     );
   }
 

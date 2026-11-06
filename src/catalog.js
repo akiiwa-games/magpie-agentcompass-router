@@ -1661,37 +1661,6 @@ export const DEFAULT_SCORING_POLICY = {
   },
 };
 
-const MODEL_SUFFIX_STRIP_RE = /(?:@\d{8}|-\d{8}|:\w+|-(?:latest|preview))$/i;
-
-function matchKnownModelOrAlias(
-  candidate,
-  aliases = MODEL_ALIASES,
-  models = DEFAULT_MODELS,
-  respTable = EFFORT_RESPONSIVENESS,
-) {
-  if (!candidate) return null;
-  if (aliases && aliases[candidate]) return aliases[candidate];
-  if (models && candidate in models) return candidate;
-  if (respTable && candidate in respTable) return candidate;
-  const low = candidate.toLowerCase();
-  if (aliases) {
-    for (const [k, v] of Object.entries(aliases)) {
-      if (k.toLowerCase() === low) return v;
-    }
-  }
-  if (models) {
-    for (const k of Object.keys(models)) {
-      if (k.toLowerCase() === low) return k;
-    }
-  }
-  if (respTable) {
-    for (const k of Object.keys(respTable)) {
-      if (k.toLowerCase() === low) return k;
-    }
-  }
-  return null;
-}
-
 /**
  * Strip provider prefix (`provider/model`) and `:effort` suffix if present, then resolve alias.
  */
@@ -1701,11 +1670,7 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
   const colonIdx = clean.lastIndexOf(":");
   if (colonIdx > 0) {
     const suffix = clean.slice(colonIdx + 1).toLowerCase();
-    if (
-      ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto", "default"].includes(
-        suffix,
-      )
-    ) {
+    if (["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"].includes(suffix)) {
       clean = clean.slice(0, colonIdx);
     }
   }
@@ -1716,37 +1681,179 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
   // `resolve_canonical_model` does. An unknown id keeps only its first prefix stripped (`openrouter/qwen/foo` ->
   // `qwen/foo`), the key quota.js and continuity.js already match on.
   const last = clean.slice(clean.lastIndexOf("/") + 1);
-  for (const cand of [clean, unprefixed, last]) {
-    const direct = matchKnownModelOrAlias(cand, aliases, DEFAULT_MODELS, EFFORT_RESPONSIVENESS);
-    if (direct) return direct;
-    let cur = cand;
-    while (cur) {
-      const stripped = cur.replace(MODEL_SUFFIX_STRIP_RE, "").replace(/\[1m\]$/i, "");
-      if (stripped === cur) break;
-      cur = stripped;
-      const hit = matchKnownModelOrAlias(cur, aliases, DEFAULT_MODELS, EFFORT_RESPONSIVENESS);
-      if (hit) return hit;
-    }
-  }
-  const knownKeys = [
-    ...Object.keys(DEFAULT_MODELS),
-    ...Object.keys(EFFORT_RESPONSIVENESS),
-    ...Object.keys(aliases || {}),
-  ].sort((a, b) => b.length - a.length);
-  const lowLast = last.toLowerCase();
-  for (const k of knownKeys) {
-    const kl = k.toLowerCase();
-    if (lowLast.startsWith(`${kl}-`) || lowLast.startsWith(`${kl}:`)) {
-      return (aliases && aliases[k]) || k;
-    }
+  for (const name of [unprefixed, unprefixed.toLowerCase(), last, last.toLowerCase()]) {
+    if (aliases[name]) return aliases[name];
   }
   return unprefixed;
 }
 
 /**
- * Resolve the model key used for responsiveness and dispatch-effort lookup (`allocator.py:canonical`),
- * preserving dedicated curves for legacy models (e.g. `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`)
- * that `MODEL_ALIASES` maps to newer generations for general scoring.
+ * Model IDs AgentCompass calibrates beyond `DEFAULT_MODELS`. Routing folds some of them into a newer generation
+ * (`MODEL_ALIASES`), but each has its own speed data, so the responsiveness lookup keeps them apart.
+ */
+const RESPONSIVENESS_EXTRA_MODELS = [
+  "claude-haiku-4-5",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "glm-5.2",
+  "gpt-oss-120b",
+  "gemini-3.1-flash-lite",
+  "kimi-k2.7-code",
+  "qwen3.6-plus",
+  "claude-opus-4-7",
+  "claude-opus-4-8",
+  "grok-4.5",
+  "grok-4.6",
+  "gemini-3.1-pro-preview",
+  "gemini-3.7-flash",
+  "kimi-k2.6",
+  "qwen3-max",
+  "qwen3.7-max",
+  "qwen3-flash-2025-07-28",
+  "gemini-4-carbon",
+];
+
+/**
+ * `accounts.json` `aliases`. Responsiveness lookup only: `MODEL_ALIASES` is the routing table and is a different
+ * mapping (`claude-opus-4-6` -> `claude-opus-5-5` there, its own model here).
+ */
+export const RESPONSIVENESS_ALIASES = {
+  "claude-haiku-4-5@20251001": "claude-haiku-4-5",
+  "claude-opus-5": "claude-opus-5-5",
+  "claude-sonnet-5": "claude-sonnet-5-5",
+  "claude-fable-5": "claude-fable-5-1",
+  "gemini-3.8-flash": "gemini-3.8-flash-high",
+  "gemini-4-argon": "gemini-4-argon-high",
+  "gemini-4-pro": "gemini-4-argon-high",
+  "gemini-4-ultra": "gemini-4-argon-high",
+  argon: "gemini-4-argon-high",
+  "ChatGPT Pro via chatgpt-pro-consult": "gpt-6-pro",
+  "grok-4.7-latest": "grok-4.7",
+  "grok-4": "grok-4.7",
+  "opencode/deepseek-v4.1-flash-free": "deepseek-v4.1-flash-free",
+  "deepseek-v4.1-flash": "deepseek-v4.1-flash-free",
+  deepseek: "deepseek-v4.1-flash-free",
+  "glm-5.3-flash": "glm-5.3-flash-free",
+  "opencode/glm-5.3-flash-free": "glm-5.3-flash-free",
+  "MiniMax-M3": "minimax-m3",
+  "MiniMax-M3.1-Flash": "minimax-m3.1-flash",
+  "mimo-v2.6-flash": "mimo-v2.6-flash-free",
+  "mimo-v2.6-pro-ultraspeed": "mimo-v2.6-pro",
+  "kimi-k3.1-pro-highspeed": "kimi-k3.1-pro",
+  "nemotron-3-ultra-550b-a55b": "nemotron-3-ultra-free",
+  "nemotron-3.5-super-vl-120b-a12b": "nemotron-3.5-super-vl-free",
+  "nemotron-3.5-lightning-30b-a3b": "nemotron-3.5-lightning-free",
+  "opencode/mimo-v2.6-flash-free": "mimo-v2.6-flash-free",
+  "opencode/nemotron-3-ultra-free": "nemotron-3-ultra-free",
+  "opencode/nemotron-3.5-super-vl-free": "nemotron-3.5-super-vl-free",
+  "opencode/nemotron-3.5-lightning-free": "nemotron-3.5-lightning-free",
+  "opencode/beam-free": "beam-free",
+  "opencode/flint-40b-free": "flint-40b-free",
+  "zai-org-glm-5-2": "glm-5.2",
+  "venice-api/zai-org-glm-5-2": "glm-5.2",
+  "deepseek-flash": "deepseek-v4.1-flash-free",
+  "deepseek-v4-flash": "deepseek-v4.1-flash-free",
+  "qwen-flash": "qwen3-flash-2025-07-28",
+};
+
+/** `model_resolution.py` family fallbacks. `^llama` maps to nothing upstream, so it is left out. */
+const RESPONSIVENESS_FAMILIES = [
+  [/^claude-opus/, "claude-opus-5-5"],
+  [/^claude-sonnet/, "claude-sonnet-5-5"],
+  [/^claude-fable/, "claude-fable-5-1"],
+  [/^claude-haiku/, "claude-haiku-5-5"],
+  [/^gpt-6.*terra/, "gpt-6.1-terra"],
+  [/^gpt-6.*sol/, "gpt-6.1-sol"],
+  [/^gpt-6.*luna/, "gpt-6-luna"],
+  [/^gpt-6.*pro/, "gpt-6-pro"],
+  [/^gpt-6/, "gpt-6-astra"],
+  [/^gemini.*flash/, "gemini-3.8-flash-high"],
+  [/^gemini/, "gemini-4-argon-high"],
+  [/^grok.*(?:mini|fast)|^grok-code/, "grok-4.7-build-fast"],
+  [/^grok/, "grok-4.7"],
+  [/^deepseek.*flash/, "deepseek-v4.1-flash-free"],
+  [/^deepseek/, "deepseek-v4-pro"],
+  [/^qwen.*coder/, "qwen3-coder-next"],
+  [/^qwen/, "qwen3.8-max"],
+  [/^kimi|^moonshot/, "kimi-k3.1-pro"],
+  [/^glm.*flash/, "glm-5.3-flash-free"],
+  [/^glm/, "glm-5.3"],
+  [/^minimax.*flash/, "minimax-m3.1-flash"],
+  [/^minimax|^abab/, "minimax-m3"],
+  [/^doubao/, "doubao-seed-2-1-pro-260628"],
+  [/^mimo.*flash/, "mimo-v2.6-flash-free"],
+  [/^mimo/, "mimo-v2.6-pro"],
+  [/^nemotron.*lightning/, "nemotron-3.5-lightning-free"],
+  [/^nemotron.*(?:super|vl)/, "nemotron-3.5-super-vl-free"],
+  [/^nemotron/, "nemotron-3-ultra-free"],
+  [/^muse/, "muse-wonder-1.0"],
+  [/^mistral|^codestral|^devstral/, "mistral-large-4"],
+];
+
+/**
+ * Models whose `accounts.json` `effort_curves` declare only this ability and burn. On a realtime task they stay at the
+ * efforts the curve declares, so they cannot step down to one it leaves uncalibrated. Non-realtime scoring never reads this.
+ */
+export const FLAT_EFFORT_CURVE_MODELS = [
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "claude-haiku-4-5",
+  "gpt-6-sol",
+  "gpt-5.6-sol",
+  "gpt-5.6-terra",
+  "gpt-5.6-luna",
+  "grok-4.7-build-fast",
+  "deepseek-v4-pro",
+  "glm-5.3",
+  "glm-5.3-flash-free",
+  "qwen3-coder-next",
+  "qwen3.8-max",
+  "kimi-k3.1-pro",
+  "kimi-k3",
+  "minimax-m3",
+  "minimax-m3.1-flash",
+  "doubao-seed-2-1-pro-260628",
+  "mimo-v2.6-pro",
+  "mimo-v2.6-flash-free",
+  "nemotron-3-ultra-free",
+  "nemotron-3.5-super-vl-free",
+  "nemotron-3.5-lightning-free",
+  "mistral-large-4",
+  "muse-wonder-1.0",
+  "beam-free",
+  "flint-40b-free",
+];
+
+export const FLAT_EFFORT_CURVE = {
+  ability: { default: 0.0, high: 0.0 },
+  burn: { default: 0.7, high: 0.7 },
+};
+
+const RESPONSIVENESS_SUFFIX_RE = /(?:@\d{8}|-\d{8}|:\w+|-(?:latest|preview))$/;
+
+function responsivenessNames(models, aliases, curvesTable, respTable) {
+  const known = new Set([
+    ...Object.keys(DEFAULT_MODELS),
+    ...RESPONSIVENESS_EXTRA_MODELS,
+    ...Object.keys(models || {}).filter((k) => models[k] && typeof models[k] === "object"),
+    ...Object.keys(curvesTable || {}).filter((k) => curvesTable[k] && typeof curvesTable[k] === "object"),
+    ...Object.keys(respTable || {}),
+  ]);
+  const names = { ...RESPONSIVENESS_ALIASES };
+  // A catalog's own aliases count; the routing table it may have been built from does not.
+  for (const [from, to] of Object.entries(aliases || {})) {
+    if (MODEL_ALIASES[from] !== to) names[from] = to;
+  }
+  const byLength = [...known].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
+  return { known, names, byLength };
+}
+
+let defaultResponsivenessNames = null;
+
+/**
+ * The model `allocator.py` would read speed data for (`model_resolution.py:resolve_canonical_model`). `known: false`
+ * means no calibrated row, and `key` is the name as given, as `allocator.py:canonical` returns it. Realtime paths only:
+ * routing keeps using `canonicalModel` and `resolveModelSpec`.
  */
 export function resolveResponsivenessModelKey(
   rawModel,
@@ -1755,103 +1862,73 @@ export function resolveResponsivenessModelKey(
   curvesTable = EFFORT_CURVES,
   respTable = EFFORT_RESPONSIVENESS,
 ) {
-  if (!rawModel || typeof rawModel !== "string") {
-    return { key: "", known: false };
-  }
-  let clean = rawModel.trim().replace(/\[1m\]$/i, "");
-  const colonIdx = clean.lastIndexOf(":");
-  if (colonIdx > 0) {
-    const suffix = clean.slice(colonIdx + 1).toLowerCase();
-    if (
-      ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto", "default"].includes(
-        suffix,
-      )
-    ) {
-      clean = clean.slice(0, colonIdx);
+  const raw = typeof rawModel === "string" ? rawModel.trim() : "";
+  if (!raw) return { key: "", known: false };
+  const isDefault =
+    models === DEFAULT_MODELS &&
+    aliases === MODEL_ALIASES &&
+    curvesTable === EFFORT_CURVES &&
+    respTable === EFFORT_RESPONSIVENESS;
+  const tables = isDefault
+    ? (defaultResponsivenessNames ??= responsivenessNames(models, aliases, curvesTable, respTable))
+    : responsivenessNames(models, aliases, curvesTable, respTable);
+  const { known, names, byLength } = tables;
+  const exact = (start) => {
+    const seen = new Set();
+    let name = start;
+    while (Object.hasOwn(names, name) && !seen.has(name)) {
+      seen.add(name);
+      name = names[name];
     }
-  }
-  const leaf = clean.slice(clean.lastIndexOf("/") + 1);
-
-  const matchDirect = (s) => {
-    if (!s) return null;
-    if (respTable && s in respTable) return s;
-    if (curvesTable && s in curvesTable) return s;
-    if (models && s in models) return s;
-    const low = s.toLowerCase();
-    for (const tbl of [respTable, curvesTable, models]) {
-      if (!tbl) continue;
-      for (const k of Object.keys(tbl)) {
-        if (k.toLowerCase() === low) return k;
-      }
-    }
-    return null;
+    return known.has(name) ? name : null;
   };
+  const found = (key) => ({ key, known: true });
 
-  const matchAlias = (s) => {
-    if (!s || !aliases) return null;
-    const low = s.toLowerCase();
-    if (low === "claude-haiku-4-5@20251001") return "claude-haiku-4-5";
-    if (aliases[s]) return aliases[s];
-    for (const [k, v] of Object.entries(aliases)) {
-      if (k.toLowerCase() === low) return v;
-    }
-    return null;
-  };
-
-  for (const start of [clean, leaf]) {
-    let cur = start;
-    while (cur) {
-      const d = matchDirect(cur);
-      if (d) return { key: d, known: true };
-      const a = matchAlias(cur);
-      if (a) return { key: a, known: true };
-      const stripped = cur.replace(MODEL_SUFFIX_STRIP_RE, "").replace(/\[1m\]$/i, "");
-      if (stripped === cur) break;
-      cur = stripped;
+  const leaf = raw.slice(raw.lastIndexOf("/") + 1);
+  for (const name of [raw, leaf]) {
+    const hit = exact(name);
+    if (hit) return found(hit);
+  }
+  let name = leaf.toLowerCase();
+  // Grok Bot is a remote service selector, not a Grok Build/model-family alias.
+  if (name === "grok-bot") return { key: raw, known: false };
+  for (;;) {
+    const stripped = name.replace(RESPONSIVENESS_SUFFIX_RE, "");
+    if (stripped === name) break;
+    name = stripped;
+    const hit = exact(name);
+    if (hit) return found(hit);
+  }
+  for (const prefix of byLength) {
+    // A delimiter prevents e.g. gpt-6.10 from accidentally matching gpt-6.1.
+    if (name.startsWith(`${prefix}-`) || name.startsWith(`${prefix}:`)) {
+      const hit = exact(prefix);
+      if (hit) return found(hit);
     }
   }
-
-  const allKnown = [
-    ...Object.keys(respTable || {}),
-    ...Object.keys(curvesTable || {}),
-    ...Object.keys(models || {}),
-    ...Object.keys(aliases || {}),
-  ].sort((a, b) => b.length - a.length);
-  const lowLeaf = leaf.toLowerCase();
-  for (const k of allKnown) {
-    const kl = k.toLowerCase();
-    if (lowLeaf.startsWith(`${kl}-`) || lowLeaf.startsWith(`${kl}:`)) {
-      return { key: matchDirect(k) || matchAlias(k) || k, known: true };
-    }
+  for (const [pattern, target] of RESPONSIVENESS_FAMILIES) {
+    if (known.has(target) && pattern.test(name)) return found(target);
   }
-
-  return { key: leaf, known: false };
+  return { key: raw, known: false };
 }
 
 export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
   const name = canonicalModel(rawModel, aliases);
-  const fuzzySpec = (canonical) => {
-    const base = models[canonical];
-    if (!base) return { canonical, spec: base, fuzzyMatch: true };
-    const { responsiveness, responsiveness_basis, responsiveness_status, speed_metrics, ...rest } = base;
-    Object.defineProperty(rest, "fuzzyMatch", { value: true, enumerable: false, configurable: true });
-    return { canonical, spec: rest, fuzzyMatch: true };
-  };
   if (models[name]) return { canonical: name, spec: models[name] };
   // Fuzzy family fallback for provider-specific or date-suffixed model IDs
   const lower = name.toLowerCase();
-  if (lower.includes("opus")) return fuzzySpec("claude-opus-5-5");
-  if (lower.includes("fable")) return fuzzySpec("claude-fable-5-1");
-  if (lower.includes("sonnet")) return fuzzySpec("claude-sonnet-5-5");
-  if (lower.includes("haiku")) return fuzzySpec("claude-haiku-5-5");
+  if (lower.includes("opus")) return { canonical: "claude-opus-5-5", spec: models["claude-opus-5-5"] };
+  if (lower.includes("fable")) return { canonical: "claude-fable-5-1", spec: models["claude-fable-5-1"] };
+  if (lower.includes("sonnet")) return { canonical: "claude-sonnet-5-5", spec: models["claude-sonnet-5-5"] };
+  if (lower.includes("haiku")) return { canonical: "claude-haiku-5-5", spec: models["claude-haiku-5-5"] };
   if (lower.includes("argon") || (lower.includes("gemini") && (lower.includes("pro") || lower.includes("ultra")))) {
-    return fuzzySpec("gemini-4-argon-high");
+    return { canonical: "gemini-4-argon-high", spec: models["gemini-4-argon-high"] };
   }
   if (lower.includes("flash") || lower.includes("lite")) {
-    return fuzzySpec("gemini-3.8-flash-high");
+    return { canonical: "gemini-3.8-flash-high", spec: models["gemini-3.8-flash-high"] };
   }
   if (lower.includes("luna") || lower.includes("mini") || lower.includes("nano")) {
-    return fuzzySpec("gpt-6-luna");
+    return { canonical: "gpt-6-luna", spec: models["gpt-6-luna"] };
   }
   if (
     lower.includes("astra") ||
@@ -1860,9 +1937,9 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
     lower.includes("gpt-6-pro") ||
     /^o[13]\b/.test(lower)
   ) {
-    return fuzzySpec("gpt-6-astra");
+    return { canonical: "gpt-6-astra", spec: models["gpt-6-astra"] };
   }
-  if (lower.includes("terra")) return fuzzySpec("gpt-6.1-terra");
+  if (lower.includes("terra")) return { canonical: "gpt-6.1-terra", spec: models["gpt-6.1-terra"] };
   if (
     lower.includes("sol") ||
     lower.includes("codex") ||
@@ -1870,16 +1947,15 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
     lower.includes("gpt-4o") ||
     /^o4\b/.test(lower)
   ) {
-    return fuzzySpec("gpt-6.1-sol");
+    return { canonical: "gpt-6.1-sol", spec: models["gpt-6.1-sol"] };
   }
-  if (lower.includes("grok")) return fuzzySpec("grok-4.7");
+  if (lower.includes("grok")) return { canonical: "grok-4.7", spec: models["grok-4.7"] };
   if (lower.includes("deepseek") && (lower.includes("r1") || lower.includes("reasoner") || lower.includes("v3") || lower.includes("pro"))) {
-    return fuzzySpec("deepseek-v4-pro");
+    return { canonical: "deepseek-v4-pro", spec: models["deepseek-v4-pro"] };
   }
-  if (lower.includes("deepseek")) return fuzzySpec("deepseek-v4.1-flash-free");
+  if (lower.includes("deepseek")) return { canonical: "deepseek-v4.1-flash-free", spec: models["deepseek-v4.1-flash-free"] };
   return {
     canonical: name || "unknown",
-    fuzzyMatch: true,
     spec: {
       tier: 3.6,
       cost: 2,

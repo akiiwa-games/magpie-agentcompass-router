@@ -19,6 +19,8 @@ import {
   EFFORT_CURVES,
   EFFORT_ORDER,
   EFFORT_RESPONSIVENESS,
+  FLAT_EFFORT_CURVE,
+  FLAT_EFFORT_CURVE_MODELS,
   KIND_TRAITS,
   MODEL_ALIASES,
   ROUTE_FIT_PEERS,
@@ -586,7 +588,6 @@ export function bundleHarness(bundle, account = null, bundleId = null) {
   const launchM = String(bundle?.launch_model || "").trim().toLowerCase();
   const model = String(bundle?.model || "").trim().toLowerCase();
   const modelLeaf = model.replace(/\[1m\]$/i, "").split("/").pop();
-  const canonLeaf = canonicalModel(modelLeaf).toLowerCase();
   if (
     [
       "claude",
@@ -605,33 +606,37 @@ export function bundleHarness(bundle, account = null, bundleId = null) {
   if (bid.startsWith("pi_") || bid.includes("__pi_") || launchM.startsWith("openai-codex/")) {
     return "pi";
   }
-  if (
-    launchM.startsWith("opencode/") ||
-    model.startsWith("opencode/") ||
-    modelLeaf.includes("deepseek-v4.1-flash-free") ||
-    canonLeaf.includes("deepseek-v4.1-flash-free")
-  ) {
+  if (launchM.startsWith("opencode/")) {
     return "opencode";
   }
   if (prov === "dot" || prov === "chatgpt-web") {
     return prov;
   }
-  if (modelLeaf === "dot" || canonLeaf === "dot") {
+  if (prov) {
+    return model.includes("claude") ? "claude" : "codex";
+  }
+  // No provider to go by (a bare candidate): the model family decides which dispatch table applies.
+  const leafKey = resolveResponsivenessModelKey(modelLeaf).key.toLowerCase();
+  const leafOrKey = (test) => test(modelLeaf) || test(leafKey);
+  if (model.startsWith("opencode/") || leafOrKey((m) => m.includes("deepseek-v4.1-flash-free"))) {
+    return "opencode";
+  }
+  if (leafOrKey((m) => m === "dot")) {
     return "dot";
   }
-  if (modelLeaf.startsWith("grok-bot") || canonLeaf.startsWith("grok-bot")) {
+  if (leafOrKey((m) => m.startsWith("grok-bot"))) {
     return "grok-bot";
   }
-  if (modelLeaf.startsWith("grok-") || canonLeaf.startsWith("grok-")) {
+  if (leafOrKey((m) => m.startsWith("grok-"))) {
     return "grok";
   }
-  if (modelLeaf.startsWith("gemini-") || canonLeaf.startsWith("gemini-")) {
+  if (leafOrKey((m) => m.startsWith("gemini-"))) {
     return "antigravity-resilient";
   }
-  if (modelLeaf === "glm-5.2" || canonLeaf === "glm-5.2") {
+  if (leafOrKey((m) => m === "glm-5.2")) {
     return "omp";
   }
-  if (modelLeaf.includes("claude") || canonLeaf.includes("claude")) {
+  if (leafOrKey((m) => m.includes("claude"))) {
     return "claude";
   }
   return "codex";
@@ -717,13 +722,41 @@ function splitPinModelAndEffort(normConstraint) {
   return { modelPart: normConstraint, effortPart: null };
 }
 
+/**
+ * Whether a pinned model names this candidate. Identity is the responsiveness key, as `allocator.py` compares
+ * `canonical()` of both sides: `claude-opus-4-6` and `claude-opus-5-5` are different models here even though routing
+ * folds one into the other.
+ */
+function matchesPinnedModel(bundle, computedId, normConstraint, modelPart, taskCtx) {
+  const rawModel = bundle?.model;
+  const rawLeaf = rawModel ? String(rawModel).split("/").pop() : rawModel;
+  const bid = bundle?.id;
+  if (
+    normConstraint === bid ||
+    normConstraint === computedId ||
+    modelPart === bid ||
+    modelPart === rawModel ||
+    modelPart === rawLeaf
+  ) {
+    return true;
+  }
+  const models = taskCtx.models || DEFAULT_MODELS;
+  const aliases = taskCtx.aliases || MODEL_ALIASES;
+  const wanted = resolveResponsivenessModelKey(modelPart, models, aliases).key;
+  if (!wanted) return false;
+  return wanted === bid || wanted === resolveResponsivenessModelKey(rawModel, models, aliases).key;
+}
+
+/**
+ * Whether the user pinned this `realtime_loop` candidate; a pin keeps it from stepping down or being excluded.
+ * Pin options have no effect on non-realtime routing.
+ */
 export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
   if (!taskCtx || typeof taskCtx !== "object") return false;
   const bid = bundle?.id;
   const rawModel = bundle?.model;
   const candEff = String(bundle?.effort || "high").trim().toLowerCase();
   const computedId = rawModel ? `${rawModel}:${candEff}` : null;
-  const rawLeaf = rawModel && String(rawModel).includes("/") ? String(rawModel).split("/").pop() : rawModel;
   const pinnedBundle = taskCtx.pinned_bundle || taskCtx.pinnedBundle;
   const constraintBundle = taskCtx.constraint_bundle || taskCtx.constraintBundle || taskCtx.constraints?.bundle;
   const constraintModel =
@@ -747,25 +780,8 @@ export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
   if (constraintModel) {
     const normConstraint = String(constraintModel).trim();
     const { modelPart, effortPart } = splitPinModelAndEffort(normConstraint);
-    const aliases = taskCtx.aliases || MODEL_ALIASES;
-    const models = taskCtx.models || DEFAULT_MODELS;
-    const canonConstraint = canonicalModel(modelPart, aliases);
-    const respConstraint = resolveResponsivenessModelKey(modelPart, models, aliases).key;
-    const respCand = resolveResponsivenessModelKey(rawModel || canonical, models, aliases).key;
-    const candCanon = canonical || canonicalModel(rawModel, aliases);
-    if (
-      normConstraint === bid ||
-      normConstraint === computedId ||
-      modelPart === bid ||
-      modelPart === rawModel ||
-      modelPart === rawLeaf ||
-      modelPart === candCanon ||
-      (canonConstraint &&
-        (canonConstraint === candCanon ||
-          canonConstraint === rawModel ||
-          canonConstraint === rawLeaf)) ||
-      (respConstraint && (respConstraint === respCand || respConstraint === candCanon))
-    ) {
+    const candidate = rawModel ? bundle : { ...bundle, model: canonical };
+    if (matchesPinnedModel(candidate, computedId, normConstraint, modelPart, taskCtx)) {
       if (!effortPart && !constraintEffort) return true;
       const normConstraintEff = constraintEffort ? String(constraintEffort).trim().toLowerCase() : null;
       if ((!effortPart || effortPart === candEff) && (!normConstraintEff || normConstraintEff === candEff)) {
@@ -777,40 +793,24 @@ export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
   return false;
 }
 
-function resolveModelCurves(rawModel, canonical, fuzzy, catalog = {}) {
+/**
+ * Effort curves a `realtime_loop` task reads: `accounts.json` `effort_curves` of the responsiveness key, not of the routing
+ * canonical. A name with no calibrated row has no speed data, and scores on the curve of the family routing puts it in.
+ */
+export function resolveRealtimeCurves(rawModel, canonical, catalog = {}) {
   const models = catalog.models || DEFAULT_MODELS;
   const aliases = catalog.aliases || MODEL_ALIASES;
   const curvesTable = catalog.effortCurves || EFFORT_CURVES;
   const respTable = catalog.effortResponsiveness || EFFORT_RESPONSIVENESS;
-  const { key: respKey, known } = resolveResponsivenessModelKey(
-    rawModel || canonical,
-    models,
-    aliases,
-    curvesTable,
-    respTable,
-  );
-  const dedicatedCurve = curvesTable?.[respKey] || null;
-  const dedicatedResp = dedicatedCurve?.responsiveness || respTable?.[respKey];
-  if (dedicatedResp) {
-    if (dedicatedCurve) {
-      return { ...dedicatedCurve, responsiveness: dedicatedResp };
-    }
-    if (respKey !== canonical) {
-      return {
-        ability: { default: 0.0, high: 0.0 },
-        burn: { default: 0.7, high: 0.7 },
-        responsiveness: dedicatedResp,
-      };
-    }
-    const rawCurves = curvesTable?.[canonical] || {};
-    return { ...rawCurves, responsiveness: dedicatedResp };
+  const { key, known } = resolveResponsivenessModelKey(rawModel || canonical, models, aliases, curvesTable, respTable);
+  if (!known) {
+    const { responsiveness: _unmeasured, ...scoring } = curvesTable?.[canonical] || {};
+    return scoring;
   }
-  const rawCurves = curvesTable?.[canonical] || {};
-  if (fuzzy && !known) {
-    return { ...rawCurves, responsiveness: undefined };
-  }
-  const canonResp = rawCurves.responsiveness || respTable?.[canonical];
-  return canonResp ? { ...rawCurves, responsiveness: canonResp } : rawCurves;
+  const own = curvesTable?.[key];
+  const flat = FLAT_EFFORT_CURVE_MODELS.includes(key) ? FLAT_EFFORT_CURVE : null;
+  const resp = own?.responsiveness || respTable?.[key];
+  return { ...flat, ...own, ...(resp ? { responsiveness: resp } : {}) };
 }
 
 function attachTupleIterator(obj, tupleValues) {
@@ -837,19 +837,21 @@ export function bundleResponsiveness(
   options = {},
 ) {
   const cfg = responsivenessConfig(policy);
-  const rawModel = bundle?.model || "";
-  let spec = info && typeof info === "object" && "spec" in info && info.spec ? info.spec : info;
-  let fuzzy = Boolean(info?.fuzzyMatch || spec?.fuzzyMatch);
-  let canonical = bundle?.canonicalModel || null;
-  if (!spec) {
-    const resolved = resolveModelSpec(rawModel, options.models || DEFAULT_MODELS, options.aliases || MODEL_ALIASES);
-    spec = resolved.spec;
-    canonical = resolved.canonical;
-    fuzzy = Boolean(resolved.fuzzyMatch);
-  } else if (!canonical) {
-    canonical = canonicalModel(rawModel, options.aliases || MODEL_ALIASES);
-  }
-  spec = spec || {};
+  const rawModel = bundle?.model || bundle?.canonicalModel || "";
+  const models = options.models || DEFAULT_MODELS;
+  const aliases = options.aliases || MODEL_ALIASES;
+  const { key, known } = resolveResponsivenessModelKey(
+    rawModel,
+    models,
+    aliases,
+    options.effortCurves || EFFORT_CURVES,
+    options.effortResponsiveness || EFFORT_RESPONSIVENESS,
+  );
+  const givenSpec = info && typeof info === "object" && "spec" in info && info.spec ? info.spec : info;
+  // The row routing folds this name into is not its speed data; only a row the caller supplied is.
+  const routingSpec = resolveModelSpec(rawModel, models, aliases).spec;
+  const spec = givenSpec && givenSpec !== routingSpec ? givenSpec : (known && models[key]) || {};
+  const canonical = key;
 
   const status = spec.responsiveness_status;
   const rawResp = spec.responsiveness;
@@ -861,10 +863,10 @@ export function bundleResponsiveness(
   const defaultEff = String(spec.default_effort || spec.fixed_effort || "high");
 
   let effectiveCurves = curves;
-  if (!effectiveCurves || (!effectiveCurves.responsiveness && canonical)) {
-    const resolvedCurves = resolveModelCurves(rawModel, canonical, fuzzy, {
-      models: options.models,
-      aliases: options.aliases,
+  if (!effectiveCurves || !effectiveCurves.responsiveness) {
+    const resolvedCurves = resolveRealtimeCurves(rawModel, canonicalModel(rawModel, aliases), {
+      models,
+      aliases,
       effortCurves: options.effortCurves,
       effortResponsiveness: options.effortResponsiveness,
     });
@@ -873,21 +875,10 @@ export function bundleResponsiveness(
       : resolvedCurves;
   }
 
-  const { known: isKnownModel } = resolveResponsivenessModelKey(
-    rawModel || canonical,
-    options.models || DEFAULT_MODELS,
-    options.aliases || MODEL_ALIASES,
-    options.effortCurves || EFFORT_CURVES,
-    options.effortResponsiveness || EFFORT_RESPONSIVENESS,
-  );
-  const unmeasuredFuzzy = fuzzy && !isKnownModel;
-  const curvesResp =
-    !unmeasuredFuzzy && effectiveCurves && typeof effectiveCurves === "object"
-      ? effectiveCurves.responsiveness
-      : null;
+  const curvesResp = effectiveCurves && typeof effectiveCurves === "object" ? effectiveCurves.responsiveness : null;
   let base = lookupCurveResponsiveness(curvesResp, eff, defaultEff);
 
-  if (base === null && !unmeasuredFuzzy) {
+  if (base === null) {
     if (rawResp && typeof rawResp === "object") {
       base = lookupCurveResponsiveness(rawResp, eff, defaultEff);
     } else if (typeof rawResp === "number" && Number.isFinite(rawResp)) {
@@ -897,7 +888,7 @@ export function bundleResponsiveness(
     }
   }
 
-  if (base === null && !unmeasuredFuzzy) {
+  if (base === null) {
     const metrics = spec.speed_metrics && typeof spec.speed_metrics === "object" ? spec.speed_metrics : {};
     const ttft = metrics.ttft_s;
     const tps = metrics.output_tps;
@@ -950,6 +941,29 @@ export function bundleResponsiveness(
 }
 
 /**
+ * Efforts `dispatch_efforts` allows this bundle, or `null` when no row covers it. An explicit provider reads its own table
+ * (`allocator.py:resolve_realtime_effort`); a bare candidate has none, so it reads the table of its inferred harness.
+ */
+function dispatchAllowedEfforts(
+  bundle,
+  provider,
+  harness,
+  canonical,
+  models,
+  aliases,
+  dispatchEffortsTable,
+  curvesTable,
+  respTable,
+) {
+  const owner = provider || harness;
+  const table = owner && dispatchEffortsTable && typeof dispatchEffortsTable[owner] === "object" ? dispatchEffortsTable[owner] : null;
+  if (!table) return null;
+  const rawModel = bundle?.model || canonical;
+  const { key } = resolveResponsivenessModelKey(rawModel, models, aliases, curvesTable, respTable);
+  return table[rawModel] || table[key] || null;
+}
+
+/**
  * When `realtime_loop` is active and a bundle's default effort is below the responsiveness floor,
  * step down to the highest faster effort in the model's curve that clears both the ability gate (`gate`)
  * and `responsiveness.floor` (`allocator.py:resolve_realtime_effort`).
@@ -983,23 +997,22 @@ export function resolveRealtimeEffort(
     const modelsMap = accounts.models || DEFAULT_MODELS;
     const aliasesMap = accounts.aliases || MODEL_ALIASES;
     const resolved = resolveModelSpec(bundle?.model || "", modelsMap, aliasesMap);
-    const fuzzy = Boolean(resolved.fuzzyMatch);
+    const curveCatalog = {
+      models: modelsMap,
+      aliases: aliasesMap,
+      effortCurves: accounts.effort_curves || EFFORT_CURVES,
+      effortResponsiveness: accounts.effort_responsiveness || EFFORT_RESPONSIVENESS,
+    };
     if (infoArg === null && policyArg === null && curvesArg === null && typeof modelOrContext === "object") {
       policy = modelOrContext || DEFAULT_SCORING_POLICY;
       canonical = resolved.canonical;
       info = modelsMap?.[canonical] || resolved.spec || {};
-      curves = resolveModelCurves(bundle?.model || canonical, canonical, fuzzy, {
-        effortCurves: accounts.effort_curves || EFFORT_CURVES,
-        effortResponsiveness: accounts.effort_responsiveness || EFFORT_RESPONSIVENESS,
-      });
+      curves = resolveRealtimeCurves(bundle?.model || canonical, canonical, curveCatalog);
     } else {
       canonical = String(modelOrContext || resolved.canonical);
       info = infoArg || modelsMap?.[canonical] || resolved.spec || {};
       policy = policyArg || ctx.policy || accounts.scoring || DEFAULT_SCORING_POLICY;
-      const baseResolvedCurves = resolveModelCurves(bundle?.model || canonical, canonical, fuzzy, {
-        effortCurves: accounts.effort_curves || EFFORT_CURVES,
-        effortResponsiveness: accounts.effort_responsiveness || EFFORT_RESPONSIVENESS,
-      });
+      const baseResolvedCurves = resolveRealtimeCurves(bundle?.model || canonical, canonical, curveCatalog);
       curves = curvesArg
         ? { ...baseResolvedCurves, ...curvesArg, responsiveness: curvesArg.responsiveness || baseResolvedCurves.responsiveness }
         : baseResolvedCurves;
@@ -1023,12 +1036,11 @@ export function resolveRealtimeEffort(
     const aliases = catalog.aliases || MODEL_ALIASES;
     policy = ctx.policy || catalog.policy || DEFAULT_SCORING_POLICY;
     const resolved = ctx.info
-      ? { canonical: ctx.canonical || canonicalModel(bundle?.model || "", aliases), spec: ctx.info, fuzzyMatch: Boolean(ctx.fuzzyMatch || ctx.info?.fuzzyMatch) }
+      ? { canonical: ctx.canonical || canonicalModel(bundle?.model || "", aliases), spec: ctx.info }
       : resolveModelSpec(bundle?.model || "", models, aliases);
     canonical = resolved.canonical;
     info = resolved.spec || {};
-    const fuzzy = Boolean(resolved.fuzzyMatch || info?.fuzzyMatch);
-    const resolvedCurves = resolveModelCurves(bundle?.model || "", canonical, fuzzy, catalog);
+    const resolvedCurves = resolveRealtimeCurves(bundle?.model || "", canonical, catalog);
     curves = ctx.curves
       ? { ...resolvedCurves, ...ctx.curves, responsiveness: ctx.curves.responsiveness ?? resolvedCurves.responsiveness }
       : resolvedCurves;
@@ -1118,6 +1130,13 @@ export function resolveRealtimeEffort(
     const unhealthySet = taskCtx?.unhealthy_models instanceof Set ? taskCtx.unhealthy_models : new Set(taskCtx?.unhealthy_models || []);
     const failuresMap = ctx.launch_failures || ctx.launchFailures || taskCtx?.launch_failures || taskCtx?.launchFailures || null;
     const nowMs = Number.isFinite(ctx.now ?? taskCtx?.now) ? Number(ctx.now ?? taskCtx?.now) : Date.now();
+    const selfKey = resolveResponsivenessModelKey(
+      bundle?.model || canonical,
+      models,
+      aliases,
+      catalog.effortCurves || EFFORT_CURVES,
+      catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+    ).key;
     const siblings = [];
     for (const [bid, b] of bundleEntries) {
       if (!b || typeof b !== "object") continue;
@@ -1126,9 +1145,15 @@ export function resolveRealtimeEffort(
       if ((b.account || null) !== (bundle?.account || null)) continue;
       const sibHarness = b.harness || bundleHarness(b, b.account, sibId);
       if (sibHarness !== effHarness) continue;
-      const sibCanonical = canonicalModel(b.model || "", aliases);
-      if (sibCanonical !== canonical) continue;
-      if (unhealthySet.has(sibCanonical)) continue;
+      const sibKey = resolveResponsivenessModelKey(
+        b.model || "",
+        models,
+        aliases,
+        catalog.effortCurves || EFFORT_CURVES,
+        catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+      ).key;
+      if (sibKey !== selfKey) continue;
+      if (unhealthySet.has(canonicalModel(b.model || "", aliases))) continue;
       if (b.disabled || b.discovery_unavailable || !bundleApplies(b, taskCtx)) continue;
       const sibBundle = { ...b, id: sibId };
       if (bundleCooldownReason(sibBundle, failuresMap, nowMs)) continue;
@@ -1168,31 +1193,17 @@ export function resolveRealtimeEffort(
     }
   }
 
-  let allowedEfforts = null;
-  const dispatchTable =
-    (provider && dispatchEffortsTable && typeof dispatchEffortsTable[provider] === "object"
-      ? dispatchEffortsTable[provider]
-      : null) ||
-    (effHarness && dispatchEffortsTable && typeof dispatchEffortsTable[effHarness] === "object"
-      ? dispatchEffortsTable[effHarness]
-      : null);
-  if (dispatchTable) {
-    const rawModelKey = bundle?.model || canonical;
-    const rawLeafKey = String(rawModelKey || "").replace(/\[1m\]$/i, "").split("/").pop();
-    const { key: respKey } = resolveResponsivenessModelKey(
-      rawModelKey,
-      models,
-      aliases,
-      catalog.effortCurves || EFFORT_CURVES,
-      catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
-    );
-    allowedEfforts =
-      dispatchTable[rawModelKey] ||
-      dispatchTable[rawLeafKey] ||
-      dispatchTable[respKey] ||
-      dispatchTable[canonical] ||
-      null;
-  }
+  const allowedEfforts = dispatchAllowedEfforts(
+    bundle,
+    provider,
+    effHarness,
+    canonical,
+    models,
+    aliases,
+    dispatchEffortsTable,
+    catalog.effortCurves || EFFORT_CURVES,
+    catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+  );
 
   const abilityCurve = curves && typeof curves.ability === "object" ? curves.ability : null;
   const hasAbilityCurve = abilityCurve && Object.keys(abilityCurve).length > 0;
@@ -1239,22 +1250,11 @@ export function resolveRealtimeEffort(
 }
 
 /**
- * Evaluate one `(model, effort)` candidate against a profiled task (`allocator.py:evaluate_bundle`).
+ * Bundle-level exclusions a `realtime_loop` task applies: availability, the launch cooldown, and user pins.
  */
-export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
-  const models = catalog.models || DEFAULT_MODELS;
-  const aliases = catalog.aliases || MODEL_ALIASES;
-  const policy = catalog.policy || DEFAULT_SCORING_POLICY;
-
-  const rawModel = candidate.model;
-  const { canonical, spec: info, fuzzyMatch } = resolveModelSpec(rawModel, models, aliases);
-  const rawEffort = scoringEffort(candidate, info);
-  const curves = taskCtx.realtime_loop
-    ? resolveModelCurves(rawModel, canonical, fuzzyMatch, catalog)
-    : (catalog.effortCurves || EFFORT_CURVES)[canonical] || {};
+function realtimeAvailabilityExclusions(candidate, rawEffort, taskCtx) {
   const excluded = [];
-  const notes = [];
-
+  const rawModel = candidate.model;
   if (candidate.disabled) {
     excluded.push("unchecked in model management");
   }
@@ -1287,23 +1287,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (constraintModel) {
     const normConstraint = String(constraintModel).trim();
     const { modelPart, effortPart } = splitPinModelAndEffort(normConstraint);
-    const rawLeaf = rawModel && String(rawModel).includes("/") ? String(rawModel).split("/").pop() : rawModel;
-    const canonConstraint = canonicalModel(modelPart, aliases);
-    const respConstraint = resolveResponsivenessModelKey(modelPart, models, aliases).key;
-    const respCand = resolveResponsivenessModelKey(rawModel || canonical, models, aliases).key;
-    const modelMatches =
-      normConstraint === candidate.id ||
-      normConstraint === computedId ||
-      modelPart === candidate.id ||
-      modelPart === rawModel ||
-      modelPart === rawLeaf ||
-      modelPart === canonical ||
-      (canonConstraint &&
-        (canonConstraint === canonical ||
-          canonConstraint === rawModel ||
-          canonConstraint === rawLeaf)) ||
-      (respConstraint && (respConstraint === respCand || respConstraint === canonical));
-    if (!modelMatches) {
+    if (!matchesPinnedModel(candidate, computedId, normConstraint, modelPart, taskCtx)) {
       excluded.push("explicit model constraint");
     } else if (effortPart && String(rawEffort).toLowerCase() !== effortPart) {
       excluded.push("explicit effort constraint");
@@ -1321,6 +1305,30 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const cooling = bundleCooldownReason(candidate, taskCtx.launch_failures || taskCtx.launchFailures, taskCtx.now);
   if (cooling) {
     excluded.push(cooling);
+  }
+  return excluded;
+}
+
+/**
+ * Evaluate one `(model, effort)` candidate against a profiled task (`allocator.py:evaluate_bundle`).
+ */
+export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
+  const models = catalog.models || DEFAULT_MODELS;
+  const aliases = catalog.aliases || MODEL_ALIASES;
+  const policy = catalog.policy || DEFAULT_SCORING_POLICY;
+
+  const rawModel = candidate.model;
+  const { canonical, spec: info } = resolveModelSpec(rawModel, models, aliases);
+  const realtime = Boolean(taskCtx.realtime_loop);
+  const rawEffort = realtime ? scoringEffort(candidate, info) : candidate.effort || "high";
+  const curves = realtime
+    ? resolveRealtimeCurves(rawModel, canonical, catalog)
+    : (catalog.effortCurves || EFFORT_CURVES)[canonical] || {};
+  const excluded = [];
+  const notes = [];
+
+  if (realtime) {
+    excluded.push(...realtimeAvailabilityExclusions(candidate, rawEffort, taskCtx));
   }
 
   if (taskCtx.needs_visual && !info.visual) {
@@ -1355,7 +1363,6 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     const resolved = resolveRealtimeEffort(candidate, taskCtx, catalog, {
       canonical,
       info,
-      fuzzyMatch,
       policy,
       curves,
       gate,
@@ -1615,11 +1622,8 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const hours = Number(taskCtx.hours ?? taskCtx.profile?.expected_hours ?? 0.5);
   const expectedUsd = round4(hours * Number(info.usd_per_hour ?? 3.0) * Math.max(effortScale, 0.0));
 
-  const preserveBundleId = Boolean(
-    candidate.id && (taskCtx.realtime_loop || isCandidatePinned(candidate, canonical, taskCtx)),
-  );
   const out = {
-    id: preserveBundleId ? candidate.id : `${rawModel}:${effort}`,
+    id: realtime && candidate.id ? candidate.id : `${rawModel}:${effort}`,
     model: rawModel,
     canonicalModel: canonical,
     effort,
@@ -1705,34 +1709,22 @@ function realtimeBareCandidateEfforts(
   ) {
     return [scoringEffort(entryObj, spec)];
   }
-  const dispatchTable =
-    (provider && dispatchEffortsTable && typeof dispatchEffortsTable[provider] === "object"
-      ? dispatchEffortsTable[provider]
-      : null) ||
-    (effHarness && dispatchEffortsTable && typeof dispatchEffortsTable[effHarness] === "object"
-      ? dispatchEffortsTable[effHarness]
-      : null);
-  if (dispatchTable) {
-    const rawLeaf = rawModel.replace(/\[1m\]$/i, "").split("/").pop();
-    const { key: respKey } = resolveResponsivenessModelKey(
-      rawModel,
-      models,
-      aliases,
-      curvesTable,
-      respTable,
-    );
-    const allowed =
-      dispatchTable[rawModel] ||
-      dispatchTable[rawLeaf] ||
-      dispatchTable[respKey] ||
-      dispatchTable[canonical] ||
-      null;
-    if (Array.isArray(allowed) && allowed.length > 0) {
-      const filtered = baseEfforts.filter((e) => allowed.includes(e));
-      if (filtered.length > 0) return filtered;
-      const validAllowed = allowed.filter((e) => EFFORT_ORDER.includes(e));
-      if (validAllowed.length > 0) return validAllowed;
-    }
+  const allowed = dispatchAllowedEfforts(
+    entryObj,
+    provider,
+    effHarness,
+    canonical,
+    models,
+    aliases,
+    dispatchEffortsTable,
+    curvesTable,
+    respTable,
+  );
+  if (Array.isArray(allowed) && allowed.length > 0) {
+    const filtered = baseEfforts.filter((e) => allowed.includes(e));
+    if (filtered.length > 0) return filtered;
+    const validAllowed = allowed.filter((e) => EFFORT_ORDER.includes(e));
+    if (validAllowed.length > 0) return validAllowed;
   }
   return baseEfforts;
 }
@@ -1748,15 +1740,22 @@ export function rankCandidates(profileInput, options = {}) {
   const aliases = catalog.aliases || MODEL_ALIASES;
   const nowMs = Number.isFinite(options.now) ? Number(options.now) : Date.now();
 
-  const rawProfile = profileInput?.reasoning_depth
-    ? profileInput
-    : profileInput?.profile?.reasoning_depth
-      ? profileInput.profile
-      : null;
+  const callerNeeds = profileInput?.needs && typeof profileInput.needs === "object" ? profileInput.needs : {};
+  // A task wrapper (`{ profile, realtime_loop, constraints, ... }`) is a realtime-only input; anything else is inferred as on main.
+  const wrappedProfile = !profileInput?.reasoning_depth && profileInput?.profile?.reasoning_depth ? profileInput.profile : null;
+  const wrapperRealtime =
+    wrappedProfile &&
+    (typeof options.realtime_loop === "boolean"
+      ? options.realtime_loop
+      : typeof callerNeeds.realtime_loop === "boolean"
+        ? callerNeeds.realtime_loop
+        : typeof profileInput.realtime_loop === "boolean"
+          ? profileInput.realtime_loop
+          : wrappedProfile.realtime_loop === true);
+  const rawProfile = profileInput?.reasoning_depth ? profileInput : wrapperRealtime ? wrappedProfile : null;
   let profile = rawProfile
     ? validateProfile(rawProfile)
     : inferTaskProfile(profileInput || {}, routes);
-  const callerNeeds = profileInput?.needs && typeof profileInput.needs === "object" ? profileInput.needs : {};
   const isTaskWrapper = Boolean(rawProfile && profileInput !== rawProfile);
   const explicitRealtimeLoop =
     typeof options.realtime_loop === "boolean"
@@ -1904,7 +1903,7 @@ export function rankCandidates(profileInput, options = {}) {
     if (typeof entry === "string") {
       const colonIdx = entry.lastIndexOf(":");
       if (colonIdx > 0) {
-        const suffix = entry.slice(colonIdx + 1).trim().toLowerCase();
+        const suffix = entry.slice(colonIdx + 1).toLowerCase();
         if (EFFORT_ORDER.includes(suffix)) {
           rawExpanded.push({ model: entry.slice(0, colonIdx), effort: suffix });
           continue;
@@ -1929,26 +1928,35 @@ export function rankCandidates(profileInput, options = {}) {
         rawExpanded.push({ model: entry, effort: eff });
       }
     } else if (entry && typeof entry === "object" && entry.model) {
+      if (!taskCtx.realtime_loop) {
+        const efforts = Array.isArray(entry.efforts)
+          ? entry.efforts
+          : entry.effort
+            ? [entry.effort]
+            : ["medium", "high"];
+        for (const eff of efforts) {
+          rawExpanded.push({ model: entry.model, effort: eff });
+        }
+        continue;
+      }
       const { canonical, spec } = resolveModelSpec(entry.model, models, aliases);
       const isBundleObj = Boolean(entry.id || entry.provider || entry.account || entry.harness || entry.when);
       const efforts = Array.isArray(entry.efforts)
         ? entry.efforts.map((e) => String(e).trim().toLowerCase()).filter(Boolean)
         : entry.effort
           ? [String(entry.effort).trim().toLowerCase()]
-          : !taskCtx.realtime_loop
-            ? ["medium", "high"]
-            : isBundleObj
-              ? [scoringEffort(entry, spec)]
-              : realtimeBareCandidateEfforts(
-                  entry,
-                  spec,
-                  canonical,
-                  models,
-                  aliases,
-                  catalog.dispatchEfforts || DISPATCH_EFFORTS,
-                  catalog.effortCurves || EFFORT_CURVES,
-                  catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
-                );
+          : isBundleObj
+            ? [scoringEffort(entry, spec)]
+            : realtimeBareCandidateEfforts(
+                entry,
+                spec,
+                canonical,
+                models,
+                aliases,
+                catalog.dispatchEfforts || DISPATCH_EFFORTS,
+                catalog.effortCurves || EFFORT_CURVES,
+                catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+              );
       for (const eff of efforts) {
         rawExpanded.push({ ...entry, model: entry.model, effort: eff });
       }
@@ -1956,12 +1964,12 @@ export function rankCandidates(profileInput, options = {}) {
   }
 
   taskCtx.bundles = options.bundles || rawExpanded;
-  const expanded = rawExpanded.filter((c) => bundleApplies(c, taskCtx));
+  const expanded = taskCtx.realtime_loop ? rawExpanded.filter((c) => bundleApplies(c, taskCtx)) : rawExpanded;
 
   const evaluated = expanded.map((c) => evaluateCandidate(c, taskCtx, catalog));
   const eligible = evaluated.filter((c) => c.eligible);
   eligible.sort((a, b) => b.score - a.score);
-  const pinnedCand = eligible.find((c) => isCandidatePinned(c, c.canonicalModel, taskCtx));
+  const pinnedCand = taskCtx.realtime_loop ? eligible.find((c) => isCandidatePinned(c, c.canonicalModel, taskCtx)) : null;
 
   return {
     task: {
@@ -1979,6 +1987,33 @@ export function rankCandidates(profileInput, options = {}) {
     ranking: eligible,
     allCandidates: evaluated,
   };
+}
+
+const PIN_OPTIONS = [
+  "pinnedBundle",
+  "pinned_bundle",
+  "constraintBundle",
+  "constraint_bundle",
+  "pinnedModel",
+  "pinned_model",
+  "constraintModel",
+  "constraint_model",
+  "pinnedEffort",
+  "pinned_effort",
+  "constraintEffort",
+  "constraint_effort",
+  "constraints",
+];
+
+/**
+ * The user's pins among a host's own options, for `selectBestRoute`. Pins only act on `realtime_loop` routing.
+ */
+export function pinOptionsOf(options = {}) {
+  const pins = {};
+  for (const key of PIN_OPTIONS) {
+    if (options[key] !== undefined && options[key] !== null) pins[key] = options[key];
+  }
+  return pins;
 }
 
 /**

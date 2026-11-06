@@ -22,6 +22,11 @@
  * - Scenario 7: Mode B Native Routing Group (`group/compass-group`) via `/v1/systemone` Decision Provider
  *   (specific intent rules, `"none of these"` fallback rule, and `effort=auto` 4-level Jev logprobs scaling)
  * - Scenario 8: Mode A session affinity, mid-turn tool lock (`within: true`) & short follow-up hold
+ * - Scenario 9: Non-realtime requests reach the upstream exactly as a second Magpie running the origin/main build sends
+ *   them (`BASELINE_PLUGIN_DIR`; pools, name spellings, protocols, sessions)
+ * - Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down, on every protocol
+ * - Scenario 11: A realtime session's later turns hold, with no reroute and no effort ratchet
+ * - Scenario 12: A pinned slow model is kept, with a warning in Magpie's log
  */
 
 import assert from "node:assert/strict";
@@ -34,6 +39,7 @@ import path from "node:path";
 const SANDBOX_ROOT = process.env.MAGPIE_SANDBOX_ROOT || "/run/magpie-sandbox";
 const MAGPIE_BIN = process.env.MAGPIE_BIN || path.join(SANDBOX_ROOT, "magpie");
 const PLUGIN_DIR = process.env.PLUGIN_DIR || path.join(SANDBOX_ROOT, "agentcompass");
+const BASELINE_PLUGIN_DIR = process.env.BASELINE_PLUGIN_DIR || "";
 
 const ALL_MODELS = [
   "claude-opus-5-5",
@@ -50,9 +56,24 @@ const ALL_MODELS = [
   "deepseek-v4.1-flash-free",
 ];
 
-function runMagpieCli(args, env) {
+// Spellings the upstream serves too, for Scenario 9's pools
+const VARIANT_MODELS = [
+  "claude-opus-5-5-20261001",
+  "claude-sonnet-5-5-latest",
+  "gpt-6.1-sol-20261001",
+  "gpt-6-luna-chat",
+  "gemini-4-argon-high-preview",
+  "gemini-3.8-flash-high-latest",
+  "claude-opus-4-6",
+  "claude-sonnet-4-6",
+  "gpt-5.4",
+  "gemini-2.5-pro",
+  "gemini-2.5-flash",
+];
+
+function runMagpieCli(args, env, bin = MAGPIE_BIN) {
   return new Promise((resolve, reject) => {
-    const child = spawn(MAGPIE_BIN, args, {
+    const child = spawn(bin, args, {
       env,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -95,6 +116,99 @@ function readJsonBody(req) {
   });
 }
 
+// The upstream provider and routing group a Magpie under test is given; Scenario 9 needs two identical ones.
+async function configureGateway(env, upPort, pluginDir, pluginOptions, bin = MAGPIE_BIN) {
+  const addProvOut = await runMagpieCli(
+    [
+      "provider",
+      "add",
+      "SandboxUpstream",
+      "id=upstream",
+      `url=http://127.0.0.1:${upPort}/v1`,
+      `responses=http://127.0.0.1:${upPort}/v1`,
+      "key=sk-sandbox-upstream",
+      `models=${[...ALL_MODELS, ...VARIANT_MODELS].join(",")}`,
+    ],
+    env,
+    bin
+  );
+  console.log("[Linux Sandbox] Added upstream provider:", addProvOut.trim());
+
+  await runMagpieCli(["plugin", "options", pluginDir, JSON.stringify(pluginOptions)], env, bin);
+
+  // Mode B Routing Group (`group/compass-group`) using `agentcompass/agentcompass-systemone`
+  // Note: first model in `models=` is `upstream/gpt-6-luna` so `"none of these"` fallback lands on `gpt-6-luna`!
+  await runMagpieCli(
+    [
+      "group",
+      "add",
+      "Compass Group",
+      "models=upstream/gpt-6-luna,upstream/claude-opus-5-5,upstream/gpt-6.1-sol,upstream/gemini-4-argon-high,upstream/gemini-3.8-flash-high",
+      "routing=order",
+    ],
+    env,
+    bin
+  );
+  await runMagpieCli(
+    [
+      "group",
+      "set",
+      "compass-group",
+      "effort=auto",
+      "classifier=agentcompass/agentcompass-systemone",
+    ],
+    env,
+    bin
+  );
+  await runMagpieCli(
+    ["group", "rule", "add", "compass-group", "use=upstream/gemini-4-argon-high", "intent=direction_reasoning"],
+    env,
+    bin
+  );
+  await runMagpieCli(
+    ["group", "rule", "add", "compass-group", "use=upstream/claude-opus-5-5", "intent=debug_review"],
+    env,
+    bin
+  );
+  await runMagpieCli(
+    ["group", "rule", "add", "compass-group", "use=upstream/gpt-6.1-sol", "intent=self_contained_code"],
+    env,
+    bin
+  );
+  await runMagpieCli(
+    ["group", "rule", "add", "compass-group", "use=upstream/gemini-3.8-flash-high", "intent=bounded_bulk_work"],
+    env,
+    bin
+  );
+}
+
+// A real `magpie web` daemon (serves both Web GUI API on webPort and Gateway on gwPort), once both answer.
+async function startMagpieWeb(env, gwPort, webPort, webCookie, logs, bin = MAGPIE_BIN) {
+  const proc = spawn(bin, ["web", "--addr", `127.0.0.1:${webPort}`, "--no-open"], {
+    env,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  proc.stdout.on("data", (d) => logs.push(d.toString("utf8")));
+  proc.stderr.on("data", (d) => logs.push(d.toString("utf8")));
+
+  let ready = false;
+  for (let i = 0; i < 60; i++) {
+    try {
+      const [gwRes, webRes] = await Promise.all([
+        fetch(`http://127.0.0.1:${gwPort}/v1/models`),
+        fetch(`http://127.0.0.1:${webPort}/api/plugins`, { headers: { Cookie: webCookie } }),
+      ]);
+      if (gwRes.ok && webRes.ok) {
+        ready = true;
+        break;
+      }
+    } catch {}
+    await new Promise((r) => setTimeout(r, 200));
+  }
+  assert.ok(ready, `magpie web + gateway did not become ready on ports ${webPort}/${gwPort}:\n${logs.join("")}`);
+  return proc;
+}
+
 function listenRandomPort(server) {
   return new Promise((resolve, reject) => {
     server.listen(0, "127.0.0.1", () => {
@@ -113,6 +227,9 @@ async function main() {
     release: os.release(),
     sandboxRoot: SANDBOX_ROOT,
     magpieVersion: null,
+    magpieBinarySha256: process.env.MAGPIE_BINARY_SHA256 || null,
+    pluginCommit: process.env.PLUGIN_COMMIT || null,
+    baselineCommit: process.env.BASELINE_COMMIT || null,
     scenarios: {},
     steps: [],
   };
@@ -148,7 +265,7 @@ async function main() {
       res.end(
         JSON.stringify({
           object: "list",
-          data: ALL_MODELS.map((id) => ({ id, object: "model", created: 1700000000, owned_by: "sandbox-upstream" })),
+          data: [...ALL_MODELS, ...VARIANT_MODELS].map((id) => ({ id, object: "model", created: 1700000000, owned_by: "sandbox-upstream" })),
         })
       );
       return;
@@ -438,6 +555,7 @@ async function main() {
   const webCookie = `magpie_web_${webPort}=${webKey}`;
 
   let magpieProc = null;
+  let baselineProc = null;
   const magpieLogs = [];
 
   try {
@@ -481,21 +599,6 @@ async function main() {
     console.log("[PASS] Scenario 1 (CLI Plugin Lifecycle): magpie plugin list & metadata verified");
 
     // 3. Configure Upstream Provider in Magpie (supporting OpenAI Chat, Responses, and Gateway-translated Anthropic Messages)
-    const addProvOut = await runMagpieCli(
-      [
-        "provider",
-        "add",
-        "SandboxUpstream",
-        "id=upstream",
-        `url=http://127.0.0.1:${upPort}/v1`,
-        `responses=http://127.0.0.1:${upPort}/v1`,
-        "key=sk-sandbox-upstream",
-        `models=${ALL_MODELS.join(",")}`,
-      ],
-      env
-    );
-    console.log("[Linux Sandbox] Added upstream provider:", addProvOut.trim());
-
     // 4. Configure initial Plugin Options
     const basePluginOptions = {
       gatewayTimeoutMs: 8000,
@@ -510,73 +613,11 @@ async function main() {
       // Mode A: the pool `agentcompass/*` picks from (it rejects the request when none is set)
       candidateModels: ALL_MODELS.map((m) => `upstream/${m}`),
     };
-    await runMagpieCli(["plugin", "options", PLUGIN_DIR, JSON.stringify(basePluginOptions)], env);
-
-    // 5. Configure Mode B Routing Group (`group/compass-group`) using `agentcompass/agentcompass-systemone`
-    // Note: first model in `models=` is `upstream/gpt-6-luna` so `"none of these"` fallback lands on `gpt-6-luna`!
-    await runMagpieCli(
-      [
-        "group",
-        "add",
-        "Compass Group",
-        "models=upstream/gpt-6-luna,upstream/claude-opus-5-5,upstream/gpt-6.1-sol,upstream/gemini-4-argon-high,upstream/gemini-3.8-flash-high",
-        "routing=order",
-      ],
-      env
-    );
-    await runMagpieCli(
-      [
-        "group",
-        "set",
-        "compass-group",
-        "effort=auto",
-        "classifier=agentcompass/agentcompass-systemone",
-      ],
-      env
-    );
-    await runMagpieCli(
-      ["group", "rule", "add", "compass-group", "use=upstream/gemini-4-argon-high", "intent=direction_reasoning"],
-      env
-    );
-    await runMagpieCli(
-      ["group", "rule", "add", "compass-group", "use=upstream/claude-opus-5-5", "intent=debug_review"],
-      env
-    );
-    await runMagpieCli(
-      ["group", "rule", "add", "compass-group", "use=upstream/gpt-6.1-sol", "intent=self_contained_code"],
-      env
-    );
-    await runMagpieCli(
-      ["group", "rule", "add", "compass-group", "use=upstream/gemini-3.8-flash-high", "intent=bounded_bulk_work"],
-      env
-    );
+    // 5. Upstream provider, plugin options and Mode B Routing Group
+    await configureGateway(env, upPort, PLUGIN_DIR, basePluginOptions);
 
     // 6. Start real `magpie web` daemon (serves both Web GUI API on webPort and Gateway on gwPort)
-    magpieProc = spawn(MAGPIE_BIN, ["web", "--addr", `127.0.0.1:${webPort}`, "--no-open"], {
-      env,
-      stdio: ["ignore", "pipe", "pipe"],
-    });
-    magpieProc.stdout.on("data", (d) => magpieLogs.push(d.toString("utf8")));
-    magpieProc.stderr.on("data", (d) => magpieLogs.push(d.toString("utf8")));
-
-    let ready = false;
-    for (let i = 0; i < 60; i++) {
-      try {
-        const [gwRes, webRes] = await Promise.all([
-          fetch(`http://127.0.0.1:${gwPort}/v1/models`),
-          fetch(`http://127.0.0.1:${webPort}/api/plugins`, { headers: { Cookie: webCookie } }),
-        ]);
-        if (gwRes.ok && webRes.ok) {
-          ready = true;
-          break;
-        }
-      } catch {}
-      await new Promise((r) => setTimeout(r, 200));
-    }
-    assert.ok(
-      ready,
-      `magpie web + gateway did not become ready on ports ${webPort}/${gwPort}:\n${magpieLogs.join("")}`
-    );
+    magpieProc = await startMagpieWeb(env, gwPort, webPort, webCookie, magpieLogs);
     console.log(
       `[Linux Sandbox] Real Linux 'magpie web' GUI API (127.0.0.1:${webPort}) + Gateway (127.0.0.1:${gwPort}) is live`
     );
@@ -722,17 +763,20 @@ async function main() {
     // fetches that catalog from models.dev in the background after it starts. Until the fetch lands, 0.1.2891
     // sent `upstream/claude-opus-5-5:xhigh` on as `high`; once it lands, as `xhigh`, and runs flipped partway
     // through. The scenarios start once Magpie forwards xhigh as asked, so what they check is the middleware's.
-    const catalogWaitStart = Date.now();
-    let opusXhighSent = null;
-    for (let n = 0; Date.now() - catalogWaitStart < 120_000; n++) {
-      const r = await postChat({ model: "upstream/claude-opus-5-5:xhigh", messages: [{ role: "user", content: `effort probe ${n}` }] });
-      assert.equal(r.status, 200, "a direct upstream/claude-opus-5-5:xhigh must be served");
-      opusXhighSent = upstreamCalls[upstreamCalls.length - 1].reasoning_effort;
-      if (opusXhighSent === "xhigh") break;
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-    }
-    assert.equal(opusXhighSent, "xhigh", "Magpie must forward claude-opus-5-5:xhigh as xhigh within 120 s of starting (models.dev catalog)");
-    report.hostEffortReadyMs = Date.now() - catalogWaitStart;
+    const awaitModelCatalog = async (post) => {
+      const catalogWaitStart = Date.now();
+      let opusXhighSent = null;
+      for (let n = 0; Date.now() - catalogWaitStart < 120_000; n++) {
+        const r = await post({ model: "upstream/claude-opus-5-5:xhigh", messages: [{ role: "user", content: `effort probe ${n}` }] });
+        assert.equal(r.status, 200, "a direct upstream/claude-opus-5-5:xhigh must be served");
+        opusXhighSent = upstreamCalls[upstreamCalls.length - 1].reasoning_effort;
+        if (opusXhighSent === "xhigh") break;
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+      }
+      assert.equal(opusXhighSent, "xhigh", "Magpie must forward claude-opus-5-5:xhigh as xhigh within 120 s of starting (models.dev catalog)");
+      return Date.now() - catalogWaitStart;
+    };
+    report.hostEffortReadyMs = await awaitModelCatalog(postChat);
     console.log(`[Linux Sandbox] Magpie forwards claude-opus-5-5:xhigh as xhigh after ${report.hostEffortReadyMs}ms`);
 
     // =========================================================================
@@ -1261,6 +1305,505 @@ async function main() {
       );
     }
 
+    // What a request reached the upstream as, for the realtime scenarios below
+    const lastUp = () => upstreamCalls[upstreamCalls.length - 1];
+    const routedAs = (u) => `${u.model}:${u.reasoning_effort}`;
+    const postTo = (port, requestPath, body, headers) =>
+      fetch(`http://127.0.0.1:${port}${requestPath}`, { method: "POST", headers, body: JSON.stringify(body) });
+    const anthropicHeaders = { "Content-Type": "application/json", "x-api-key": "sk-local-agent", "anthropic-version": "2023-06-01" };
+    const IDEATION = "Brainstorm 5 unconventional first-principles creative architectural directions and novel product mechanics.";
+    const CODING = "Implement a standalone self-contained LRU cache module in TypeScript with unit tests.";
+    const BULK = "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures.";
+    const DEBUG = "Conduct a cross-module deadlock and race condition security audit across the distributed transaction coordinator.";
+    const userMsg = (content) => ({ role: "user", content });
+
+    // =========================================================================
+    // SCENARIO 9: Non-realtime requests match a second real Magpie running the origin/main build
+    // =========================================================================
+    if (!BASELINE_PLUGIN_DIR) {
+      report.scenarios.scenario9_non_realtime_matches_origin_main = { pass: null, skipped: "BASELINE_SRC not set" };
+      console.log("[SKIP] Scenario 9 (non-realtime vs origin/main): BASELINE_SRC not set");
+    } else {
+      const root = path.join(SANDBOX_ROOT, "baseline");
+      const baseGw = 13427;
+      const baseWeb = 13428;
+      const baseCookie = `magpie_web_${baseWeb}=${webKey}`;
+      const baseEnv = {
+        ...env,
+        HOME: path.join(root, "home"),
+        TMPDIR: path.join(root, "tmp"),
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        MAGPIE_ADDR: `127.0.0.1:${baseGw}`,
+      };
+      for (const dir of ["home", "tmp", "config", "cache", "data", "state"]) fs.mkdirSync(path.join(root, dir), { recursive: true });
+      // A `data` folder beside the binary is where Magpie keeps everything (portable mode, whatever XDG says), so a
+      // second Magpie needs its own copy of the binary beside its own `data`.
+      const baseBin = path.join(root, "magpie");
+      fs.copyFileSync(MAGPIE_BIN, baseBin);
+      fs.chmodSync(baseBin, 0o755);
+      await runMagpieCli(["plugin", "add", BASELINE_PLUGIN_DIR], baseEnv, baseBin);
+      await runMagpieCli(["plugin", "options", BASELINE_PLUGIN_DIR, JSON.stringify({ enableDecisionProvider: true })], baseEnv, baseBin);
+      await runMagpieCli(["plugin", "login", "agentcompass"], baseEnv, baseBin);
+      await configureGateway(baseEnv, upPort, BASELINE_PLUGIN_DIR, basePluginOptions, baseBin);
+      const baselineLogs = [];
+      baselineProc = await startMagpieWeb(baseEnv, baseGw, baseWeb, baseCookie, baselineLogs, baseBin);
+      await awaitModelCatalog((body) => postTo(baseGw, "/v1/chat/completions", body, gwHeaders));
+
+      const instances = [
+        { name: "worktree", gw: gwPort, web: webPort, cookie: webCookie, spec: PLUGIN_DIR },
+        { name: "origin/main", gw: baseGw, web: baseWeb, cookie: baseCookie, spec: BASELINE_PLUGIN_DIR },
+      ];
+      const up = (m) => `upstream/${m}`;
+      const pools = {
+        default: { candidateModels: ALL_MODELS.map(up) },
+        "README pool": { candidateModels: ["claude-opus-4-6", "claude-sonnet-4-6", "gpt-5.4", "gemini-2.5-pro", "gemini-2.5-flash"].map(up) },
+        "bare strings": { candidateModels: ALL_MODELS },
+        "dated/-latest/-preview/-chat": {
+          candidateModels: VARIANT_MODELS.slice(0, 6).map(up),
+        },
+        "{model} objects": { candidateModels: ALL_MODELS.map((model) => ({ model: up(model) })) },
+        "{id,provider,model} objects": {
+          candidateModels: ALL_MODELS.map((model) => ({ id: up(model), provider: "upstream", model })),
+        },
+        "bundles with effort": {
+          candidateModels: ["claude-opus-5-5:xhigh", "claude-opus-5-5:medium", "gpt-6.1-sol:high", "gemini-4-argon-high:high", "gemini-3.8-flash-high:low"].map(up),
+        },
+        "pin options, which only act on realtime routing": {
+          candidateModels: ALL_MODELS.map(up),
+          pinnedModel: up("gemini-4-argon-high"),
+          pinnedEffort: "high",
+        },
+      };
+      const TEXTS = [IDEATION, CODING, BULK, DEBUG, "Translate this short release greeting paragraph into Spanish and French.", "修复登录页的空指针崩溃并补上回归测试"];
+      const CHAT = "/v1/chat/completions";
+      const corpus = (salt) => {
+        const out = [];
+        for (const text of TEXTS) {
+          const first = userMsg(`${text} [${salt}]`);
+          out.push({ path: CHAT, body: { model: "agentcompass/auto", messages: [first] } });
+          // Later turns of that session: a tool loop step and a short follow-up
+          out.push({
+            path: CHAT,
+            body: {
+              model: "agentcompass/auto",
+              messages: [
+                first,
+                { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }] },
+                { role: "tool", tool_call_id: "call_1", content: "ok" },
+              ],
+            },
+          });
+          out.push({ path: CHAT, body: { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")] } });
+          // A new turn of a session no runtime has seen: decided from the history alone
+          out.push({
+            path: CHAT,
+            body: { model: "agentcompass/auto", messages: [userMsg(`${text} [cold ${salt}]`), { role: "assistant", content: "Done." }, userMsg(`Next, ${TEXTS[(TEXTS.indexOf(text) + 1) % TEXTS.length]}`)] },
+          });
+          out.push({ path: CHAT, body: { model: "agentcompass/auto", stream: true, messages: [userMsg(`${text} [stream ${salt}]`)] } });
+          out.push({
+            path: "/v1/responses",
+            body: { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${text} [responses ${salt}]` }] }] },
+          });
+          out.push({ path: "/v1/messages", body: { model: "agentcompass/auto", max_tokens: 1024, messages: [userMsg(`${text} [messages ${salt}]`)] } });
+          out.push({
+            path: CHAT,
+            body: {
+              model: "agentcompass/auto",
+              messages: [{ role: "user", content: [{ type: "text", text: `${text} [image ${salt}]` }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } }] }],
+            },
+          });
+        }
+        out.push({ path: CHAT, body: { model: "agentcompass:low", messages: [userMsg(`${BULK} [suffix ${salt}]`)] } });
+        out.push({ path: CHAT, body: { model: "upstream/gpt-6-luna", messages: [userMsg(`${DEBUG} [direct ${salt}]`)] } });
+        out.push({ path: CHAT, body: { model: "group/compass-group", messages: [userMsg(`${DEBUG} [group ${salt}]`)] } });
+        return out;
+      };
+      const applyPool = async (instance, poolOptions) => {
+        const r = await fetch(`http://127.0.0.1:${instance.web}/api/plugins/options`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: instance.cookie },
+          body: JSON.stringify({ Spec: instance.spec, Options: { ...basePluginOptions, ...poolOptions } }),
+        });
+        assert.equal(r.status, 200, `POST /api/plugins/options failed on ${instance.name}: ${r.status}`);
+      };
+      const send = async (instance, salt) => {
+        const seen = [];
+        for (const [at, req] of corpus(salt).entries()) {
+          const before = upstreamCalls.length;
+          const headers = req.path === "/v1/messages" ? anthropicHeaders : gwHeaders;
+          const resp = await postTo(instance.gw, req.path, req.body, headers);
+          await resp.text();
+          const sent = upstreamCalls.slice(before).map((u) => ({
+            path: u.path,
+            model: u.model,
+            effort: u.reasoning_effort,
+            stream: u.stream,
+            body: u.body,
+          }));
+          seen.push({ request: `#${at} ${req.path} ${String(JSON.stringify(req.body.messages?.at(-1)?.content ?? req.body.input)).slice(0, 60)}`, status: resp.status, sent });
+        }
+        return seen;
+      };
+      // A new full turn of a session holds on the runtime that has the session's warm record and reroutes on one that
+      // has not, and Magpie picks the runtime from a pool: origin/main against itself flips on these requests. So they
+      // are sampled: the routes either build gives, which must be no more than those two.
+      const NEW_TURN_SAMPLES = 8;
+      const sampleNewTurn = async (instance, text, salt) => {
+        const held = new Set();
+        const rerouted = new Set();
+        const nextText = `Next, ${TEXTS[(TEXTS.indexOf(text) + 1) % TEXTS.length]}`;
+        for (let n = 0; n < NEW_TURN_SAMPLES; n++) {
+          const first = userMsg(`${text} [${salt} new turn ${n}]`);
+          const a = await postTo(instance.gw, CHAT, { model: "agentcompass/auto", messages: [first] }, gwHeaders);
+          await a.text();
+          const firstRoute = routedAs(upstreamCalls[upstreamCalls.length - 1]);
+          for (const later of [
+            [first, { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }] }, { role: "tool", tool_call_id: "call_1", content: "ok" }],
+            [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")],
+          ]) {
+            await (await postTo(instance.gw, CHAT, { model: "agentcompass/auto", messages: later }, gwHeaders)).text();
+          }
+          const b = await postTo(instance.gw, CHAT, { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done." }, userMsg(nextText)] }, gwHeaders);
+          await b.text();
+          const nextRoute = routedAs(upstreamCalls[upstreamCalls.length - 1]);
+          (nextRoute === firstRoute ? held : rerouted).add(nextRoute);
+        }
+        return { held: [...held], rerouted: [...rerouted] };
+      };
+
+      let requests = 0;
+      let served = 0;
+      const routes = new Set();
+      const diffs = [];
+      const perPool = {};
+      const newTurnDiffs = [];
+      let newTurnRows = 0;
+      let newTurnRowsThatFlip = 0;
+      let newTurnRowsThatReroute = 0;
+      for (const [name, poolOptions] of Object.entries(pools)) {
+        const salt = `p${Object.keys(perPool).length}`;
+        for (const instance of instances) await applyPool(instance, poolOptions);
+        const [mine, theirs] = [await send(instances[0], salt), await send(instances[1], salt)];
+        for (const text of TEXTS) {
+          const [a, b] = [await sampleNewTurn(instances[0], text, salt), await sampleNewTurn(instances[1], text, salt)];
+          newTurnRows += 1;
+          if (b.held.length > 0 && b.rerouted.length > 0) newTurnRowsThatFlip += 1;
+          if (a.rerouted.length > 0 && b.rerouted.length > 0) newTurnRowsThatReroute += 1;
+          // The runtime's two states give two routes at most, whichever build serves them; a third is a change in routing
+          const clash = new Set([...a.held, ...a.rerouted, ...b.held, ...b.rerouted]).size > 2;
+          if (clash) newTurnDiffs.push({ pool: name, text: text.slice(0, 40), worktree: a, originMain: b });
+        }
+        let poolDiffs = 0;
+        const poolRoutes = new Set();
+        mine.forEach((row, i) => {
+          requests += 1;
+          if (row.status === 200) served += 1;
+          for (const s of row.sent) {
+            routes.add(`${s.model}:${s.effort}`);
+            poolRoutes.add(`${s.model}:${s.effort}`);
+          }
+          if (JSON.stringify(row) !== JSON.stringify(theirs[i])) {
+            poolDiffs += 1;
+            diffs.push({ pool: name, worktree: row, originMain: theirs[i] });
+          }
+        });
+        perPool[name] = { requests: mine.length, diffs: poolDiffs, routes: poolRoutes.size };
+      }
+      baselineProc.kill("SIGTERM");
+      const brief = diffs.slice(0, 5).map((d) => ({
+        pool: d.pool,
+        request: d.worktree.request,
+        worktree: [d.worktree.status, d.worktree.sent.map((s) => `${s.model}:${s.effort}`)],
+        originMain: [d.originMain.status, d.originMain.sent.map((s) => `${s.model}:${s.effort}`)],
+      }));
+      assert.equal(diffs.length, 0, `Non-realtime requests must reach the upstream as origin/main sends them: ${JSON.stringify(brief, null, 2)}`);
+      assert.deepEqual(newTurnDiffs, [], "A new turn must reroute to the same route as on origin/main");
+      assert.ok(newTurnRowsThatReroute > 0, "The new turn sampling compared nothing: no row rerouted on both builds");
+      assert.ok(served / requests >= 0.9, `Most of the corpus must be served for the comparison to mean anything: ${served}/${requests}`);
+      assert.ok(routes.size >= 10, `The corpus must exercise many routes: ${[...routes].join(", ")}`);
+      assert.ok(routes.has("gemini-4-argon-high:high"), "Non-realtime routing still uses Argon high");
+
+      report.scenarios.scenario9_non_realtime_matches_origin_main = {
+        pass: true,
+        requests,
+        served,
+        diffs: diffs.length,
+        distinctRoutes: routes.size,
+        perPool,
+        newTurnSampling: {
+          samplesPerRow: NEW_TURN_SAMPLES,
+          rows: newTurnRows,
+          diffs: newTurnDiffs.length,
+          rowsComparedOnBothBuilds: newTurnRowsThatReroute,
+          originMainRowsThatFlipOnThePool: newTurnRowsThatFlip,
+        },
+      };
+      report.steps.push({
+        test: "Scenario 9: non-realtime requests reach the upstream as a second real Magpie running origin/main sends them (status, model, effort, full body)",
+        ...report.scenarios.scenario9_non_realtime_matches_origin_main,
+      });
+      console.log(`[PASS] Scenario 9 (non-realtime vs origin/main): ${requests} requests over ${Object.keys(pools).length} pools, ${served} served, ${routes.size} distinct routes, ${diffs.length} diffs; new turns: ${newTurnRows} rows x ${NEW_TURN_SAMPLES} samples, ${newTurnDiffs.length} diffs, ${newTurnRowsThatReroute} rows rerouted on both builds (origin/main flips on ${newTurnRowsThatFlip} rows)`);
+      await setPluginOptions(basePluginOptions);
+    }
+
+    // =========================================================================
+    // SCENARIO 10: `realtime_loop: true` excludes Argon high and steps efforts down
+    // =========================================================================
+    {
+      const rt = { realtime_loop: true };
+      const route = async (content, extra = {}) => {
+        const r = await postChat({ model: "agentcompass/auto", messages: [userMsg(content)], ...extra });
+        assert.equal(r.status, 200, `routing ${content} failed: ${r.status}`);
+        return lastUp();
+      };
+
+      // 10a. The same four tasks, off and on
+      const pairs = {
+        ideation: [IDEATION, "gemini-4-argon-high:high", "gpt-6-astra:medium"],
+        coding: [CODING, "gpt-6.1-sol:high", "gpt-6.1-sol:medium"],
+        bulk: [BULK, "gemini-3.8-flash-high:high", "claude-sonnet-5-5:low"],
+        debug: [DEBUG, "claude-opus-5-5:xhigh", "claude-opus-5-5:medium"],
+      };
+      const routed = {};
+      const flagsForwarded = [];
+      for (const [name, [text, off, on]] of Object.entries(pairs)) {
+        const plain = await route(`${text} [10a off]`);
+        const live = await route(`${text} [10a on]`, rt);
+        assert.equal(routedAs(plain), off, `${name} without realtime_loop`);
+        assert.equal(routedAs(live), on, `${name} with realtime_loop`);
+        assert.notEqual(live.model, "gemini-4-argon-high", `${name}: realtime_loop must not reach Argon high`);
+        if ("realtime_loop" in live.body) flagsForwarded.push(name);
+        routed[name] = { nonRealtime: routedAs(plain), realtime: routedAs(live) };
+      }
+      assert.deepEqual(flagsForwarded, [], "realtime_loop is for the router; a real upstream rejects a field it does not know");
+
+      // 10b. A pool of one slow bundle steps down instead of sending the listed xhigh
+      await setPluginOptions({ ...basePluginOptions, candidateModels: ["upstream/claude-opus-5-5:xhigh"] });
+      const steppedPlain = await route(`${DEBUG} [10b off]`);
+      const stepped = await route(`${DEBUG} [10b on]`, rt);
+      assert.equal(routedAs(steppedPlain), "claude-opus-5-5:xhigh");
+      assert.equal(routedAs(stepped), "claude-opus-5-5:medium");
+
+      // 10c. A pool of Argon high alone: excluded, so Argon is never called
+      await setPluginOptions({ ...basePluginOptions, candidateModels: ["upstream/gemini-4-argon-high"] });
+      const argonBefore = upstreamCalls.length;
+      const argonOnly = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${IDEATION} [10c on]`)], ...rt });
+      const argonOnlyBody = await argonOnly.text();
+      const argonOnlyCalls = upstreamCalls.slice(argonBefore).map((u) => u.model);
+      assert.ok(!argonOnlyCalls.includes("gemini-4-argon-high"), `Argon high alone must not be called under realtime_loop: ${argonOnlyBody}`);
+      await setPluginOptions(basePluginOptions);
+
+      // 10d. A model named directly is not routed, and the flag still stops at the gateway
+      const direct = await postChat({ model: "upstream/gemini-4-argon-high", messages: [userMsg(`${IDEATION} [10d direct]`)], ...rt });
+      assert.equal(direct.status, 200);
+      assert.equal(lastUp().model, "gemini-4-argon-high");
+      assert.ok(!("realtime_loop" in lastUp().body));
+
+      // 10e. Every protocol, and the plugin-wide option
+      const responses = await postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${CODING} [10e responses]` }] }], ...rt }, gwHeaders);
+      assert.equal(responses.status, 200);
+      const onResponses = lastUp();
+      assert.equal(routedAs(onResponses), "gpt-6.1-sol:medium");
+      assert.equal(onResponses.path, "/v1/responses");
+      assert.ok(!("realtime_loop" in onResponses.body));
+
+      const messages = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [userMsg(`${DEBUG} [10e messages]`)], ...rt }, anthropicHeaders);
+      assert.equal(messages.status, 200);
+      const onMessages = lastUp();
+      // Magpie sends a /v1/messages request to this chat-only provider without an effort, realtime or not (Scenario 5)
+      assert.equal(onMessages.model, "claude-opus-5-5");
+      assert.ok(!("realtime_loop" in onMessages.body));
+
+      const streamed = await postChat({ model: "agentcompass/auto", stream: true, messages: [userMsg(`${CODING} [10e stream]`)], ...rt });
+      assert.equal(streamed.status, 200);
+      assert.ok((await streamed.text()).includes("[DONE]"));
+      const onStream = lastUp();
+      assert.equal(routedAs(onStream), "gpt-6.1-sol:medium");
+      assert.ok(!("realtime_loop" in onStream.body));
+
+      await setPluginOptions({ ...basePluginOptions, realtime_loop: true });
+      const pluginWide = await route(`${IDEATION} [10e option]`);
+      assert.equal(routedAs(pluginWide), "gpt-6-astra:medium");
+      await setPluginOptions(basePluginOptions);
+
+      report.scenarios.scenario10_realtime_routing = {
+        pass: true,
+        routed,
+        slowBundleStepsDown: `${routedAs(steppedPlain)} -> ${routedAs(stepped)}`,
+        argonOnlyPool: { status: argonOnly.status, upstreamCalls: argonOnlyCalls, body: argonOnlyBody.slice(0, 300) },
+        responses: routedAs(onResponses),
+        messages: routedAs(onMessages),
+        stream: routedAs(onStream),
+        pluginWideOption: routedAs(pluginWide),
+        flagForwardedUpstream: false,
+      };
+      report.steps.push({
+        test: "Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down on chat, responses, messages and streams",
+        ...report.scenarios.scenario10_realtime_routing,
+      });
+      console.log(
+        `[PASS] Scenario 10 (realtime routing): ${Object.entries(routed).map(([k, v]) => `${k} ${v.nonRealtime} -> ${v.realtime}`).join("; ")}; bundle ${routedAs(steppedPlain)} -> ${routedAs(stepped)}; Argon-only pool -> HTTP ${argonOnly.status}, upstream calls ${JSON.stringify(argonOnlyCalls)}`
+      );
+    }
+
+    // =========================================================================
+    // SCENARIO 11: A realtime session's later turns hold: no reroute, no effort ratchet
+    // =========================================================================
+    {
+      const repeats = Math.max(1, Number(process.env.SCENARIO8_REPEATS || 20));
+      const rt = { realtime_loop: true };
+      const send = async (messages, extra = rt) => {
+        const r = await postChat({ model: "agentcompass/auto", messages, ...extra });
+        assert.equal(r.status, 200);
+        return lastUp();
+      };
+      let reroutes = 0;
+      let flaglessDrift = 0;
+      const rerouted = [];
+      const flaglessRoutes = {};
+      let first;
+      let ended;
+      for (let i = 0; i < repeats; i++) {
+        const opening = userMsg(`${DEBUG} [session ${i}]`);
+        const a = await send([opening]);
+        assert.equal(routedAs(a), "claude-opus-5-5:medium", `run ${i}: turn 1`);
+        // Tool loop step
+        const b = await send([
+          opening,
+          { role: "assistant", content: null, tool_calls: [{ id: "call_rt", type: "function", function: { name: "read_screen", arguments: "{}" } }] },
+          { role: "tool", tool_call_id: "call_rt", content: "frame 1" },
+        ]);
+        // Short follow-up
+        const c = await send([opening, { role: "assistant", content: "Acted. Continue?" }, userMsg("继续")]);
+        // A whole new turn that would route elsewhere on its own, and asks for high stakes work that would raise effort
+        const d = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)]);
+        const e = await send([
+          opening,
+          { role: "assistant", content: "Acted." },
+          userMsg(`Next, ${IDEATION}`),
+          { role: "assistant", content: "Acted again." },
+          userMsg("Now find the root cause of the deadlock across every module and prove the fix formally."),
+        ]);
+        const turns = { a, b, c, d, e };
+        const moved = Object.entries(turns).filter(([, u]) => routedAs(u) !== routedAs(a));
+        if (moved.length > 0) {
+          reroutes += moved.length;
+          rerouted.push({ run: i, moved: moved.map(([k, u]) => `${k}=${routedAs(u)}`) });
+        }
+        // A client that stops sending the flag: the gateway's pooled runtimes only know it from the body. Recorded, not asserted.
+        const f = await send([opening, { role: "assistant", content: "Acted." }, userMsg("继续")], {});
+        flaglessRoutes[routedAs(f)] = (flaglessRoutes[routedAs(f)] || 0) + 1;
+        if (routedAs(f) !== routedAs(a)) flaglessDrift += 1;
+        if (i === 0) first = Object.fromEntries(Object.entries(turns).map(([k, u]) => [k, routedAs(u)]));
+      }
+      assert.equal(reroutes, 0, `Later turns of a realtime session must hold turn 1's route: ${JSON.stringify(rerouted)}`);
+
+      // An explicit realtime_loop:false ends the session's realtime routing
+      const opening = userMsg(`${IDEATION} [session end]`);
+      const live = await send([opening]);
+      const off = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], { realtime_loop: false });
+      ended = { realtime: routedAs(live), afterFalse: routedAs(off) };
+      assert.equal(ended.realtime, "gpt-6-astra:medium");
+      assert.ok(!("realtime_loop" in off.body), "realtime_loop:false is for the router too");
+
+      // Anthropic protocol, turn 1 and a new turn
+      const anthOpening = userMsg(`${DEBUG} [session messages]`);
+      const anth1 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening], ...rt }, anthropicHeaders);
+      assert.equal(anth1.status, 200);
+      const anthA = lastUp();
+      const anth2 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], ...rt }, anthropicHeaders);
+      assert.equal(anth2.status, 200);
+      const anthB = lastUp();
+      assert.equal(anthA.model, "claude-opus-5-5");
+      assert.equal(routedAs(anthB), routedAs(anthA), "/v1/messages: the next turn holds");
+
+      report.scenarios.scenario11_realtime_session_hold = {
+        pass: true,
+        repeats,
+        reroutes,
+        turns: first,
+        flaglessFollowups: { routes: flaglessRoutes, differFromTurn1: flaglessDrift, asserted: false },
+        explicitFalse: ended,
+        anthropic: [routedAs(anthA), routedAs(anthB)],
+      };
+      report.steps.push({
+        test: "Scenario 11: a realtime session's later turns hold (tool loop, short follow-up, new turns), repeated on pooled runtimes",
+        ...report.scenarios.scenario11_realtime_session_hold,
+      });
+      console.log(
+        `[PASS] Scenario 11 (realtime session hold): ${repeats} sessions, ${reroutes} reroutes, turns ${JSON.stringify(first)}; flagless follow-ups ${JSON.stringify(flaglessRoutes)}; explicit false ${JSON.stringify(ended)}; /v1/messages ${routedAs(anthA)} -> ${routedAs(anthB)}`
+      );
+    }
+
+    // =========================================================================
+    // SCENARIO 12: A pinned slow model is kept, with a warning in Magpie's log
+    // =========================================================================
+    {
+      const rt = { realtime_loop: true };
+      const warningsLogged = () => magpieLogs.join("").split("\n").filter((l) => l.includes("[warn]") && l.includes("agentcompass: pinned"));
+      const awaitWarnings = async (n) => {
+        for (let i = 0; i < 25 && warningsLogged().length < n; i++) await new Promise((r) => setTimeout(r, 200));
+        return warningsLogged();
+      };
+      const route = async (content, extra = {}) => {
+        const r = await postChat({ model: "agentcompass/auto", messages: [userMsg(content)], ...extra });
+        assert.equal(r.status, 200);
+        return lastUp();
+      };
+      const before = warningsLogged().length;
+
+      // 12a. Argon high pinned: kept on a task it would win, and on one it would not
+      await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/gemini-4-argon-high" });
+      const argonIdeation = await route(`${IDEATION} [12a]`, rt);
+      assert.equal(routedAs(argonIdeation), "gemini-4-argon-high:high");
+      const argonDebug = await route(`${DEBUG} [12a]`, rt);
+      assert.equal(routedAs(argonDebug), "gemini-4-argon-high:high");
+      const argonLines = await awaitWarnings(before + 2);
+      assert.equal(argonLines.length, before + 2, `A pinned slow model must warn in Magpie's log on each route:\n${magpieLogs.join("").slice(-2000)}`);
+      assert.ok(argonLines[argonLines.length - 1].includes("gemini-4-argon-high"));
+      assert.ok(argonLines[argonLines.length - 1].includes("below the realtime_loop floor"));
+
+      // 12b. Pinned without realtime_loop: routing as if no pin existed, no warning
+      const pinnedPlain = await route(`${DEBUG} [12b]`);
+      assert.equal(routedAs(pinnedPlain), "claude-opus-5-5:xhigh");
+      await new Promise((r) => setTimeout(r, 300));
+      assert.equal(warningsLogged().length, before + 2, "Without realtime_loop a pin neither routes nor warns");
+
+      // 12c. A pinned slow effort is not stepped down
+      await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/claude-opus-5-5", pinnedEffort: "xhigh" });
+      const opusPinned = await route(`${DEBUG} [12c]`, rt);
+      assert.equal(routedAs(opusPinned), "claude-opus-5-5:xhigh");
+      const opusLines = await awaitWarnings(before + 3);
+      assert.equal(opusLines.length, before + 3);
+      assert.ok(opusLines[opusLines.length - 1].includes("claude-opus-5-5"));
+
+      // 12d. No pin: the same request is excluded and stepped down again (Scenario 10)
+      await setPluginOptions(basePluginOptions);
+      const unpinned = await route(`${IDEATION} [12d]`, rt);
+      assert.equal(routedAs(unpinned), "gpt-6-astra:medium");
+      assert.equal(warningsLogged().length, before + 3);
+
+      report.scenarios.scenario12_pinned_slow_model = {
+        pass: true,
+        pinnedArgonIdeation: routedAs(argonIdeation),
+        pinnedArgonDebug: routedAs(argonDebug),
+        pinWithoutRealtime: routedAs(pinnedPlain),
+        pinnedOpusXhigh: routedAs(opusPinned),
+        withoutPin: routedAs(unpinned),
+        warningLines: warningsLogged().slice(before),
+      };
+      report.steps.push({
+        test: "Scenario 12: a pinned slow model is kept with a warning in Magpie's log; without the pin it is excluded or stepped down",
+        ...report.scenarios.scenario12_pinned_slow_model,
+      });
+      console.log(
+        `[PASS] Scenario 12 (pinned slow model): Argon ${routedAs(argonIdeation)} / ${routedAs(argonDebug)}, opus ${routedAs(opusPinned)}, no pin ${routedAs(unpinned)}; log: ${warningsLogged()[before]}`
+      );
+    }
+
     // Save complete JSON report
     const reportPath = path.join(SANDBOX_ROOT, "e2e-report.json");
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
@@ -1277,6 +1820,9 @@ ${magpieLogs.join("").slice(-6000)}`);
   } finally {
     if (magpieProc && !magpieProc.killed) {
       magpieProc.kill("SIGTERM");
+    }
+    if (baselineProc && !baselineProc.killed) {
+      baselineProc.kill("SIGTERM");
     }
     upstreamServer.close();
     scorerServer.close();

@@ -879,8 +879,9 @@ export function keepsEffort(
   if (!sessionState || !sessionState.effort || !sessionState.model) {
     return wantedEffort || "medium";
   }
-  if (options?.realtimeLoop === true || options?.realtime_loop === true) {
-    return wantedEffort || "medium";
+  const explicitRealtime = [options?.realtimeLoop, options?.realtime_loop].find((v) => typeof v === "boolean");
+  if (explicitRealtime === true || (sessionState.realtimeLoop === true && explicitRealtime !== false)) {
+    return wantedEffort || sessionState.effort || "medium";
   }
   const ttlMs = coldAfterMs(sessionState.provider || sessionState.model, {
     ...sessionState,
@@ -915,6 +916,16 @@ export function keepsEffort(
 }
 
 /**
+ * `realtime_loop` as a turn should route it: the caller's explicit answer, else what the session was first routed with.
+ * `undefined` leaves the decision to the task profile, so a non-realtime session routes as it always has.
+ */
+export function effectiveRealtimeLoop(facts = {}, sessionState = null, options = {}) {
+  if (typeof facts?.realtime_loop === "boolean") return facts.realtime_loop;
+  if (typeof options?.realtime_loop === "boolean") return options.realtime_loop;
+  return sessionState?.realtimeLoop === true ? true : undefined;
+}
+
+/**
  * Detect whether a new user message clearly outgrows a lightweight tier model (`tier < 3.5`,
  * e.g. `claude-haiku-5-5`, `gpt-6-luna`, `gemini-3.8-flash-high`, `deepseek-v4.1-flash-free`, `grok-4.7`)
  * by requesting deep multi-module architecture, cross-runtime refactoring, or frontier debugging.
@@ -944,6 +955,7 @@ export function detectTierEscalationOutgrowth(text, currentSpec) {
  *   - `"followup"`: short user continuation nudge while session is active
  *   - `"cache"`: KV cache is worth holding (`>= 1024` tokens or `cached: true`) and still warm
  *   - `"session"`: `affinityMode === "session"` and model is healthy & within limits
+ *   - `"realtime_loop"`: the session was routed as `realtime_loop` and is still within its cache TTL
  *   - `"strict"`: `affinityMode === "strict"` and model is healthy
  *
  * Switch / Re-route reasons (`shouldHold: false`):
@@ -1150,15 +1162,15 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
   }
 
   // Realtime loop capability outgrowth on a new user turn when the session was not already routed for realtime_loop
-  const reqRealtimeLoop =
+  const reqRealtimeLoopFact =
     typeof facts.realtime_loop === "boolean"
       ? facts.realtime_loop
       : typeof options.realtime_loop === "boolean"
         ? options.realtime_loop
-        : false;
+        : undefined;
   if (
     affinityMode !== "strict" &&
-    reqRealtimeLoop &&
+    reqRealtimeLoopFact === true &&
     !sessionState.realtimeLoop
   ) {
     return {
@@ -1189,12 +1201,15 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     };
   }
 
-  // Tier escalation outgrowth: lightweight model (`tier < 3.5`) hit with a frontier/coupled task
+  const realtimeSession = sessionState.realtimeLoop === true && reqRealtimeLoopFact !== false;
+
+  // Tier escalation outgrowth: lightweight model (`tier < 3.5`) hit with a frontier/coupled task.
+  // The text heuristic stays out of a realtime session, which stays on its fast model.
   if (
     affinityMode !== "strict" &&
     affinityMode !== "session" &&
     (facts.demandsFrontierEscalation ||
-      detectTierEscalationOutgrowth(facts.turnText || facts.lastUserText || "", spec))
+      (!realtimeSession && detectTierEscalationOutgrowth(facts.turnText || facts.lastUserText || "", spec)))
   ) {
     return {
       shouldHold: false,
@@ -1277,6 +1292,21 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     return {
       shouldHold: true,
       why: "cache",
+      model: currentModel,
+      effort: sessionState.effort || "high",
+      provider: sessionState.provider || "",
+      previousModel: currentModel,
+      previousEffort: sessionState.effort || "high",
+      within: false,
+      turn: facts.turn || sessionState.turn || 1,
+    };
+  }
+
+  // A realtime session keeps its model and stepped-down effort across turns, however short they are
+  if (realtimeSession && withinCacheTtl) {
+    return {
+      shouldHold: true,
+      why: "realtime_loop",
       model: currentModel,
       effort: sessionState.effort || "high",
       provider: sessionState.provider || "",

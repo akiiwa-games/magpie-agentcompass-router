@@ -18,12 +18,13 @@
  *    and filter accounts, and exports `strategies["agentcompass"]` / `strategies["agentcompass-pure"]`.
  */
 
-import { selectBestRoute } from "./allocator.js";
+import { pinOptionsOf, selectBestRoute } from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
   bodyUpTo,
   computeSessionKey,
   defaultContinuityStore,
+  effectiveRealtimeLoop,
   evaluateProviderContinuation,
   keepsEffort,
   recentUserTurns,
@@ -39,6 +40,24 @@ const DEFAULT_VIRTUAL_MODELS = [
   "agentcompass/intent",
   "agentcompass/system-one-0.5",
 ];
+
+/**
+ * `realtime_loop` in a request is for the router: an upstream may refuse a field it does not know. Whether one was dropped.
+ */
+function dropRealtimeFlag(body) {
+  let dropped = false;
+  if (typeof body.realtime_loop === "boolean") {
+    delete body.realtime_loop;
+    dropped = true;
+  }
+  const needs = body.needs;
+  if (needs && typeof needs === "object" && typeof needs.realtime_loop === "boolean") {
+    delete needs.realtime_loop;
+    if (Object.keys(needs).length === 0) delete body.needs;
+    dropped = true;
+  }
+  return dropped;
+}
 
 function stripEffortSuffix(rawModel) {
   if (!rawModel || typeof rawModel !== "string") return "";
@@ -302,6 +321,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
     sessionState = replayedState(body, ctx, env, chain, sessionState, depth);
   }
   const anchor = chain?.stamp || "";
+  const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
+  const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
 
   const cont = evaluateProviderContinuation(facts, sessionState, {
     now,
@@ -324,6 +345,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
   });
 
   if (cont.shouldHold && cont.model) {
+    const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
     const heldEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
@@ -331,10 +353,14 @@ function routeClaimed(body, ctx, env, depth = 0) {
       now,
       {
         ...options,
+        ...realtimeOption,
         isShortFollowup: facts.isShortFollowup,
       }
     );
-    const target = heldTarget(cont.model, sessionState, candidateModels, options.catalog?.aliases);
+    const target =
+      heldRealtime && sessionState?.target
+        ? sessionState.target
+        : heldTarget(cont.model, sessionState, candidateModels, options.catalog?.aliases);
     return {
       facts,
       sessionKey,
@@ -344,6 +370,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         provider: cont.provider || sessionState?.provider || "",
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
+        realtimeLoop: heldRealtime,
         why: cont.why,
         held: true,
         anchor,
@@ -358,6 +385,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         hasExplicitCandidates,
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
+        realtimeLoop: heldRealtime,
         continuation: {
           held: true,
           why: cont.why,
@@ -387,6 +415,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
   }
   const minContextTokens = cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
+  const pins = pinOptionsOf(options);
   let decision = selectBestRoute(profile, {
     objective: facts.objective,
     candidateModels,
@@ -396,11 +425,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
     quotas: options.quotas,
     meteredOk: options.meteredOk,
     now,
-    ...(typeof facts.realtime_loop === "boolean"
-      ? { realtime_loop: facts.realtime_loop }
-      : typeof options.realtime_loop === "boolean"
-        ? { realtime_loop: options.realtime_loop }
-        : {}),
+    ...realtimeOption,
+    ...pins,
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -415,11 +441,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
       candidateModels,
       catalog: options.catalog,
       now,
-      ...(typeof facts.realtime_loop === "boolean"
-        ? { realtime_loop: facts.realtime_loop }
-        : typeof options.realtime_loop === "boolean"
-          ? { realtime_loop: options.realtime_loop }
-          : {}),
+      ...realtimeOption,
+      ...pins,
     });
   }
 
@@ -442,7 +465,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
-      options
+      { ...options, ...realtimeOption }
     );
   }
   decision.targetEffort = finalEffort;
@@ -496,7 +519,7 @@ export function onRequest(body, ctx = {}) {
       : null;
 
   if (!isClaimedModel && !stateRoute) {
-    return undefined;
+    return dropRealtimeFlag(body) ? body : undefined;
   }
 
   try {
@@ -563,13 +586,17 @@ export function onRequest(body, ctx = {}) {
         canRewriteModel,
       });
       decision = routed.decision;
+      // Magpie's log is where a gateway operator sees that a pinned model is too slow for a live loop
+      for (const warning of decision?.warnings || []) {
+        console.warn(`agentcompass: ${warning}`);
+      }
       if (routed.record && routed.sessionKey && decision?.targetModel) {
         store.recordRequest(routed.sessionKey, routed.record, routed.facts, now);
       }
     }
 
     if (!decision || !decision.targetModel) {
-      return undefined;
+      return dropRealtimeFlag(body) ? body : undefined;
     }
 
     ctx.state = ctx.state || {};
@@ -586,14 +613,15 @@ export function onRequest(body, ctx = {}) {
         applyProtocolEffortOnly(body, decision.targetEffort, ctx);
         return body;
       }
-      return undefined;
+      return dropRealtimeFlag(body) ? body : undefined;
     }
 
     applyRoutedModelAndEffort(body, decision, ctx);
     return body;
   } finally {
-    if (body && typeof body === "object" && !Array.isArray(body) && ROUTE_CARRIER_KEY in body) {
-      delete body[ROUTE_CARRIER_KEY];
+    if (body && typeof body === "object" && !Array.isArray(body)) {
+      if (ROUTE_CARRIER_KEY in body) delete body[ROUTE_CARRIER_KEY];
+      dropRealtimeFlag(body);
     }
   }
 }
