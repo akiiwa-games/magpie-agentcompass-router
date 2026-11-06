@@ -330,6 +330,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 18.7,
     context_window: 200000,
     disabled_by_default: true,
+    responsiveness: 0.588,
     efforts: ["low", "medium", "high", "xhigh", "max"],
     capabilities: {
       reasoning: 0.98,
@@ -352,6 +353,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 7.5,
     context_window: 200000,
     fast_capable: true,
+    responsiveness: 0.107,
     efforts: ["low", "medium", "high", "xhigh", "max"],
     capabilities: {
       reasoning: 0.89,
@@ -374,6 +376,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 22.6,
     context_window: 400000,
     fast_capable: true,
+    responsiveness: 0,
     efforts: ["low", "medium", "high", "xhigh", "max"],
     capabilities: {
       reasoning: 0.8,
@@ -396,6 +399,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 4.0,
     context_window: 1000000,
     duration_multiplier: 1.35,
+    responsiveness: 0,
     burn_pct_per_worker_hour: {
       "gemini-weekly": 0.62,
       "gemini-5h": 2.13,
@@ -421,6 +425,7 @@ export const DEFAULT_MODELS = {
     visual: 0.6,
     usd_per_hour: 4.4,
     context_window: 200000,
+    responsiveness: 0.701,
     efforts: ["low", "medium", "high", "xhigh", "max"],
     capabilities: {
       reasoning: 0.74,
@@ -443,6 +448,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 3.0,
     context_window: 500000,
     fast_capable: true,
+    responsiveness: 0.65,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.73,
@@ -466,6 +472,7 @@ export const DEFAULT_MODELS = {
     context_window: 400000,
     duration_multiplier: 1.35,
     fast_capable: true,
+    responsiveness: 0,
     efforts: ["low", "medium", "high", "xhigh", "max"],
     capabilities: {
       reasoning: 0.71,
@@ -488,6 +495,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 2.6,
     context_window: 272000,
     fast_capable: true,
+    responsiveness: 0.733,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.69,
@@ -509,6 +517,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 1.5,
     context_window: 131072,
+    responsiveness: 0.201,
     efforts: ["low", "high", "xhigh"],
     capabilities: {
       reasoning: 0.59,
@@ -530,6 +539,7 @@ export const DEFAULT_MODELS = {
     visual: 0.48,
     usd_per_hour: 0.8,
     context_window: 200000,
+    responsiveness: 0.439,
     efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.58,
@@ -552,6 +562,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 0.8,
     context_window: 272000,
     fast_capable: true,
+    responsiveness: 0.664,
     efforts: ["low", "medium", "high"],
     capabilities: {
       reasoning: 0.58,
@@ -573,6 +584,7 @@ export const DEFAULT_MODELS = {
     visual: 0.3,
     usd_per_hour: 0.5,
     context_window: 1000000,
+    responsiveness: 0.486,
     efforts: ["medium", "high"],
     capabilities: {
       reasoning: 0.52,
@@ -595,6 +607,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 0.0,
     context_window: 64000,
     disabled_by_default: true,
+    responsiveness: 0.46,
     efforts: ["low", "high", "max"],
     capabilities: {
       reasoning: 0.48,
@@ -617,6 +630,8 @@ export const DEFAULT_MODELS = {
     excluded_when: "local_only",
     text_only: true,
     disabled_by_default: true,
+    responsiveness: "not_applicable",
+    responsiveness_status: "not_applicable",
     efforts: ["high"],
     capabilities: {
       reasoning: 0.89,
@@ -638,6 +653,8 @@ export const DEFAULT_MODELS = {
     visual: false,
     excluded_when: "local_only",
     disabled_by_default: true,
+    responsiveness: "not_applicable",
+    responsiveness_status: "not_applicable",
     efforts: ["high"],
     capabilities: {
       reasoning: 0.8,
@@ -660,6 +677,7 @@ export const DEFAULT_MODELS = {
     advisor_only: true,
     advisor_for: ["direction_reasoning", "complex_build_plan"],
     disabled_by_default: true,
+    responsiveness_status: "missing",
     efforts: ["max"],
     capabilities: {
       reasoning: 1.0,
@@ -682,6 +700,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 2.4,
     context_window: 272000,
     disabled_by_default: true,
+    responsiveness: 0.663,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.67,
@@ -704,6 +723,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 2.7,
     context_window: 272000,
     disabled_by_default: true,
+    responsiveness: 0.737,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.69,
@@ -726,6 +746,7 @@ export const DEFAULT_MODELS = {
     usd_per_hour: 0.7,
     context_window: 272000,
     disabled_by_default: true,
+    responsiveness: 0.637,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.55,
@@ -747,6 +768,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 0.5,
     disabled_by_default: true,
+    responsiveness_status: "missing",
     efforts: ["high"],
     capabilities: {
       reasoning: 0.54,
@@ -768,6 +790,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 1.2,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.78,
@@ -789,6 +812,7 @@ export const DEFAULT_MODELS = {
     visual: 0.6,
     usd_per_hour: 1.0,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.72,
@@ -810,6 +834,7 @@ export const DEFAULT_MODELS = {
     visual: 0.4,
     usd_per_hour: 0,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.5,
@@ -831,6 +856,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 1.0,
     disabled_by_default: true,
+    responsiveness: 0.923,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.7,
@@ -852,6 +878,7 @@ export const DEFAULT_MODELS = {
     visual: 0.65,
     usd_per_hour: 1.5,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.78,
@@ -873,6 +900,7 @@ export const DEFAULT_MODELS = {
     visual: 0.68,
     usd_per_hour: 1.8,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.79,
@@ -894,6 +922,7 @@ export const DEFAULT_MODELS = {
     visual: 0.62,
     usd_per_hour: 1.2,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.74,
@@ -915,6 +944,7 @@ export const DEFAULT_MODELS = {
     visual: 0.6,
     usd_per_hour: 1.0,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.73,
@@ -936,6 +966,7 @@ export const DEFAULT_MODELS = {
     visual: 0.55,
     usd_per_hour: 0.6,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.66,
@@ -957,6 +988,7 @@ export const DEFAULT_MODELS = {
     visual: 0.65,
     usd_per_hour: 0.8,
     disabled_by_default: true,
+    responsiveness_status: "missing",
     efforts: ["high"],
     capabilities: {
       reasoning: 0.72,
@@ -978,6 +1010,7 @@ export const DEFAULT_MODELS = {
     visual: 0.6,
     usd_per_hour: 0.8,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.72,
@@ -999,6 +1032,7 @@ export const DEFAULT_MODELS = {
     visual: 0.4,
     usd_per_hour: 0,
     disabled_by_default: true,
+    responsiveness: 0,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.51,
@@ -1020,6 +1054,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 0,
     disabled_by_default: true,
+    responsiveness: 0.86,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.65,
@@ -1041,6 +1076,7 @@ export const DEFAULT_MODELS = {
     visual: 0.65,
     usd_per_hour: 0,
     disabled_by_default: true,
+    responsiveness: 0.7,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.62,
@@ -1062,6 +1098,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 0,
     disabled_by_default: true,
+    responsiveness: 0.64,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.5,
@@ -1083,6 +1120,7 @@ export const DEFAULT_MODELS = {
     visual: 0.65,
     usd_per_hour: 1.2,
     disabled_by_default: true,
+    responsiveness: 0.273,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.74,
@@ -1104,6 +1142,7 @@ export const DEFAULT_MODELS = {
     visual: 0.72,
     usd_per_hour: 1.5,
     disabled_by_default: true,
+    responsiveness: 0.786,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.77,
@@ -1125,6 +1164,7 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 0,
     disabled_by_default: true,
+    responsiveness: 0.849,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.53,
@@ -1146,6 +1186,8 @@ export const DEFAULT_MODELS = {
     visual: false,
     usd_per_hour: 0,
     disabled_by_default: true,
+    score_estimated: true,
+    responsiveness: 0.964,
     efforts: ["high"],
     capabilities: {
       reasoning: 0.48,
@@ -1264,54 +1306,158 @@ export const EFFORT_CURVES = {
   "deepseek-v4.1-flash-free": {
     ability: { high: 0, max: 0.2 },
     burn: { high: 0.7, max: 0.91 },
+    responsiveness: { none: 1, high: 0.46, max: 0 },
   },
   "claude-opus-5-5": {
     ability: { low: -0.84, medium: -0.2, high: 0, xhigh: 0.25, max: 0.35 },
     burn: { low: 0.2, medium: 0.5, high: 0.7, xhigh: 1.22, max: 2.03 },
+    responsiveness: { low: 0.851, medium: 0.53, high: 0.107, xhigh: 0, max: 0 },
   },
   "claude-sonnet-5-5": {
     ability: { low: -0.79, medium: -0.54, high: 0, xhigh: 0.4, max: 0.64 },
     burn: { low: 0.22, medium: 0.33, high: 0.7, xhigh: 1.75, max: 4.28 },
+    responsiveness: { low: 0.937, medium: 0.898, high: 0.701, xhigh: 0.227, max: 0 },
   },
   "gpt-6-astra": {
     ability: { low: -0.59, medium: -0.15, high: 0, xhigh: 0, max: 0.1 },
     burn: { low: 0.31, medium: 0.59, high: 0.7, xhigh: 0.79, max: 1.35 },
+    responsiveness: { low: 0.777, medium: 0.719, high: 0, xhigh: 0, max: 0 },
   },
   "gpt-6.1-sol": {
     ability: { low: -0.74, medium: -0.2, high: 0, xhigh: 0.1, max: 0.25 },
     burn: { low: 0.19, medium: 0.43, high: 0.7, xhigh: 0.9, max: 1.51 },
+    responsiveness: { low: 0.846, medium: 0.754, high: 0, xhigh: 0, max: 0 },
   },
   "grok-4.7": {
     ability: { low: -0.2, high: 0, xhigh: 0 },
     burn: { low: 0.33, high: 0.7, xhigh: 0.88 },
+    responsiveness: { low: 0.744, high: 0.201, xhigh: 0 },
   },
   "gemini-3.8-flash-high": {
     ability: { low: -0.4, medium: -0.05, high: 0 },
     burn: { medium: 0.56, high: 0.7 },
+    responsiveness: { low: 0.911, medium: 0.813, high: 0.486 },
   },
   "gemini-4-argon-high": {
     ability: { low: -0.3, medium: -0.1, high: 0 },
     burn: { low: 0.63, medium: 0.7, high: 0.7 },
+    responsiveness: { high: 0 },
   },
   "claude-haiku-5-5": {
     ability: { low: -0.54, medium: -0.25, high: 0, xhigh: 0.25, max: 0.3 },
     burn: { low: 0.17, medium: 0.39, high: 0.7, xhigh: 1.09, max: 1.79 },
+    responsiveness: { low: 0.824, medium: 0.774, high: 0.439, xhigh: 0, max: 0 },
   },
   "gpt-6.1-terra": {
     ability: { low: -0.64, medium: -0.2, high: 0, xhigh: 0.15, max: 0.45 },
     burn: { low: 0.19, medium: 0.46, high: 0.7, xhigh: 1.08, max: 2.58 },
+    responsiveness: { none: 0.918, low: 0.9, medium: 0.836, high: 0.65, xhigh: 0.037, max: 0 },
   },
   "gpt-6-luna": {
     ability: { low: -0.54, medium: -0.15, high: 0, xhigh: 0.1, max: 0.35 },
     burn: { low: 0.1, medium: 0.4, high: 0.7, xhigh: 1.0, max: 1.5 },
+    responsiveness: { none: 0.959, low: 0.926, medium: 0.777, high: 0.664, xhigh: 0.374, max: 0 },
   },
   "claude-fable-5-1": {
     ability: { low: -0.4, medium: -0.2, high: 0, xhigh: 0.15, max: 0.15 },
     burn: { low: 0.41, medium: 0.52, high: 0.7, xhigh: 1.01, max: 1.21 },
+    responsiveness: { low: 0.765, medium: 0.734, high: 0.588, xhigh: 0, max: 0 },
   },
   "gemini-4-carbon": {
     ability: { low: -0.3, medium: -0.1, high: 0 },
     burn: { low: 0.65, medium: 0.59, high: 0.7 },
+    responsiveness: { low: 0.643, medium: 0.193, high: 0 },
+  },
+};
+
+export const EFFORT_RESPONSIVENESS = {
+  "claude-opus-4-6": { none: 0.853, max: 0 },
+  "claude-sonnet-4-6": { none: 0.849, low: 0.874, max: 0 },
+  "claude-haiku-4-5": { none: 0.978, default: 0 },
+  "deepseek-v4.1-flash-free": { none: 1, high: 0.46, max: 0 },
+  "claude-opus-5-5": { low: 0.851, medium: 0.53, high: 0.107, xhigh: 0, max: 0 },
+  "claude-sonnet-5-5": { low: 0.937, medium: 0.898, high: 0.701, xhigh: 0.227, max: 0 },
+  "gpt-6-astra": { low: 0.777, medium: 0.719, high: 0, xhigh: 0, max: 0 },
+  "gpt-6.1-sol": { low: 0.846, medium: 0.754, high: 0, xhigh: 0, max: 0 },
+  "grok-4.7": { low: 0.744, high: 0.201, xhigh: 0 },
+  "gemini-3.8-flash-high": { low: 0.911, medium: 0.813, high: 0.486 },
+  "gemini-4-argon-high": { high: 0 },
+  "claude-haiku-5-5": { low: 0.824, medium: 0.774, high: 0.439, xhigh: 0, max: 0 },
+  "gpt-6.1-terra": { none: 0.918, low: 0.9, medium: 0.836, high: 0.65, xhigh: 0.037, max: 0 },
+  "gpt-6-sol": { none: 0.977, low: 0.943, high: 0.733, xhigh: 0.444, max: 0 },
+  "gpt-6-luna": { none: 0.959, low: 0.926, medium: 0.777, high: 0.664, xhigh: 0.374, max: 0 },
+  "gpt-5.6-sol": { none: 0.962, low: 0.914, medium: 0.842, high: 0.663, xhigh: 0.327, max: 0 },
+  "gpt-5.6-terra": { none: 0.966, low: 0.901, medium: 0.92, high: 0.737, xhigh: 0.367, max: 0 },
+  "gpt-5.6-luna": { none: 0.963, low: 0.92, medium: 0.892, high: 0.637, xhigh: 0.113, max: 0 },
+  "deepseek-v4-pro": { none: 0.912, max: 0 },
+  "glm-5.3": { low: 0.614, max: 0 },
+  "glm-5.3-flash-free": { max: 0 },
+  "qwen3-coder-next": { none: 0.923 },
+  "qwen3.8-max": { default: 0, xhigh: 0 },
+  "kimi-k3.1-pro": { max: 0 },
+  "kimi-k3": { low: 0.432, max: 0 },
+  "minimax-m3": { default: 0 },
+  "minimax-m3.1-flash": { max: 0 },
+  "mimo-v2.6-pro": { default: 0 },
+  "mimo-v2.6-flash-free": { default: 0 },
+  "nemotron-3-ultra-free": { default: 0.86 },
+  "nemotron-3.5-super-vl-free": { high: 0.7 },
+  "nemotron-3.5-lightning-free": { default: 0.64 },
+  "mistral-large-4": { medium: 0.616, high: 0.273 },
+  "muse-wonder-1.0": { high: 0.786, max: 0.483 },
+  "beam-free": { default: 0.849 },
+  "flint-40b-free": { default: 0.964 },
+  "claude-fable-5-1": { low: 0.765, medium: 0.734, high: 0.588, xhigh: 0, max: 0 },
+  "gemini-4-carbon": { low: 0.643, medium: 0.193, high: 0 },
+  "glm-5.2": { none: 0.999, max: 0 },
+  "gpt-oss-120b": { low: 0.981, high: 0.65 },
+  "gemini-3.1-flash-lite": { high: 0.721 },
+  "kimi-k2.7-code": { default: 0 },
+  "qwen3.6-plus": { default: 0 },
+  "claude-opus-4-7": { none: 0.929, max: 0 },
+  "claude-opus-4-8": { max: 0.051 },
+  "grok-4.5": { high: 0.66 },
+  "grok-4.6": { low: 0.675, medium: 0.348, high: 0.129, xhigh: 0.145 },
+  "gemini-3.1-pro-preview": { default: 0.573 },
+  "gemini-3.7-flash": { default: 0.935 },
+  "kimi-k2.6": { none: 0.682, default: 0 },
+  "qwen3.7-max": { default: 0.673 },
+};
+
+export const DISPATCH_EFFORTS = {
+  grok: {
+    "grok-4.7": ["low", "high", "xhigh"],
+    "grok-4.7-build-fast": ["high"],
+  },
+  claude: {
+    "claude-opus-4-6": ["high"],
+    "claude-sonnet-4-6": ["high"],
+    "claude-haiku-4-5": ["high"],
+    "claude-opus-5-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-sonnet-5-5": ["low", "medium", "high", "xhigh", "max"],
+    "claude-fable-5-1": ["low", "medium", "high", "xhigh", "max"],
+    "claude-haiku-5-5": ["high"],
+  },
+  codex: {
+    "gpt-6-pro": ["high"],
+    "gpt-6-astra": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-6.1-sol": ["low", "medium", "high", "xhigh", "max", "ultra"],
+    "gpt-6.1-terra": ["high"],
+    "gpt-6-sol": ["high"],
+    "gpt-6-luna": ["high"],
+    "gpt-5.6-sol": ["high"],
+    "gpt-5.6-terra": ["high"],
+    "gpt-5.6-luna": ["high"],
+  },
+  opencode: {
+    "deepseek-v4.1-flash-free": ["default", "low", "high", "max"],
+  },
+  "antigravity-resilient": {
+    "claude-opus-5-5": ["low", "medium", "high"],
+    "claude-sonnet-5-5": ["low", "medium", "high"],
+  },
+  omp: {
+    "glm-5.2": ["high", "max"],
   },
 };
 
@@ -1404,6 +1550,31 @@ export const DEFAULT_SCORING_POLICY = {
     frontier: 4.2,
   },
   ability_span: 0.6,
+  responsiveness: {
+    floor: 0.5,
+    default: 0.52,
+    weight: 0.35,
+    fast_turn_seconds: 4.0,
+    slow_turn_seconds: 45.0,
+    output_tokens_per_turn: 400,
+    harness_overhead: {
+      default: 1.0,
+      antigravity: 1.0,
+      "antigravity-resilient": 1.0,
+      codex: 1.0,
+      claude: 1.0,
+      pi: 1.0,
+      opencode: 1.0,
+      grok: 1.0,
+    },
+    local_telemetry: {
+      min_samples: 20,
+      max_blend: 0.3,
+      max_shift: 0.15,
+    },
+    basis:
+      "Per-turn live-loop latency model calibrated on Artificial Analysis (AA) 2026-11-06 speed data (OpenRouter fallback only when AA speed is absent): T_turn = (ttft_s + output_tokens_per_turn / output_tps) * harness_overhead[harness], with output_tokens_per_turn = 400. AA ttft_s is headline.timeToFirstAnswerToken (which already includes single-turn thinking time; reasoning_tokens_per_turn is the 9-benchmark suite total and is never added to T_turn). Mapped linearly from [fast_turn_seconds=4.0s -> 1.0, slow_turn_seconds=45.0s -> 0.0] and stored per effort in effort_curves.<model>.responsiveness. On realtime_loop tasks, floor=0.50 (T_turn <= 24.5s) is evaluated per (model, effort): bundles whose configured effort is below floor step down to the highest faster supported effort that clears both floor and the task ability gate; models with no effort clearing floor (e.g. Gemini 4 Argon High at 46.2s -> 0.000) or marked not_applicable (grok-bot, dot) are excluded as too slow per turn for a live loop, while Sonnet 5.5 (low 6.6s / medium 8.2s / high 16.3s), Sol 6.1 (low 10.3s / medium 14.1s), Astra (low 13.1s / medium 15.5s), Luna (5.7-17.8s), Flash 3.8 (low 7.6s / medium 11.7s), Opus 5.5 (low 10.1s / medium 23.3s), Grok 4.7 (low 14.5s) and DeepSeek V4 Pro (none 7.6s) pass at their fast/medium efforts. Models without community speed data receive conservative default=0.52 (above floor so not excluded, below measured fast models so ranked behind them) and mark responsiveness: default.",
+  },
   effort_unlock_difficulties: ["coupled", "frontier"],
   critical_headroom: 0.3,
   critical_headroom_by_difficulty: {
@@ -1518,21 +1689,37 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
 
 export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
   const name = canonicalModel(rawModel, aliases);
+  const fuzzySpec = (canonical) => {
+    const base = models[canonical];
+    if (!base) return { canonical, spec: base, fuzzyMatch: true };
+    const { responsiveness, responsiveness_basis, responsiveness_status, speed_metrics, ...rest } = base;
+    Object.defineProperty(rest, "fuzzyMatch", { value: true, enumerable: false, configurable: true });
+    return { canonical, spec: rest, fuzzyMatch: true };
+  };
+  const rawLeaf = String(rawModel || "")
+    .trim()
+    .replace(/\[1m\]$/i, "")
+    .replace(/:(?:none|off|minimal|low|medium|high|xhigh|max|ultra|auto)$/i, "")
+    .split("/")
+    .pop();
+  if (rawLeaf && !(rawLeaf in models) && /(?:@\d{8}|-\d{8}|-(?:latest|preview))$/i.test(rawLeaf) && models[name]) {
+    return fuzzySpec(name);
+  }
   if (models[name]) return { canonical: name, spec: models[name] };
   // Fuzzy family fallback for provider-specific or date-suffixed model IDs
   const lower = name.toLowerCase();
-  if (lower.includes("opus")) return { canonical: "claude-opus-5-5", spec: models["claude-opus-5-5"] };
-  if (lower.includes("fable")) return { canonical: "claude-fable-5-1", spec: models["claude-fable-5-1"] };
-  if (lower.includes("sonnet")) return { canonical: "claude-sonnet-5-5", spec: models["claude-sonnet-5-5"] };
-  if (lower.includes("haiku")) return { canonical: "claude-haiku-5-5", spec: models["claude-haiku-5-5"] };
+  if (lower.includes("opus")) return fuzzySpec("claude-opus-5-5");
+  if (lower.includes("fable")) return fuzzySpec("claude-fable-5-1");
+  if (lower.includes("sonnet")) return fuzzySpec("claude-sonnet-5-5");
+  if (lower.includes("haiku")) return fuzzySpec("claude-haiku-5-5");
   if (lower.includes("argon") || (lower.includes("gemini") && (lower.includes("pro") || lower.includes("ultra")))) {
-    return { canonical: "gemini-4-argon-high", spec: models["gemini-4-argon-high"] };
+    return fuzzySpec("gemini-4-argon-high");
   }
   if (lower.includes("flash") || lower.includes("lite")) {
-    return { canonical: "gemini-3.8-flash-high", spec: models["gemini-3.8-flash-high"] };
+    return fuzzySpec("gemini-3.8-flash-high");
   }
   if (lower.includes("luna") || lower.includes("mini") || lower.includes("nano")) {
-    return { canonical: "gpt-6-luna", spec: models["gpt-6-luna"] };
+    return fuzzySpec("gpt-6-luna");
   }
   if (
     lower.includes("astra") ||
@@ -1541,9 +1728,9 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
     lower.includes("gpt-6-pro") ||
     /^o[13]\b/.test(lower)
   ) {
-    return { canonical: "gpt-6-astra", spec: models["gpt-6-astra"] };
+    return fuzzySpec("gpt-6-astra");
   }
-  if (lower.includes("terra")) return { canonical: "gpt-6.1-terra", spec: models["gpt-6.1-terra"] };
+  if (lower.includes("terra")) return fuzzySpec("gpt-6.1-terra");
   if (
     lower.includes("sol") ||
     lower.includes("codex") ||
@@ -1551,15 +1738,16 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
     lower.includes("gpt-4o") ||
     /^o4\b/.test(lower)
   ) {
-    return { canonical: "gpt-6.1-sol", spec: models["gpt-6.1-sol"] };
+    return fuzzySpec("gpt-6.1-sol");
   }
-  if (lower.includes("grok")) return { canonical: "grok-4.7", spec: models["grok-4.7"] };
+  if (lower.includes("grok")) return fuzzySpec("grok-4.7");
   if (lower.includes("deepseek") && (lower.includes("r1") || lower.includes("reasoner") || lower.includes("v3") || lower.includes("pro"))) {
-    return { canonical: "deepseek-v4-pro", spec: models["deepseek-v4-pro"] };
+    return fuzzySpec("deepseek-v4-pro");
   }
-  if (lower.includes("deepseek")) return { canonical: "deepseek-v4.1-flash-free", spec: models["deepseek-v4.1-flash-free"] };
+  if (lower.includes("deepseek")) return fuzzySpec("deepseek-v4.1-flash-free");
   return {
     canonical: name || "unknown",
+    fuzzyMatch: true,
     spec: {
       tier: 3.6,
       cost: 2,

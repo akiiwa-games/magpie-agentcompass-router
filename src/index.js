@@ -358,10 +358,16 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     };
   }
 
+  const rawTaskObj = state.task && typeof state.task === "object" ? state.task : {};
   const taskFacts = {
     objective: turnText,
     previousUser: prevUser,
-    hasVisualInput: Boolean(state.has_visual_input),
+    hasVisualInput: Boolean(state.has_visual_input ?? rawTaskObj.hasVisualInput),
+    ...(state.realtime_loop !== undefined
+      ? { realtime_loop: state.realtime_loop }
+      : rawTaskObj.realtime_loop !== undefined
+        ? { realtime_loop: rawTaskObj.realtime_loop }
+        : {}),
   };
 
   const scorerCfg =
@@ -451,7 +457,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       answers[dim] = { score: Math.max(0, (profile[dim] ?? low) - low) };
     }
   }
-  for (const flag of ["needs_visual", "needs_gui", "local_only"]) {
+  for (const flag of ["needs_visual", "needs_gui", "local_only", "realtime_loop"]) {
     if (questions[flag] && !answers[flag]) {
       answers[flag] = { noul: profile[flag] ? 0.95 : 0.05 };
     }

@@ -23,7 +23,127 @@ export const PROFILE_INTEGERS = {
   error_cost: [1, 3],
 };
 
-export const PROFILE_FLAGS = ["needs_visual", "needs_gui", "local_only"];
+export const PROFILE_FLAGS = ["needs_visual", "needs_gui", "local_only", "realtime_loop"];
+
+export const REALTIME_LOOP_QUESTION =
+  "True ONLY when the worker agent itself must stay inside a running external system's continuous observe-act loop across turns where slow per-turn model latency directly degrades the live outcome (e.g. personally playing a live game / dailies / dungeons / AFK loop, sniping tickets / courses / appointments / flash sales live, watching a live order book or API stream and placing orders in real time, polling a live page / app / API to act immediately when a state appears, interacting with live-stream chat). False for ALL software engineering, design, debugging, or analysis tasks—even when the subject matter is real-time, polling, games, dashboards, or flash sales (e.g. writing or fixing a ticket/game/automation script or bot, implementing real-time page refresh or message push, fixing page polling logic, designing a live trading dashboard frontend, diagnosing client loop waits or refresh latency, adding a countdown modal or live chat component, fixing flash-sale page CSS, analyzing game/AFK logs, or a one-off GUI click/setting toggle).";
+
+export const MULTI_TASK_QUESTION =
+  "True when the brief bundles more than one separate task: deliverables that different workers could produce at the same time without waiting for each other's result (e.g. collect reference images, compare game engines, design the gameplay loop). False for one task, however many steps: investigate-fix-test-release, implement plus its tests, a review plus its report, the remaining steps of a handoff, a brief that already assigns one share of a larger task, or a sequence where each part needs the previous part's output.";
+
+export const TASK_COUNT_QUESTION =
+  "How many separate tasks, in the sense of multi_task, the brief holds: 1 when multi_task is false.";
+
+export const TASK_PROFILE_SCHEMA = {
+  type: "object",
+  properties: {
+    work_kind: {
+      type: "string",
+      enum: Object.keys(KIND_TRAITS),
+      description: "Primary work category.",
+    },
+    reasoning_depth: {
+      type: "integer",
+      minimum: 1,
+      maximum: 4,
+      description:
+        "How hard the thinking is, not how long the brief is. 1 = routine or direct execution with obvious steps; 2 = standard engineering or analysis with a clear direction; 3 = cross-module architectural design/refactor, subtle concurrency or distributed-invariant debugging; 4 = frontier mathematical, strategic or architectural critique and formulation.",
+    },
+    code_complexity: {
+      type: "integer",
+      minimum: 0,
+      maximum: 3,
+      description:
+        "Production code the worker itself writes or modifies (NOT the complexity of code being read or reviewed). 0 = none (read-only review/audit, CLI commands, log/data exploration, text drafting); 1 = small script, config/constant tweak, localized helper; 2 = production module implemented, fixed or refactored with unit tests; 3 = complex multi-module, concurrency, protocol or core-library changes.",
+    },
+    context_scale: {
+      type: "integer",
+      minimum: 1,
+      maximum: 3,
+      description:
+        "Functional scope of the code or system that must be understood, NOT the number of paths the brief mentions. 1 = one module/component or one subsystem's runbook; 2 = several coupled functional modules or subsystems; 3 = whole-repository or cross-system architecture.",
+    },
+    divergence: {
+      type: "integer",
+      minimum: 1,
+      maximum: 3,
+      description:
+        "1 = convergent (known target, spec, checklist, review scope or identified bug cause); 2 = multi-hypothesis (unknown root cause or comparing design options); 3 = open-ended/creative (formulate a new scheme, creative ideation, or first-principles architecture redesign).",
+    },
+    hallucination_risk: {
+      type: "integer",
+      minimum: 1,
+      maximum: 3,
+      description:
+        "1 = a compiler, unit test or script deterministically verifies the result; 2 = mixed engineering plus judgment; 3 = a fabricated claim or missed defect would not be caught by a test runner.",
+    },
+    error_cost: {
+      type: "integer",
+      minimum: 1,
+      maximum: 3,
+      description:
+        "1 = low (read-only, sandboxed, can be rerun); 2 = medium; 3 = high (production release or a critical irreversible operation).",
+    },
+    needs_visual: {
+      type: "boolean",
+      description: "True when the work must look at images, screenshots or other visual input.",
+    },
+    needs_gui: {
+      type: "boolean",
+      description: "True when the work must operate a desktop or browser GUI through screenshots, mouse and keyboard.",
+    },
+    local_only: {
+      type: "boolean",
+      description:
+        "True when the task explicitly depends on existing files, directories, or repositories on this machine or on local processes/GUI/environment.",
+    },
+    realtime_loop: {
+      type: "boolean",
+      description: REALTIME_LOOP_QUESTION,
+    },
+    interaction_style: {
+      type: "string",
+      enum: [...INTERACTION_STYLES],
+      description:
+        "engineering = write or change software; exploration = explore a codebase, run experiments or backtests, analyze logs or data; text_only = pure text in and out or public web lookup; advisory = direction reasoning or complex build planning.",
+    },
+    expected_hours: {
+      type: "number",
+      minimum: 0.05,
+      maximum: 24.0,
+      description: "Active worker-hours this task needs at an ordinary agent pace.",
+    },
+    hours_confidence: {
+      type: "string",
+      enum: ["low", "medium", "high"],
+      description: "How well the text supports expected_hours.",
+    },
+    urgency: {
+      type: "string",
+      enum: ["unknown", "low", "normal", "high"],
+      description: "unknown unless the text itself states a deadline, an incident or 'asap'.",
+    },
+    multi_task: {
+      type: "boolean",
+      description: MULTI_TASK_QUESTION,
+    },
+    task_count: {
+      type: "string",
+      enum: ["1", "2", "3", ">3"],
+      description: TASK_COUNT_QUESTION,
+    },
+  },
+  required: [
+    ...Object.keys(PROFILE_INTEGERS),
+    ...PROFILE_FLAGS,
+    "expected_hours",
+    "hours_confidence",
+    "urgency",
+    "interaction_style",
+    "multi_task",
+    "task_count",
+  ],
+};
 
 export const DIVERGENT_WORDS = [
   "brainstorm",
@@ -633,7 +753,18 @@ export function validateProfile(raw) {
     profile[name] = val;
   }
   for (const flag of PROFILE_FLAGS) {
-    profile[flag] = Boolean(raw[flag]);
+    if (flag === "realtime_loop") {
+      if ("realtime_loop" in raw && raw.realtime_loop !== undefined) {
+        if (typeof raw.realtime_loop !== "boolean") {
+          throw new Error("task.profile.realtime_loop must be true or false");
+        }
+        profile.realtime_loop = raw.realtime_loop;
+      } else {
+        profile.realtime_loop = false;
+      }
+    } else {
+      profile[flag] = Boolean(raw[flag]);
+    }
   }
   const style = raw.interaction_style || "engineering";
   if (!INTERACTION_STYLES.includes(style)) {
@@ -677,9 +808,18 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     }
   }
   const gui =
-    kind === "computer_use" ||
-    Boolean(needs.gui) ||
-    (kind === "other_or_mixed" && GUI_WORDS.some((w) => lowerObj.includes(w)));
+    needs.gui !== undefined && needs.gui !== null
+      ? Boolean(needs.gui)
+      : task.needs_gui !== undefined && task.needs_gui !== null
+        ? Boolean(task.needs_gui)
+        : kind === "computer_use" ||
+          (kind === "other_or_mixed" && GUI_WORDS.some((w) => lowerObj.includes(w)));
+  const realtimeLoop =
+    "realtime_loop" in needs && needs.realtime_loop !== undefined && needs.realtime_loop !== null
+      ? Boolean(needs.realtime_loop)
+      : "realtime_loop" in task && task.realtime_loop !== undefined && task.realtime_loop !== null
+        ? Boolean(task.realtime_loop)
+        : false;
 
   if (depth >= 3) {
     context = Math.max(context, 2);
@@ -697,7 +837,17 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
   const evidence = `${objective} ${capProfileText(task.context || "", 1000)} ${String(task.cwd || "").slice(0, 500)}`;
   const localHit = OBJECTIVE_LOCAL_RUNTIME_RE.test(evidence) || LOCAL_MACHINE_RE.test(evidence);
   const localOnly =
-    needs.local_only !== undefined ? Boolean(needs.local_only) : Boolean(localHit || implies.local_only);
+    needs.local_only !== undefined && needs.local_only !== null
+      ? Boolean(needs.local_only)
+      : task.local_only !== undefined && task.local_only !== null
+        ? Boolean(task.local_only)
+        : Boolean(localHit || implies.local_only);
+  const needsVisual =
+    needs.visual !== undefined && needs.visual !== null
+      ? Boolean(needs.visual)
+      : task.needs_visual !== undefined && task.needs_visual !== null
+        ? Boolean(task.needs_visual)
+        : Boolean(task.hasVisualInput || implies.visual || gui);
 
   const expectedHours =
     Number.isFinite(Number(task.expected_hours ?? task.hours)) && Number(task.expected_hours ?? task.hours) > 0
@@ -725,9 +875,10 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     divergence,
     hallucination_risk: risk,
     error_cost: cost,
-    needs_visual: Boolean(needs.visual || task.hasVisualInput || implies.visual || gui),
+    needs_visual: needsVisual,
     needs_gui: gui,
     local_only: localOnly,
+    realtime_loop: realtimeLoop,
     interaction_style: style,
     expected_hours: expectedHours,
     hours_confidence: "medium",

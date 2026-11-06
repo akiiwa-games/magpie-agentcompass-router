@@ -5,12 +5,29 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { burnScale, effortAbility, effortValue, namedRoute, rankCandidates, selectBestRoute } from "../src/allocator.js";
+import {
+  bundleResponsiveness,
+  burnScale,
+  computeTurnSeconds,
+  effortAbility,
+  effortValue,
+  evaluateCandidate,
+  namedRoute,
+  rankCandidates,
+  resolveRealtimeEffort,
+  responsivenessConfig,
+  selectBestRoute,
+  splitEffortFromModelId,
+  turnSecondsToResponsiveness,
+} from "../src/allocator.js";
 import {
   DEFAULT_MODELS,
   DEFAULT_SCORING_POLICY,
+  DISPATCH_EFFORTS,
   EFFORT_CURVES,
+  EFFORT_RESPONSIVENESS,
   canonicalModel,
+  resolveModelSpec,
 } from "../src/catalog.js";
 import {
   CACHE_COLD_MS,
@@ -52,8 +69,24 @@ import {
   onResponse as mwOnResponse,
   strategies,
 } from "../src/middleware.js";
-import { capProfileText, extractRequestFacts, inferKindFromObjective, inferTaskProfile, profileTask } from "../src/profiler-core.js";
-import { SCORER_SYSTEM_PROMPT, clearProfileCache, parseJevScorerAnswer, scoreTaskLive } from "../src/scorer-live.js";
+import {
+  PROFILE_FLAGS,
+  REALTIME_LOOP_QUESTION,
+  TASK_PROFILE_SCHEMA,
+  capProfileText,
+  extractRequestFacts,
+  inferKindFromObjective,
+  inferTaskProfile,
+  profileTask,
+  validateProfile,
+} from "../src/profiler-core.js";
+import {
+  SCORER_SYSTEM_PROMPT,
+  buildJevScorerPayload,
+  clearProfileCache,
+  parseJevScorerAnswer,
+  scoreTaskLive,
+} from "../src/scorer-live.js";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -1611,10 +1644,11 @@ test("8.6 Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-acco
     assert.ok(solHigh, "gpt-6.1-sol:high (ability 3.6) clears floor=3.6 when critical_headroom=0");
     assert.equal(solHigh.components.ability, 0, "Model right at raised floor (3.6 > origin 3.3) must not get free ability score");
 
-    // gpt-6-luna's effort curve is AgentCompass v0.3.7-v0.3.9 `effort_curves["gpt-6-luna"]`
+    // gpt-6-luna's effort curve is AgentCompass v0.4.1 `effort_curves["gpt-6-luna"]`
     assert.deepEqual(EFFORT_CURVES["gpt-6-luna"], {
       ability: { low: -0.54, medium: -0.15, high: 0, xhigh: 0.1, max: 0.35 },
       burn: { low: 0.1, medium: 0.4, high: 0.7, xhigh: 1.0, max: 1.5 },
+      responsiveness: { none: 0.959, low: 0.926, medium: 0.777, high: 0.664, xhigh: 0.374, max: 0 },
     });
   });
 
@@ -2497,4 +2531,577 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
   const loopD = mwOnRequest({ model: "agentcompass/auto", messages: turn2Loop }, runtime(new SessionContinuityStore(), t0 + 4_000));
   assert.equal(loopC.model, turn2B.model, "a record of turn 1 doesn't decide turn 2's tool loop");
   assert.equal(loopD.model, turn2B.model, "turn 2's tool loop is held on a fresh runtime too");
+});
+
+const REALTIME_BASE_PROFILE = {
+  work_kind: "computer_use",
+  reasoning_depth: 2,
+  code_complexity: 0,
+  context_scale: 1,
+  divergence: 1,
+  hallucination_risk: 2,
+  error_cost: 2,
+  needs_visual: true,
+  needs_gui: true,
+  local_only: true,
+  interaction_style: "engineering",
+};
+
+test("10.1 v0.4.1 Schema & validateProfile: `realtime_loop` is in schema, scorer prompt, Jev payload, and validated strictly as boolean", async () => {
+  assert.ok(PROFILE_FLAGS.includes("realtime_loop"), "PROFILE_FLAGS must include realtime_loop");
+  assert.ok(REALTIME_LOOP_QUESTION.includes("continuous observe-act loop"));
+  assert.deepEqual(TASK_PROFILE_SCHEMA.properties.realtime_loop, {
+    type: "boolean",
+    description: REALTIME_LOOP_QUESTION,
+  });
+  assert.ok(TASK_PROFILE_SCHEMA.required.includes("realtime_loop"));
+  assert.match(SCORER_SYSTEM_PROMPT, /- realtime_loop:\s*boolean/);
+  assert.match(SCORER_SYSTEM_PROMPT, /continuous observe-act loop/);
+  assert.match(SCORER_SYSTEM_PROMPT, /CRITICAL RULES/);
+
+  const jevPayload = buildJevScorerPayload({ objective: "Play the daily dungeon in the Android emulator." });
+  assert.deepEqual(jevPayload.questions.realtime_loop, {
+    type: "noul",
+    instructions: REALTIME_LOOP_QUESTION,
+  });
+
+  // validateProfile: defaults to false when omitted, accepts true/false, rejects non-boolean
+  const omitted = validateProfile({ ...REALTIME_BASE_PROFILE });
+  assert.equal(omitted.realtime_loop, false);
+  const explicitTrue = validateProfile({ ...REALTIME_BASE_PROFILE, realtime_loop: true });
+  assert.equal(explicitTrue.realtime_loop, true);
+  const explicitFalse = validateProfile({ ...REALTIME_BASE_PROFILE, realtime_loop: false });
+  assert.equal(explicitFalse.realtime_loop, false);
+
+  for (const invalid of ["true", "false", 1, 0, null, {}, []]) {
+    assert.throws(
+      () => validateProfile({ ...REALTIME_BASE_PROFILE, realtime_loop: invalid }),
+      /task\.profile\.realtime_loop must be true or false/,
+    );
+  }
+
+  // Shape C `/v1/systemone` handler answers `questions.realtime_loop`
+  const sysOneRes = await handleSystemOneRequest(
+    {
+      state: { task: { objective: "Monitor the live order book and place orders", realtime_loop: true } },
+      questions: {
+        realtime_loop: { type: "noul", instructions: REALTIME_LOOP_QUESTION },
+      },
+    },
+    { scorerType: "heuristic" },
+  );
+  assert.equal(sysOneRes.answers.realtime_loop.noul, 0.95);
+});
+
+test("10.2 v0.4.1 Classifier missing `realtime_loop` field defaults to `false` (both OpenAI-compatible and Jev)", async () => {
+  clearProfileCache();
+  const mockFetchMissingRealtime = async () =>
+    new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                work_kind: "general_implementation",
+                reasoning_depth: 2,
+                code_complexity: 2,
+                context_scale: 1,
+                divergence: 1,
+                hallucination_risk: 2,
+                error_cost: 2,
+                needs_visual: false,
+                needs_gui: false,
+                local_only: true,
+                interaction_style: "engineering",
+                expected_hours: 1.0,
+                hours_confidence: "high",
+                urgency: "unknown",
+                multi_task: false,
+                task_count: "1",
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+
+  const missingRes = await scoreTaskLive(
+    { objective: "Write a ticket sniping script in Python with Playwright." },
+    {
+      allowExternalScorer: true,
+      scorerType: "openai_compatible",
+      scorerBaseUrl: "http://127.0.0.1:4096",
+      fetch: mockFetchMissingRealtime,
+      useCache: false,
+    },
+  );
+  assert.equal(missingRes.meta.source, "system_one_live");
+  assert.equal(missingRes.profile.realtime_loop, false);
+
+  const mockFetchTrueRealtime = async () =>
+    new Response(
+      JSON.stringify({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                work_kind: "computer_use",
+                reasoning_depth: 2,
+                code_complexity: 0,
+                context_scale: 1,
+                divergence: 1,
+                hallucination_risk: 2,
+                error_cost: 2,
+                needs_visual: true,
+                needs_gui: true,
+                local_only: true,
+                realtime_loop: true,
+                interaction_style: "engineering",
+                expected_hours: 1.0,
+                hours_confidence: "high",
+                urgency: "high",
+                multi_task: false,
+                task_count: "1",
+              }),
+            },
+          },
+        ],
+      }),
+      { status: 200 },
+    );
+
+  const trueRes = await scoreTaskLive(
+    { objective: "Watch the 20:00 flash sale page in Chrome and click Buy immediately when inventory opens." },
+    {
+      allowExternalScorer: true,
+      scorerType: "openai_compatible",
+      scorerBaseUrl: "http://127.0.0.1:4096",
+      fetch: mockFetchTrueRealtime,
+      useCache: false,
+    },
+  );
+  assert.equal(trueRes.meta.source, "system_one_live");
+  assert.equal(trueRes.profile.realtime_loop, true);
+
+  // Jev parser: missing `realtime_loop` defaults to false; explicit `noul >= 0.5` parses as true
+  const fallback = inferTaskProfile({ objective: "Implement real-time WebSocket polling." });
+  const baseJevAnswers = {
+    work_kind: { choice: "general_implementation" },
+    interaction_style: { choice: "engineering" },
+    reasoning_depth: { score: 1 },
+    code_complexity: { score: 2 },
+    context_scale: { score: 0 },
+    divergence: { score: 0 },
+    hallucination_risk: { score: 1 },
+    error_cost: { score: 1 },
+    needs_visual: { noul: 0.1 },
+    needs_gui: { noul: 0.1 },
+    local_only: { noul: 0.9 },
+  };
+  const jevMissing = parseJevScorerAnswer({ answers: baseJevAnswers }, fallback);
+  assert.equal(jevMissing.realtime_loop, false);
+  const jevTrue = parseJevScorerAnswer(
+    { answers: { ...baseJevAnswers, work_kind: { choice: "computer_use" }, realtime_loop: { noul: 0.85 } } },
+    fallback,
+  );
+  assert.equal(jevTrue.realtime_loop, true);
+});
+
+test("10.3 v0.4.1 Highest Principle: heuristic `inferTaskProfile` returns `realtime_loop: false` on ALL prompts (zero keyword heuristics) and `realtime_loop=true` never auto-promotes `needs_gui`/`needs_visual`/`local_only`", () => {
+  const contrastivePrompts = [
+    // Live observe-act prompts (which ONLY the LLM classifier marks true; heuristic must still output false!)
+    "打开游戏客户端，帮我把今日日常任务、体力副本和公会签到清完，卡关了就截图看状态调整阵容继续打。",
+    "在手机模拟器里挂机刷活动关卡，每局结束后点再次挑战，体力不够就吃体力药，掉落金装时截图保存。",
+    "盯着 12306 候补和余票页面，一放出今晚 G20 二等座就立刻下单锁定席位。",
+    "守着教务系统选课页面，一旦《机器学习导论》有人退课出现余量，马上点选课并提交确认。",
+    "盯着今晚 8 点秒杀页面，倒计时归零按钮变红的瞬间立刻点击抢购并完成提交。",
+    "持续轮询线上抢号接口，一旦返回可预约时段就立即发请求锁号并把结果回报。",
+    "连接测试盘实时行情流，盯盘观察五档盘口变化，触发价差阈值时立刻下限价单并根据成交回报撤补单。",
+    // Lookalike software engineering / analysis prompts
+    "帮我写一个 12306 自动抢票脚本，支持配置车次、席别和候补监控，带单元测试。",
+    "修复抢课脚本里选课接口返回 429 后没有退避重试的 bug，并补测试。",
+    "设计并实现一个实时看盘前端面板，展示 K 线、五档盘口和逐笔成交动画。",
+    "给后台管理系统加一个每 5 秒轮询任务状态并自动刷新表格的逻辑。",
+    "排查一下为什么客户端主循环在等待服务器响应时会卡顿 3 秒。",
+    "分析昨晚挂机脚本的运行日志，统计每局耗时、掉线次数和体力消耗异常的原因。",
+    "修复秒杀活动页面的倒计时弹窗样式错位问题。",
+    "打开系统设置看一眼当前代理端口是多少，截图发我。",
+  ];
+
+  for (const prompt of contrastivePrompts) {
+    const p = inferTaskProfile({ objective: prompt });
+    assert.equal(
+      p.realtime_loop,
+      false,
+      `inferTaskProfile must NEVER use keywords to set realtime_loop=true (failed on: ${prompt})`,
+    );
+  }
+
+  // Explicit caller `realtime_loop: true` or `needs.realtime_loop: true` is respected
+  const explicitTask = inferTaskProfile({
+    objective: "Poll the reservation API and lock the slot immediately when available.",
+    work_kind: "tool_execution",
+    realtime_loop: true,
+    local_only: false,
+    needs_gui: false,
+    needs_visual: false,
+  });
+  assert.equal(explicitTask.realtime_loop, true);
+  // realtime_loop=true must NOT auto-promote needs_gui, needs_visual, or local_only
+  assert.equal(explicitTask.needs_gui, false, "realtime_loop=true must not auto-set needs_gui");
+  assert.equal(explicitTask.needs_visual, false, "realtime_loop=true must not auto-set needs_visual");
+  assert.equal(explicitTask.local_only, false, "realtime_loop=true must not auto-set local_only");
+
+  // Explicit caller `realtime_loop: false` overrides `profile.realtime_loop: true`
+  const overridden = rankCandidates({
+    profile: { ...REALTIME_BASE_PROFILE, realtime_loop: true },
+    realtime_loop: false,
+  });
+  assert.equal(overridden.task.realtime_loop, false);
+  assert.equal(overridden.task.profile.realtime_loop, false);
+});
+
+test("10.4 v0.4.1 Slow models (`gemini-4-argon-high`, `grok-bot`, `dot`) are excluded on `realtime_loop` with 'too slow per turn for a live loop' while fast models remain eligible", () => {
+  const profile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "tool_execution", // route floor = 2.7
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+  const ranked = rankCandidates(profile, {
+    candidateModels: [
+      "gemini-4-argon-high:high",
+      "grok-bot:high",
+      "dot:high",
+      "claude-sonnet-5-5:high",
+      "gpt-6.1-sol:high",
+      "gpt-6-luna:high",
+      "gemini-3.8-flash-high:medium",
+    ],
+  });
+
+  const byModel = Object.fromEntries(ranked.allCandidates.map((c) => [c.model, c]));
+
+  // Argon High (responsiveness 0.00 < 0.50) is excluded
+  assert.equal(byModel["gemini-4-argon-high"].eligible, false);
+  assert.ok(
+    byModel["gemini-4-argon-high"].excluded.some(
+      (r) => r.includes("below the realtime_loop floor 0.5") && r.includes("too slow per turn for a live loop"),
+    ),
+    `Expected Argon exclusion reason to mention realtime_loop floor and 'too slow per turn for a live loop', got: ${byModel["gemini-4-argon-high"].excluded.join("; ")}`,
+  );
+
+  // grok-bot and dot (`responsiveness: "not_applicable"`) are excluded
+  for (const ch of ["grok-bot", "dot"]) {
+    assert.equal(byModel[ch].eligible, false);
+    assert.ok(
+      byModel[ch].excluded.some(
+        (r) => r.includes("not_applicable") && r.includes("too slow per turn for a live loop"),
+      ),
+      `Expected ${ch} exclusion reason to mention not_applicable and 'too slow per turn for a live loop', got: ${byModel[ch].excluded.join("; ")}`,
+    );
+  }
+
+  // Fast models remain eligible (gpt-6.1-sol:high steps down to medium with resp 0.754 >= 0.50) and carry measured responsiveness >= 0.50
+  for (const fastModel of ["claude-sonnet-5-5", "gpt-6.1-sol", "gpt-6-luna", "gemini-3.8-flash-high"]) {
+    assert.equal(byModel[fastModel].eligible, true, `${fastModel} should be eligible on realtime_loop`);
+    assert.ok(byModel[fastModel].components.responsiveness >= 0.5);
+    assert.equal(byModel[fastModel].components.responsiveness_source, "measured");
+  }
+  assert.equal(byModel["gpt-6.1-sol"].effort, "medium");
+  assert.equal(byModel["gpt-6.1-sol"].realtime_stepped_from, "high");
+});
+
+test("10.5 v0.4.1 Effort step-down rules: dispatchable efforts, encoded model IDs, antigravity lock, ability+responsiveness gate, sibling deference, and stepped-down cost", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    reasoning_depth: 2, // hard floor = 3.1
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+    expected_hours: 2.0,
+  });
+
+  // 1. claude-opus-5-5:high (resp 0.107 < 0.50) steps down to medium (resp 0.53 >= 0.50, ability 4.2 >= 3.1)
+  const opusRanked = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" }],
+  });
+  const opusCand = opusRanked.allCandidates[0];
+  assert.equal(opusCand.eligible, true);
+  assert.equal(opusCand.effort, "medium");
+  assert.equal(opusCand.realtime_stepped_from, "high");
+  assert.equal(opusCand.components.effort_stepped_down_from, "high");
+  assert.equal(opusCand.components.responsiveness, 0.53);
+  assert.ok(opusCand.notes.includes("effort stepped down from high to medium for realtime_loop"));
+
+  // Cost / burn is computed at stepped-down effort (medium burn 0.50 / 0.70 vs high 1.0)
+  const mediumScale = burnScale(DEFAULT_SCORING_POLICY, EFFORT_CURVES["claude-opus-5-5"], "medium");
+  const expectedMediumUsd = Math.round(2.0 * DEFAULT_MODELS["claude-opus-5-5"].usd_per_hour * mediumScale * 10000) / 10000;
+  assert.equal(opusCand.expected_usd, expectedMediumUsd);
+  assert.ok(opusCand.expected_usd < 2.0 * DEFAULT_MODELS["claude-opus-5-5"].usd_per_hour);
+
+  // 2. Effort encoded in model ID (`gemini-3.8-flash-high`, `gemini-4-argon-high`) or on `antigravity` never steps down
+  assert.equal(splitEffortFromModelId("gemini-3.8-flash-high").effort, "high");
+  assert.equal(splitEffortFromModelId("gemini-4-argon-high").effort, "high");
+  assert.equal(splitEffortFromModelId("qwen3.8-max").effort, null, "qwen3.8-max is a base model name, not -max effort");
+
+  const flashEncoded = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "oc_flash_high", provider: "opencode", model: "gemini-3.8-flash-high", effort: "high" }],
+  }).allCandidates[0];
+  assert.equal(flashEncoded.effort, "high");
+  assert.equal(flashEncoded.realtime_stepped_from, undefined);
+  assert.equal(flashEncoded.eligible, false, "gemini-3.8-flash-high at high (resp 0.486 < 0.50) has -high in model ID so it cannot step down");
+
+  const agyBundle = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "agy_opus", provider: "antigravity-resilient", harness: "antigravity-resilient", model: "claude-opus-5-5", effort: "high" }],
+  }).allCandidates[0];
+  assert.equal(agyBundle.effort, "high");
+  assert.equal(agyBundle.realtime_stepped_from, undefined);
+  assert.equal(agyBundle.eligible, false);
+
+  // 3. Only steps down to efforts allowed in DISPATCH_EFFORTS for the provider
+  // For provider "claude", claude-haiku-5-5 is only dispatchable at ["high"] in DISPATCH_EFFORTS.claude (resp 0.439 < 0.50 at high)
+  assert.deepEqual(DISPATCH_EFFORTS.claude["claude-haiku-5-5"], ["high"]);
+  const haikuClaude = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "claude_haiku", provider: "claude", account: "claude", model: "claude-haiku-5-5", effort: "high" }],
+  }).allCandidates[0];
+  assert.equal(haikuClaude.effort, "high", "claude-haiku-5-5 on claude cannot step down to medium/low because DISPATCH_EFFORTS.claude only allows [high]");
+  assert.equal(haikuClaude.eligible, false);
+
+  // For provider "codex", gpt-6.1-terra is only dispatchable at ["high"] in DISPATCH_EFFORTS.codex -> xhigh (0.037) steps down to high (0.65), not medium
+  const terraCodex = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "codex_terra_xhigh", provider: "codex", account: "codex", model: "gpt-6.1-terra", effort: "xhigh" }],
+  }).allCandidates[0];
+  assert.equal(terraCodex.effort, "high");
+  assert.equal(terraCodex.realtime_stepped_from, "xhigh");
+  assert.equal(terraCodex.eligible, true);
+
+  // 4. Ability gate vs responsiveness floor interaction on grok-4.7 (tier 3.4, ability: low=-0.2 -> 3.2, high=0 -> 3.4; responsiveness: low=0.744, high=0.201):
+  // On hard (floor 3.1), low (3.2 >= 3.1) clears BOTH gate and resp_floor -> steps down to low and is eligible!
+  const grokHard = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "grok_high", provider: "grok", account: "grok", model: "grok-4.7", effort: "high" }],
+  }).allCandidates[0];
+  assert.equal(grokHard.effort, "low");
+  assert.equal(grokHard.realtime_stepped_from, "high");
+  assert.equal(grokHard.eligible, true);
+
+  // On frontier (floor 4.2), low (3.2 < 4.2) is the only effort clearing resp_floor, so it steps down to low (bestClearingResp) and is excluded by ability floor!
+  const frontierProfile = validateProfile({ ...rtProfile, reasoning_depth: 4 });
+  const grokFrontier = rankCandidates(frontierProfile, {
+    candidateModels: [{ id: "grok_high", provider: "grok", account: "grok", model: "grok-4.7", effort: "high" }],
+  }).allCandidates[0];
+  assert.equal(grokFrontier.effort, "low");
+  assert.equal(grokFrontier.eligible, false);
+  assert.match(grokFrontier.excluded.join("; "), /ability 3\.20 below the frontier floor 4\.20/);
+
+  // 5. Sibling deference:
+  // (a) When a healthy, applicable sibling (`claude_opus_med`) clears both gate and resp_floor, `claude_opus_high` defers (does not step down)
+  const withHealthySibling = rankCandidates(rtProfile, {
+    candidateModels: [
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      { id: "claude_opus_med", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "medium" },
+    ],
+  });
+  const byIdHealthy = Object.fromEntries(withHealthySibling.allCandidates.map((c) => [c.id, c]));
+  assert.equal(byIdHealthy.claude_opus_high.effort, "high", "must defer to healthy medium sibling instead of duplicating it");
+  assert.equal(byIdHealthy.claude_opus_high.eligible, false);
+  assert.equal(byIdHealthy.claude_opus_med.effort, "medium");
+  assert.equal(byIdHealthy.claude_opus_med.eligible, true);
+
+  // (b) When the medium sibling has `when: { max_reasoning_depth: 1 }` on a depth-2 task, it does not apply -> `claude_opus_high` steps down!
+  const withInapplicableSibling = rankCandidates(rtProfile, {
+    candidateModels: [
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      { id: "claude_opus_med", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "medium", when: { max_reasoning_depth: 1 } },
+    ],
+  });
+  assert.equal(withInapplicableSibling.allCandidates.length, 1);
+  assert.equal(withInapplicableSibling.allCandidates[0].id, "claude_opus_high");
+  assert.equal(withInapplicableSibling.allCandidates[0].effort, "medium");
+  assert.equal(withInapplicableSibling.allCandidates[0].realtime_stepped_from, "high");
+
+  // (c) When the medium sibling is disabled, unavailable, or in launch_failures cooldown -> `claude_opus_high` does NOT defer and steps down!
+  const withDisabledSibling = rankCandidates(rtProfile, {
+    candidateModels: [
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      { id: "claude_opus_med", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "medium", disabled: true },
+    ],
+  });
+  const highWhenSibDisabled = withDisabledSibling.allCandidates.find((c) => c.id === "claude_opus_high");
+  assert.equal(highWhenSibDisabled.effort, "medium");
+  assert.equal(highWhenSibDisabled.realtime_stepped_from, "high");
+  assert.equal(highWhenSibDisabled.eligible, true);
+
+  const nowMs = Date.parse("2026-11-06T12:00:00Z");
+  const withCoolingSibling = rankCandidates(rtProfile, {
+    now: nowMs,
+    unavailable: ["claude_opus_med"],
+    candidateModels: [
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      { id: "claude_opus_med", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "medium" },
+    ],
+  });
+  const highWhenSibUnavailable = withCoolingSibling.allCandidates.find((c) => c.id === "claude_opus_high");
+  assert.equal(highWhenSibUnavailable.effort, "medium");
+  assert.equal(highWhenSibUnavailable.realtime_stepped_from, "high");
+
+  // (d) When a faster sibling fails the ability gate (e.g. frontier gate 4.2 where opus:low is 4.6 - 0.84 = 3.76 < 4.2), opus:high does NOT defer to opus:low and steps down to opus:medium (4.40 >= 4.2)!
+  const frontierRtProfile = validateProfile({
+    ...rtProfile,
+    reasoning_depth: 4, // frontier gate = 4.2
+  });
+  const withSubGateLowSibling = rankCandidates(frontierRtProfile, {
+    candidateModels: [
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      { id: "claude_opus_low", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "low" },
+    ],
+  });
+  const highWithLowSib = withSubGateLowSibling.allCandidates.find((c) => c.id === "claude_opus_high");
+  assert.equal(highWithLowSib.effort, "medium", "must not defer to a low sibling (3.76) that fails the 4.2 frontier gate");
+  assert.equal(highWithLowSib.realtime_stepped_from, "high");
+  assert.equal(highWithLowSib.eligible, true);
+});
+
+test("10.6 v0.4.1 User-pinned model or effort on `realtime_loop` is neither stepped down nor excluded, only emits warning", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  // 1. Pinned bundle (`claude_opus_high` at high, resp 0.107 < 0.50): keeps high, stays eligible, emits warning
+  const pinnedBundleRes = rankCandidates(rtProfile, {
+    pinnedBundle: "claude_opus_high",
+    candidateModels: [
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+    ],
+  });
+  const pinnedOpus = pinnedBundleRes.allCandidates[0];
+  assert.equal(pinnedOpus.eligible, true);
+  assert.equal(pinnedOpus.effort, "high", "pinned bundle must not step down");
+  assert.equal(pinnedOpus.realtime_stepped_from, undefined);
+  assert.match(pinnedOpus.components.realtime_slow_pin_warning, /below the realtime_loop floor 0\.5.*kept per explicit user selection/);
+  assert.ok(pinnedOpus.notes.some((n) => n.includes("kept per explicit user selection")));
+
+  // 2. Pinned slow model (`gemini-4-argon-high` at high, resp 0.00 < 0.50): stays eligible, emits warning
+  const pinnedArgonRes = rankCandidates(rtProfile, {
+    constraintModel: "gemini-4-argon-high",
+    candidateModels: ["gemini-4-argon-high:high"],
+  });
+  const pinnedArgon = pinnedArgonRes.allCandidates[0];
+  assert.equal(pinnedArgon.eligible, true);
+  assert.equal(pinnedArgon.effort, "high");
+  assert.match(pinnedArgon.components.realtime_slow_pin_warning, /responsiveness 0\.00 is below the realtime_loop floor 0\.5/);
+
+  // 3. Pinned not_applicable channel (`grok-bot`): stays eligible, emits not_applicable pin warning
+  const pinnedGrokBot = rankCandidates(rtProfile, {
+    constraintModel: "grok-bot",
+    candidateModels: ["grok-bot:high"],
+  }).allCandidates[0];
+  assert.equal(pinnedGrokBot.eligible, true);
+  assert.match(
+    pinnedGrokBot.components.realtime_slow_pin_warning,
+    /responsiveness is not_applicable for realtime_loop \(too slow per turn for a live loop\); kept per explicit user selection/,
+  );
+});
+
+test("10.7 v0.4.1 Unmeasured models & fuzzy date/family variants get conservative `0.52` and mark `responsiveness: default`", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  for (const unmeasuredModel of [
+    "claude-opus-5-5-20260901",
+    "gpt-6.1-sol-20260901",
+    "gpt-6-astra-preview",
+    "grok-4.7-latest",
+    "claude-opus-5-6",
+    "custom-unmeasured-model-v1",
+  ]) {
+    const resolved = resolveModelSpec(unmeasuredModel);
+    assert.equal(resolved.fuzzyMatch, true, `${unmeasuredModel} must be marked as fuzzyMatch`);
+    const [respVal, respSrc] = bundleResponsiveness({ model: unmeasuredModel, effort: "high" }, resolved.spec);
+    assert.equal(respVal, 0.52, `${unmeasuredModel} must use conservative default 0.52`);
+    assert.equal(respSrc, "default", `${unmeasuredModel} must have source 'default'`);
+
+    const ranked = rankCandidates(rtProfile, { candidateModels: [`${unmeasuredModel}:high`] });
+    const cand = ranked.allCandidates[0];
+    assert.equal(cand.components.responsiveness, 0.52);
+    assert.equal(cand.components.responsiveness_source, "default");
+    assert.ok(cand.notes.includes("responsiveness: default"), `${unmeasuredModel} notes must include 'responsiveness: default'`);
+  }
+
+  // Verify computeTurnSeconds and turnSecondsToResponsiveness math matches AgentCompass allocator.py
+  assert.equal(responsivenessConfig().floor, 0.5);
+  assert.equal(responsivenessConfig().default, 0.52);
+  assert.equal(turnSecondsToResponsiveness(4.0), 1.0);
+  assert.equal(turnSecondsToResponsiveness(45.0), 0.0);
+  const turnS = computeTurnSeconds(2.5, 100, "high", 9999, 400);
+  assert.equal(turnS, 6.5, "reasoningTokens must not be added to ttft_s");
+});
+
+test("10.8 v0.4.1 Non-realtime routing invariance: `realtime_loop: false` leaves routing decisions and scores completely unchanged", () => {
+  const testObjectives = [
+    { objective: "Perform a mechanical batch rename of `foo_bar` to `fooBar` across the JSON fixtures using a uniform rule." },
+    { objective: "Implement a standalone self-contained LRU cache algorithm module in TypeScript with unit tests." },
+    { objective: "Conduct a read-only security audit and cross-module deadlock / race condition root-cause review across the gateway subsystem." },
+    { objective: "Brainstorm and formulate a novel creative gameplay scheme and first-principles roadmap for an AI agent simulation game.", work_kind: "direction_reasoning" },
+    { objective: "Provide a formal mathematical proof or refute the optimal-stopping theorem bound for this Markov chain." },
+    { objective: "Operate the desktop app GUI: click the Settings button, take a screenshot, and toggle the proxy switch." },
+    { objective: "Compare screenshots of the login dialog and inspect the screenshot for layout misalignment." },
+    { objective: "Build the interactive React analytics dashboard component from the Figma spec.", work_kind: "frontend_implementation" },
+    { objective: "Run the deployment script and report its exit status.", work_kind: "tool_execution" },
+  ];
+
+  // Legacy-equivalent evaluation: strip all responsiveness fields from policy/models/curves and verify identical results
+  const strippedModels = Object.fromEntries(
+    Object.entries(DEFAULT_MODELS).map(([k, v]) => {
+      const { responsiveness, responsiveness_status, score_estimated, ...rest } = v;
+      return [k, rest];
+    }),
+  );
+  const strippedCurves = Object.fromEntries(
+    Object.entries(EFFORT_CURVES).map(([k, v]) => {
+      const { responsiveness, ...rest } = v;
+      return [k, rest];
+    }),
+  );
+  const { responsiveness: _unusedRespPolicy, ...strippedPolicy } = DEFAULT_SCORING_POLICY;
+
+  for (const input of testObjectives) {
+    const profile = inferTaskProfile(input);
+    assert.equal(profile.realtime_loop, false);
+
+    const currentRanked = rankCandidates(profile);
+    const legacyRanked = rankCandidates(profile, {
+      catalog: {
+        models: strippedModels,
+        effortCurves: strippedCurves,
+        effortResponsiveness: {},
+        policy: strippedPolicy,
+      },
+    });
+
+    assert.equal(currentRanked.selected.id, legacyRanked.selected.id, `Selected route changed for: ${input.objective}`);
+    assert.equal(currentRanked.selected.score, legacyRanked.selected.score, `Selected score changed for: ${input.objective}`);
+    assert.deepEqual(
+      currentRanked.ranking.map((c) => ({ id: c.id, score: c.score, components: c.components })),
+      legacyRanked.ranking.map((c) => ({ id: c.id, score: c.score, components: c.components })),
+      `Full candidate ranking or components changed on non-realtime task: ${input.objective}`,
+    );
+    assert.equal(
+      "responsiveness" in currentRanked.selected.components,
+      false,
+      "Non-realtime candidate components must not include responsiveness",
+    );
+  }
 });

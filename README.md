@@ -102,7 +102,7 @@ The router avoids re-classifying every HTTP request and preserves prompt caches 
 
 ### 2. Task profiling & Model DNA allocation (`src/profiler-core.js`, `src/allocator.js`)
 
-Single-pass bounded extraction over Anthropic `/v1/messages`, OpenAI `/v1/responses`, `/v1/chat/completions`, and Gemini payloads builds a 10-field task profile (`work_kind` across 16 canonical routes, `difficulty`, `reasoning_depth`, `code_complexity`, `context_scale`, `divergence`, `hallucination_risk`, `error_cost`, `needs_visual`, `needs_gui`).
+Single-pass bounded extraction over Anthropic `/v1/messages`, OpenAI `/v1/responses`, `/v1/chat/completions`, and Gemini payloads builds a task profile (`work_kind` across 16 canonical routes, `difficulty`, `reasoning_depth`, `code_complexity`, `context_scale`, `divergence`, `hallucination_risk`, `error_cost`, `needs_visual`, `needs_gui`, `realtime_loop`).
 
 Each `<model, effort>` pair in `candidateModels` is scored on:
 
@@ -113,6 +113,10 @@ pure_intent_score(m, e) = fit_score(m, e) - overqual_penalty(m, e) - effort_sele
 - **7D convergent fit**: Weighted match over `reasoning`, `code`, `context`, `tool_use`, `rigor`, `speed`, and `autonomy`, scaled by per-model `EFFORT_CURVES` (`minimal` / `low` / `medium` / `high` / `xhigh` / `max`), with a steep deficit penalty below the task's ability floor.
 - **3D Model DNA**: Matches `divergence` (creative/architectural exploration), `global_rigor` (cross-module invariants and deep debugging), and `module_precision` (self-contained code and schema accuracy).
 - **Over-qualification & effort selectivity**: Penalizes frontier models and `xhigh` / `max` effort on routine tasks unless unlocked by high demand or pre-reset quota sprint.
+- **Live observe-act responsiveness (`realtime_loop`)**: When the classifier (`src/scorer-live.js`) or explicit caller input marks `realtime_loop: true` (the worker itself acts inside a live observe → decide → act loop against a changing external system; deterministic `inferTaskProfile` never guesses `realtime_loop` from keywords and always sets `false` unless explicitly passed):
+  - **Responsiveness floor (`0.50`) & effort step-down (`resolveRealtimeEffort`)**: Candidates below the per-turn responsiveness floor step down to the highest provider-dispatchable effort (`DISPATCH_EFFORTS`) that clears both the task's ability gate and the responsiveness floor (skipping models whose effort is baked into the model ID, or deferring when a healthy, applicable sibling candidate already covers that lower effort). Quota burn and cost are computed at the stepped-down effort.
+  - **Exclusion & conservative default**: Candidates that still fall below `0.50` after step-down are excluded with `"responsiveness X.XX below realtime_loop floor 0.50 (too slow per turn for a live loop)"`. Unbenchmarked or fuzzy-matched models default to `0.52` (`responsiveness_source: "default"`).
+  - **Responsiveness blend & user pins**: Eligible candidates blend `0.35 * responsiveness` into `fit_score`. Explicitly pinned models/efforts are never stepped down or excluded for responsiveness, emitting a warning instead. Non-`realtime_loop` routing is completely unchanged.
 
 ### 3. Quota economics & seat ordering (`src/quota.js`, `src/quota-loader.js`)
 
@@ -223,7 +227,7 @@ Magpie 会用包名前缀命名号池策略（`routings`），而客户端请求
 ### 决策流程简述
 
 1. **会话连续性优先（`src/continuity.js`）**：轮内工具循环（`within: true`）、KV 缓存温热期内（Anthropic/Gemini `5m`，ChatGPT/Codex Responses 与 DeepSeek `1h`）或短追问（`"继续"`、`"go ahead"`、`"lgtm"`）直接保持当前 `<model>:<effort>` 且思考档位单调不降级（`keepsEffort`）。跨 `sync.Pool` 池化 `moejs` 实例时，自动从客户端重发的对话历史回溯锚点轮次（最多 4 轮）重放决策，确保任意实例结果一致。仅在新会话、上游报错（`status >= 400`）、配额耗尽、新增视觉/GUI 或任务复杂度越界、输入超窗口 95%、累计上下文达 2M、或缓存冷化/压缩后重新路由。
-2. **10 维画像与能力选型（`src/profiler-core.js`、`src/allocator.js`）**：单遍有界解析 Anthropic / OpenAI Responses / Chat / Gemini 请求体，生成 10 维任务画像，结合 7 维客观能力、Effort 投入曲线、3 维 Model DNA 与防杀鸡用牛刀惩罚对 `candidateModels` 评分。
+2. **任务画像与能力选型（`src/profiler-core.js`、`src/allocator.js`）**：单遍有界解析 Anthropic / OpenAI Responses / Chat / Gemini 请求体，生成任务画像（含 `realtime_loop` 实时观察→动作循环标记，仅由分类器 `src/scorer-live.js` 或调用方显式传入，启发式画像恒为 `false`），结合 7 维客观能力、Effort 投入曲线、3 维 Model DNA、实时循环响应速度（`responsiveness` 下限 `0.50`、自动降档到过能力门限与响应下限的最高可派发档位、兄弟候选礼让、慢模型排除、未测速模型保守默认 `0.52`、用户点名仅告警）与防杀鸡用牛刀惩罚对 `candidateModels` 评分。
 3. **订阅配额精算（`src/quota.js`）**：过滤低于安全水位（长窗口 `5%`、短窗口 `10%`）或限流的窗口，计算期望短缺机会成本，并在距重置 36 小时内对富余额度给予冲刺加分（`reset_bonus` / `sprint_sunk`）。
 
 ---

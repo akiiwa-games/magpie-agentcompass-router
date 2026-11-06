@@ -15,8 +15,10 @@ import {
   DEFAULT_MODELS,
   DEFAULT_SCORING_POLICY,
   DIFFICULTY_ORDER,
+  DISPATCH_EFFORTS,
   EFFORT_CURVES,
   EFFORT_ORDER,
+  EFFORT_RESPONSIVENESS,
   KIND_TRAITS,
   MODEL_ALIASES,
   ROUTE_FIT_PEERS,
@@ -405,6 +407,667 @@ export function subjectiveFit(weights, subj) {
   return totalW > 0 ? sum / totalW : 1.0;
 }
 
+export const RESPONSIVENESS_DEFAULTS = {
+  floor: 0.5,
+  default: 0.52,
+  weight: 0.35,
+  fast_turn_seconds: 4.0,
+  slow_turn_seconds: 45.0,
+  output_tokens_per_turn: 400,
+  harness_overhead: {
+    default: 1.0,
+    antigravity: 1.0,
+    "antigravity-resilient": 1.0,
+    codex: 1.0,
+    claude: 1.0,
+    pi: 1.0,
+    opencode: 1.0,
+    grok: 1.0,
+  },
+  local_telemetry: {
+    min_samples: 20,
+    max_blend: 0.3,
+    max_shift: 0.15,
+  },
+};
+
+export const REALTIME_EFFORT_ORDER = [
+  "none",
+  "off",
+  "minimal",
+  "default",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+];
+
+export function effortRank(effort) {
+  const eff = String(effort || "high").trim().toLowerCase();
+  const idx = REALTIME_EFFORT_ORDER.indexOf(eff);
+  return idx >= 0 ? idx : REALTIME_EFFORT_ORDER.indexOf("high");
+}
+
+/**
+ * Merged `scoring.responsiveness` policy with defaults (`allocator.py:responsiveness_config`).
+ */
+export function responsivenessConfig(policy = DEFAULT_SCORING_POLICY) {
+  const cfg = {
+    ...RESPONSIVENESS_DEFAULTS,
+    harness_overhead: { ...RESPONSIVENESS_DEFAULTS.harness_overhead },
+    local_telemetry: { ...RESPONSIVENESS_DEFAULTS.local_telemetry },
+  };
+  const own =
+    policy && typeof policy === "object" && policy.responsiveness && typeof policy.responsiveness === "object"
+      ? policy.responsiveness
+      : {};
+  for (const [key, value] of Object.entries(own)) {
+    if ((key === "harness_overhead" || key === "local_telemetry") && value && typeof value === "object") {
+      Object.assign(cfg[key], value);
+    } else if (key in cfg || key === "basis" || key === "reasoning_tokens_by_effort") {
+      cfg[key] = value;
+    }
+  }
+  return cfg;
+}
+
+/**
+ * Per-turn CLI harness overhead coefficient (`allocator.py:harness_overhead_multiplier`).
+ */
+export function harnessOverheadMultiplier(harness, policy = DEFAULT_SCORING_POLICY) {
+  const table = responsivenessConfig(policy).harness_overhead || {};
+  if (harness && typeof table[harness] === "number" && Number.isFinite(table[harness])) {
+    return Math.max(0.1, Number(table[harness]));
+  }
+  const def = table.default;
+  return Math.max(0.1, typeof def === "number" && Number.isFinite(def) ? Number(def) : 1.0);
+}
+
+/**
+ * Estimated seconds per live-loop turn (`allocator.py:compute_turn_seconds`):
+ * `T_turn = (ttft_s + output_tokens / output_tps) * harness_overhead`.
+ */
+export function computeTurnSeconds(
+  ttftS,
+  outputTps,
+  effort = "high",
+  reasoningTokens = null,
+  outputTokens = null,
+  harness = null,
+  policy = DEFAULT_SCORING_POLICY,
+) {
+  void effort;
+  void reasoningTokens;
+  const cfg = responsivenessConfig(policy);
+  const outTokens = outputTokens === null || outputTokens === undefined ? Number(cfg.output_tokens_per_turn ?? 400) : Number(outputTokens);
+  const tps = Math.max(1e-6, Number(outputTps));
+  const baseTurn = Math.max(0.0, Number(ttftS)) + Math.max(0.0, outTokens) / tps;
+  return baseTurn * harnessOverheadMultiplier(harness, policy);
+}
+
+/**
+ * Map per-turn duration in seconds onto 0..1 (`allocator.py:turn_seconds_to_responsiveness`).
+ */
+export function turnSecondsToResponsiveness(turnSeconds, policy = DEFAULT_SCORING_POLICY) {
+  const cfg = responsivenessConfig(policy);
+  const fast = Number(cfg.fast_turn_seconds ?? 4.0);
+  const slow = Math.max(fast + 1e-6, Number(cfg.slow_turn_seconds ?? 45.0));
+  return round4(clamp((slow - Number(turnSeconds)) / (slow - fast), 0.0, 1.0));
+}
+
+export function lookupCurveResponsiveness(curvesResp, effort, defaultEffort = "high") {
+  if (!curvesResp || typeof curvesResp !== "object") return null;
+  const eff = String(effort || defaultEffort || "high");
+  if (eff in curvesResp) {
+    const val = curvesResp[eff];
+    if (typeof val === "number" && Number.isFinite(val)) {
+      return clamp(val, 0.0, 1.0);
+    }
+  }
+  return null;
+}
+
+/**
+ * Split an effort suffix encoded directly in a model ID (`auto_bundles.py:split_effort`).
+ */
+export function splitEffortFromModelId(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
+  const raw = String(rawModel || "").trim();
+  const baseNoBracket = raw.replace(/\[1m\]$/i, "");
+  const match = baseNoBracket.match(/^(.+)-(low|medium|high|xhigh|max)$/i);
+  if (!match) {
+    return { base: raw, effort: null };
+  }
+  const base = match[1];
+  const effort = match[2].toLowerCase();
+  const baseLeaf = base.split("/").pop();
+  if (
+    effort === "max" &&
+    !(base in (models || {})) &&
+    !(baseLeaf in (models || {})) &&
+    !(base in (aliases || {})) &&
+    !(baseLeaf in (aliases || {}))
+  ) {
+    return { base: raw, effort: null };
+  }
+  return { base, effort };
+}
+
+export function bundleHarness(bundle, account = null, bundleId = null) {
+  const explicit = String(bundle?.harness || "").trim().toLowerCase();
+  if (explicit) return explicit;
+  const prov = String(bundle?.provider || account || "").trim().toLowerCase();
+  const bid = String(bundleId || bundle?.id || "").trim().toLowerCase();
+  const launchM = String(bundle?.launch_model || "").trim().toLowerCase();
+  const model = String(bundle?.model || "").trim().toLowerCase();
+  if (
+    [
+      "claude",
+      "codex",
+      "pi",
+      "omp",
+      "opencode",
+      "grok",
+      "grok-bot",
+      "antigravity",
+      "antigravity-resilient",
+    ].includes(prov)
+  ) {
+    return prov === "antigravity" ? "antigravity-resilient" : prov;
+  }
+  if (bid.startsWith("pi_") || bid.includes("__pi_") || launchM.startsWith("openai-codex/")) {
+    return "pi";
+  }
+  if (launchM.startsWith("opencode/")) {
+    return "opencode";
+  }
+  if (prov === "dot" || prov === "chatgpt-web") {
+    return prov;
+  }
+  if (model.includes("claude")) {
+    return "claude";
+  }
+  return "codex";
+}
+
+export function scoringEffort(bundle, info) {
+  return bundle?.effort || info?.fixed_effort || info?.default_effort || "high";
+}
+
+export function bundleApplies(bundle, taskCtx = {}) {
+  const rule = bundle?.when;
+  if (!rule || typeof rule !== "object") return true;
+  if (taskCtx?.pinned_bundle && bundle?.id && taskCtx.pinned_bundle === bundle.id) {
+    return true;
+  }
+  if ("max_reasoning_depth" in rule) {
+    const depth = taskCtx?.profile?.reasoning_depth;
+    if (!Number.isFinite(depth) || depth > Number(rule.max_reasoning_depth)) {
+      return false;
+    }
+  }
+  if ("min_difficulty" in rule) {
+    const diff = taskCtx?.difficulty;
+    const req = rule.min_difficulty;
+    if (
+      DIFFICULTY_ORDER.includes(diff) &&
+      DIFFICULTY_ORDER.includes(req) &&
+      DIFFICULTY_ORDER.indexOf(diff) < DIFFICULTY_ORDER.indexOf(req)
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+export function bundleCooldownReason(bundle, launchFailures, nowMs = Date.now()) {
+  if (!launchFailures || typeof launchFailures !== "object") return null;
+  const entries = launchFailures.entries && typeof launchFailures.entries === "object" ? launchFailures.entries : launchFailures;
+  const account = bundle?.account || bundle?.provider;
+  if (!account) return null;
+  const keys = [String(account), bundle?.model ? `${account}/${bundle.model}` : null].filter(Boolean);
+  for (const k of keys) {
+    const entry = entries[k];
+    if (!entry || typeof entry !== "object") continue;
+    const untilMs = entry.until ? Date.parse(String(entry.until)) : NaN;
+    if (Number.isFinite(untilMs) && untilMs <= nowMs) continue;
+    const left = Number.isFinite(untilMs) ? Math.max(1, Math.round((untilMs - nowMs) / 60000)) : 15;
+    const scope = k === String(account) ? "account" : "model";
+    return `host refused to create a worker on this ${scope} (${entry.failure_class || "unknown"}); cooling down ${left} more min, then reroute`;
+  }
+  return null;
+}
+
+export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
+  if (!taskCtx || typeof taskCtx !== "object") return false;
+  if (bundle?.pinned === true || taskCtx.pinned === true) return true;
+  const bid = bundle?.id;
+  const rawModel = bundle?.model;
+  const pinnedBundle = taskCtx.pinned_bundle || taskCtx.pinnedBundle;
+  const constraintBundle = taskCtx.constraint_bundle || taskCtx.constraintBundle || taskCtx.constraints?.bundle;
+  const constraintModel =
+    taskCtx.constraint_model ||
+    taskCtx.constraintModel ||
+    taskCtx.pinned_model ||
+    taskCtx.pinnedModel ||
+    taskCtx.constraints?.model;
+  const constraintEffort =
+    taskCtx.constraint_effort ||
+    taskCtx.constraintEffort ||
+    taskCtx.pinned_effort ||
+    taskCtx.pinnedEffort ||
+    taskCtx.constraints?.effort;
+  if (bid && (pinnedBundle === bid || constraintBundle === bid)) {
+    return true;
+  }
+  if (constraintModel) {
+    const normConstraint = String(constraintModel).trim();
+    const colonIdx = normConstraint.lastIndexOf(":");
+    const modelPart = colonIdx > 0 ? normConstraint.slice(0, colonIdx) : normConstraint;
+    const effortPart = colonIdx > 0 ? normConstraint.slice(colonIdx + 1).toLowerCase() : null;
+    if (
+      normConstraint === bid ||
+      modelPart === bid ||
+      modelPart === rawModel ||
+      modelPart === canonical
+    ) {
+      if (!effortPart && !constraintEffort) return true;
+      const candEff = String(bundle?.effort || "high").toLowerCase();
+      if ((effortPart && effortPart === candEff) || (constraintEffort && String(constraintEffort).toLowerCase() === candEff)) {
+        return true;
+      }
+      if (!effortPart && constraintEffort) return true;
+    }
+  }
+  if (constraintEffort && String(constraintEffort).toLowerCase() === String(bundle?.effort || "high").toLowerCase()) {
+    return true;
+  }
+  return false;
+}
+
+function attachTupleIterator(obj, tupleValues) {
+  Object.defineProperty(obj, Symbol.iterator, {
+    value: function* () {
+      yield* tupleValues;
+    },
+    enumerable: false,
+    configurable: true,
+  });
+  return obj;
+}
+
+/**
+ * Resolve `(responsiveness, source)` for a `(bundle, effort)` on `0..1` (`allocator.py:bundle_responsiveness`).
+ * `source` is `'measured'`, `'local_blended'`, `'default'`, or `'not_applicable'`.
+ * Returns `{ value, source }` (also iterable as `[value, source]`).
+ */
+export function bundleResponsiveness(
+  bundle,
+  info = null,
+  policy = DEFAULT_SCORING_POLICY,
+  curves = null,
+  options = {},
+) {
+  const cfg = responsivenessConfig(policy);
+  const rawModel = bundle?.model || "";
+  let spec = info && typeof info === "object" && "spec" in info && info.spec ? info.spec : info;
+  let fuzzy = Boolean(info?.fuzzyMatch || spec?.fuzzyMatch);
+  let canonical = bundle?.canonicalModel || null;
+  if (!spec) {
+    const resolved = resolveModelSpec(rawModel, options.models || DEFAULT_MODELS, options.aliases || MODEL_ALIASES);
+    spec = resolved.spec;
+    canonical = resolved.canonical;
+    fuzzy = Boolean(resolved.fuzzyMatch);
+  } else if (!canonical) {
+    canonical = canonicalModel(rawModel, options.aliases || MODEL_ALIASES);
+  }
+  spec = spec || {};
+
+  const status = spec.responsiveness_status;
+  const rawResp = spec.responsiveness;
+  if (rawResp === "not_applicable" || status === "not_applicable") {
+    return attachTupleIterator({ value: null, source: "not_applicable" }, [null, "not_applicable"]);
+  }
+
+  const eff = String(options.effort || scoringEffort(bundle, spec) || "high");
+  const defaultEff = String(spec.default_effort || spec.fixed_effort || "high");
+
+  let effectiveCurves = curves;
+  if (!effectiveCurves && !fuzzy && canonical) {
+    const baseCurves = (options.effortCurves || EFFORT_CURVES)?.[canonical] || {};
+    const respMap = baseCurves.responsiveness || (options.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical];
+    effectiveCurves = respMap ? { ...baseCurves, responsiveness: respMap } : baseCurves;
+  } else if (effectiveCurves && !effectiveCurves.responsiveness && !fuzzy && canonical) {
+    const respMap = (options.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical];
+    if (respMap) {
+      effectiveCurves = { ...effectiveCurves, responsiveness: respMap };
+    }
+  }
+
+  const curvesResp = !fuzzy && effectiveCurves && typeof effectiveCurves === "object" ? effectiveCurves.responsiveness : null;
+  let base = lookupCurveResponsiveness(curvesResp, eff, defaultEff);
+
+  if (base === null && !fuzzy) {
+    if (rawResp && typeof rawResp === "object") {
+      base = lookupCurveResponsiveness(rawResp, eff, defaultEff);
+    } else if (typeof rawResp === "number" && Number.isFinite(rawResp)) {
+      if (!spec.score_estimated && eff === defaultEff) {
+        base = clamp(Number(rawResp), 0.0, 1.0);
+      }
+    }
+  }
+
+  if (base === null && !fuzzy) {
+    const metrics = spec.speed_metrics && typeof spec.speed_metrics === "object" ? spec.speed_metrics : {};
+    const ttft = metrics.ttft_s;
+    const tps = metrics.output_tps;
+    if (typeof ttft === "number" && Number.isFinite(ttft) && typeof tps === "number" && Number.isFinite(tps) && tps > 0 && eff === defaultEff) {
+      const effHarness = options.harness || bundle?.harness || bundleHarness(bundle, bundle?.account, bundle?.id);
+      const turnS = computeTurnSeconds(ttft, tps, eff, metrics.reasoning_tokens, null, effHarness, policy);
+      base = turnSecondsToResponsiveness(turnS, policy);
+    }
+  }
+
+  let source = "measured";
+  if (base === null) {
+    base = clamp(Number(cfg.default ?? 0.52), 0.0, 1.0);
+    source = "default";
+  } else {
+    const effHarness = options.harness || bundle?.harness || bundleHarness(bundle, bundle?.account, bundle?.id);
+    const mult = harnessOverheadMultiplier(effHarness, policy);
+    if (Math.abs(mult - 1.0) > 1e-6) {
+      const fast = Number(cfg.fast_turn_seconds ?? 4.0);
+      const slow = Math.max(fast + 1e-6, Number(cfg.slow_turn_seconds ?? 45.0));
+      const impliedTurn = slow - base * (slow - fast);
+      base = turnSecondsToResponsiveness(impliedTurn * mult, policy);
+    }
+  }
+
+  // Optional local telemetry shrinkage when supplied in `options.localTelemetry`
+  const telemetryDoc = options.localTelemetry;
+  if (telemetryDoc && typeof telemetryDoc === "object" && canonical) {
+    const modelsMap = telemetryDoc.models && typeof telemetryDoc.models === "object" ? telemetryDoc.models : telemetryDoc;
+    const row = modelsMap[canonical] || modelsMap[rawModel];
+    if (row && typeof row === "object") {
+      const target = row.by_effort && typeof row.by_effort[eff] === "object" ? row.by_effort[eff] : row;
+      const samples = Number(target.samples ?? 0);
+      const telCfg = cfg.local_telemetry || {};
+      const minSamples = Math.max(1, Number(telCfg.min_samples ?? 20));
+      if (Number.isFinite(samples) && samples >= minSamples) {
+        let localResp = target.responsiveness;
+        if (typeof localResp !== "number" || !Number.isFinite(localResp)) {
+          const turnS = target.median_turn_seconds ?? target.turn_seconds;
+          if (typeof turnS === "number" && Number.isFinite(turnS)) {
+            localResp = turnSecondsToResponsiveness(turnS, policy);
+          }
+        }
+        if (typeof localResp === "number" && Number.isFinite(localResp)) {
+          localResp = clamp(localResp, 0.0, 1.0);
+          const maxBlend = clamp(Number(telCfg.max_blend ?? 0.3), 0.0, 1.0);
+          const maxShift = clamp(Number(telCfg.max_shift ?? 0.15), 0.0, 1.0);
+          const blend = Math.min(maxBlend, maxBlend * Math.min(1.0, samples / (minSamples * 2)));
+          const delta = clamp(blend * (localResp - base), -maxShift, maxShift);
+          base = round4(clamp(base + delta, 0.0, 1.0));
+          source = "local_blended";
+        }
+      }
+    }
+  }
+
+  const finalVal = round4(base);
+  return attachTupleIterator({ value: finalVal, source }, [finalVal, source]);
+}
+
+/**
+ * When `realtime_loop` is active and a bundle's default effort is below the responsiveness floor,
+ * step down to the highest faster effort in the model's curve that clears both the ability gate (`gate`)
+ * and `responsiveness.floor` (`allocator.py:resolve_realtime_effort`).
+ *
+ * Supports both JS signature `resolveRealtimeEffort(bundle, taskCtx, catalog, context)` and
+ * Python-style signature `resolveRealtimeEffort(bundle, task, ctx, model, info, policy, curves, gate)`.
+ * Returns `{ effort, responsiveness, source, steppedFrom }` (also iterable as `[effort, responsiveness, source, steppedFrom]`).
+ */
+export function resolveRealtimeEffort(
+  bundle,
+  taskCtx = {},
+  catalogOrCtx = {},
+  modelOrContext = {},
+  infoArg = null,
+  policyArg = null,
+  curvesArg = null,
+  gateArg = null,
+) {
+  let catalog = {};
+  let ctx = {};
+  let canonical = null;
+  let info = null;
+  let policy = null;
+  let curves = null;
+  let gate = 0.0;
+
+  if (typeof modelOrContext === "string" || policyArg !== null || curvesArg !== null || gateArg !== null) {
+    // Called with Python 8-arg signature: (bundle, task, ctx, modelOrPolicy, info, policy, curves, gate)
+    ctx = catalogOrCtx || {};
+    const accounts = ctx.accounts || {};
+    if (infoArg === null && policyArg === null && curvesArg === null && typeof modelOrContext === "object") {
+      policy = modelOrContext || DEFAULT_SCORING_POLICY;
+      canonical = canonicalModel(bundle?.model || "", accounts.aliases || MODEL_ALIASES);
+      info = (accounts.models || DEFAULT_MODELS)?.[canonical] || {};
+      curves = (accounts.effort_curves || EFFORT_CURVES)?.[canonical] || {};
+    } else {
+      canonical = String(modelOrContext || canonicalModel(bundle?.model || "", accounts.aliases || MODEL_ALIASES));
+      info = infoArg || (accounts.models || DEFAULT_MODELS)?.[canonical] || {};
+      policy = policyArg || ctx.policy || accounts.scoring || DEFAULT_SCORING_POLICY;
+      curves = curvesArg || (accounts.effort_curves || EFFORT_CURVES)?.[canonical] || {};
+    }
+    const route = (ctx.capabilities?.routes || CANONICAL_ROUTES)?.[taskCtx?.kind || "other_or_mixed"] || {};
+    const floor = taskCtx?.demand?.floor ?? abilityFloor(policy, route, taskCtx?.difficulty || "hard");
+    const headroom = taskCtx?.critical ? criticalHeadroom(policy, taskCtx?.difficulty || "hard") : 0.0;
+    gate = gateArg !== null && gateArg !== undefined ? Number(gateArg) : floor + headroom;
+    catalog = {
+      models: accounts.models || DEFAULT_MODELS,
+      aliases: accounts.aliases || MODEL_ALIASES,
+      policy,
+      effortCurves: accounts.effort_curves || EFFORT_CURVES,
+      dispatchEfforts: accounts.dispatch_efforts || DISPATCH_EFFORTS,
+    };
+  } else {
+    catalog = catalogOrCtx || {};
+    ctx = modelOrContext || {};
+    const models = catalog.models || DEFAULT_MODELS;
+    const aliases = catalog.aliases || MODEL_ALIASES;
+    policy = ctx.policy || catalog.policy || DEFAULT_SCORING_POLICY;
+    const resolved = ctx.info
+      ? { canonical: ctx.canonical || canonicalModel(bundle?.model || "", aliases), spec: ctx.info, fuzzyMatch: Boolean(ctx.fuzzyMatch || ctx.info?.fuzzyMatch) }
+      : resolveModelSpec(bundle?.model || "", models, aliases);
+    canonical = resolved.canonical;
+    info = resolved.spec || {};
+    const fuzzy = Boolean(resolved.fuzzyMatch || info?.fuzzyMatch);
+    const rawCurves = ctx.curves || (catalog.effortCurves || EFFORT_CURVES)?.[canonical] || {};
+    const respMap = !fuzzy
+      ? rawCurves.responsiveness || (catalog.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical]
+      : undefined;
+    curves = fuzzy
+      ? { ...rawCurves, responsiveness: undefined }
+      : respMap
+        ? { ...rawCurves, responsiveness: respMap }
+        : rawCurves;
+    const routes = catalog.routes || CANONICAL_ROUTES;
+    const route = routes[taskCtx?.kind || "other_or_mixed"] || {};
+    const floor = taskCtx?.demand?.floor ?? abilityFloor(policy, route, taskCtx?.difficulty || "hard");
+    const headroom = taskCtx?.critical ? criticalHeadroom(policy, taskCtx?.difficulty || "hard") : 0.0;
+    gate = ctx.gate !== undefined && ctx.gate !== null ? Number(ctx.gate) : floor + headroom;
+  }
+
+  const models = catalog.models || DEFAULT_MODELS;
+  const aliases = catalog.aliases || MODEL_ALIASES;
+  const dispatchEffortsTable = catalog.dispatchEfforts || DISPATCH_EFFORTS;
+  const rawEffort = scoringEffort(bundle, info);
+  const effHarness = ctx.harness || bundle?.harness || bundleHarness(bundle, bundle?.account, bundle?.id);
+
+  const initialResp = bundleResponsiveness(bundle, info, policy, curves, {
+    effort: rawEffort,
+    harness: effHarness,
+    models,
+    aliases,
+    localTelemetry: ctx.localTelemetry || taskCtx?.localTelemetry,
+  });
+  const respVal = initialResp.value;
+  const respSource = initialResp.source;
+
+  const makeReturn = (eff, rVal, rSrc, steppedFrom) =>
+    attachTupleIterator(
+      { effort: eff, responsiveness: rVal, source: rSrc, steppedFrom, stepped_from: steppedFrom },
+      [eff, rVal, rSrc, steppedFrom],
+    );
+
+  if (respSource === "not_applicable" || respVal === null || respVal === undefined) {
+    return makeReturn(rawEffort, respVal, respSource, null);
+  }
+  const respFloor = Number(responsivenessConfig(policy).floor ?? 0.5);
+  if (respVal >= respFloor) {
+    return makeReturn(rawEffort, respVal, respSource, null);
+  }
+  const curvesResp = curves && typeof curves === "object" ? curves.responsiveness : null;
+  if (!curvesResp || typeof curvesResp !== "object" || Object.keys(curvesResp).length === 0) {
+    return makeReturn(rawEffort, respVal, respSource, null);
+  }
+
+  const provider = bundle?.provider || bundle?.account;
+  if (
+    effHarness === "antigravity" ||
+    effHarness === "antigravity-resilient" ||
+    provider === "antigravity" ||
+    provider === "antigravity-resilient"
+  ) {
+    return makeReturn(rawEffort, respVal, respSource, null);
+  }
+
+  const rawLaunchId = String(bundle?.launch_model || bundle?.model || "");
+  if (splitEffortFromModelId(rawLaunchId, models, aliases).effort !== null) {
+    return makeReturn(rawEffort, respVal, respSource, null);
+  }
+
+  if (isCandidatePinned(bundle, canonical, taskCtx)) {
+    return makeReturn(rawEffort, respVal, respSource, null);
+  }
+
+  // Deference to an existing faster sibling bundle: when the same account + harness + model
+  // already has a separate active bundle at a faster effort that clears BOTH the responsiveness floor
+  // and the ability gate, and is available, not disabled, not unhealthy, and not in cooldown, let that
+  // sibling compete natively instead of duplicating it.
+  const rawBundles = ctx.bundles || taskCtx?.bundles || taskCtx?.all_bundles || null;
+  const bundleEntries = Array.isArray(rawBundles)
+    ? rawBundles.map((b, idx) => [b?.id || `${b?.model || ""}:${b?.effort || idx}`, b])
+    : rawBundles && typeof rawBundles === "object"
+      ? Object.entries(rawBundles)
+      : [];
+
+  if (bundleEntries.length > 0) {
+    const unavailableIds = new Set(ctx.unavailable || taskCtx?.unavailable || []);
+    const unhealthySet = taskCtx?.unhealthy_models instanceof Set ? taskCtx.unhealthy_models : new Set(taskCtx?.unhealthy_models || []);
+    const failuresMap = ctx.launch_failures || ctx.launchFailures || taskCtx?.launch_failures || taskCtx?.launchFailures || null;
+    const nowMs = Number.isFinite(ctx.now ?? taskCtx?.now) ? Number(ctx.now ?? taskCtx?.now) : Date.now();
+    const siblings = [];
+    for (const [bid, b] of bundleEntries) {
+      if (!b || typeof b !== "object") continue;
+      const sibId = b.id || bid;
+      if (unavailableIds.has(sibId) || (b.account && unavailableIds.has(b.account))) continue;
+      if ((b.account || null) !== (bundle?.account || null)) continue;
+      const sibHarness = b.harness || bundleHarness(b, b.account, sibId);
+      if (sibHarness !== effHarness) continue;
+      const sibCanonical = canonicalModel(b.model || "", aliases);
+      if (sibCanonical !== canonical) continue;
+      if (unhealthySet.has(sibCanonical)) continue;
+      if (b.disabled || b.discovery_unavailable || !bundleApplies(b, taskCtx)) continue;
+      const sibBundle = { ...b, id: sibId };
+      if (bundleCooldownReason(sibBundle, failuresMap, nowMs)) continue;
+      siblings.push(sibBundle);
+    }
+
+    const selfId = bundle?.id;
+    for (const sib of siblings) {
+      if ((selfId && sib.id === selfId) || (!selfId && scoringEffort(sib, info) === rawEffort)) {
+        continue;
+      }
+      const sibEff = scoringEffort(sib, info);
+      const { value: sibResp, source: sibSrc } = bundleResponsiveness(sib, info, policy, curves, {
+        effort: sibEff,
+        harness: effHarness,
+        models,
+        aliases,
+        localTelemetry: ctx.localTelemetry || taskCtx?.localTelemetry,
+      });
+      const sibAb = effortAbility(policy, curves, info, sibEff);
+      if (sibSrc !== "not_applicable" && sibResp !== null && sibResp >= respFloor && sibAb >= gate) {
+        return makeReturn(rawEffort, respVal, respSource, null);
+      }
+    }
+
+    if (siblings.length > 0) {
+      const gateClearingPeers = siblings.filter(
+        (s) => effortAbility(policy, curves, info, scoringEffort(s, info)) >= gate,
+      );
+      const stepDownPeers = gateClearingPeers.length > 0 ? gateClearingPeers : siblings;
+      const minRank = Math.min(...stepDownPeers.map((s) => effortRank(scoringEffort(s, info))));
+      if (effortRank(rawEffort) > minRank) {
+        return makeReturn(rawEffort, respVal, respSource, null);
+      }
+    }
+  }
+
+  let allowedEfforts = null;
+  const dispatchTable = provider && dispatchEffortsTable && typeof dispatchEffortsTable[provider] === "object"
+    ? dispatchEffortsTable[provider]
+    : null;
+  if (dispatchTable) {
+    const rawModelKey = bundle?.model || canonical;
+    allowedEfforts = dispatchTable[rawModelKey] || dispatchTable[canonical] || null;
+  }
+
+  const abilityCurve = curves && typeof curves.ability === "object" ? curves.ability : null;
+  const hasAbilityCurve = abilityCurve && Object.keys(abilityCurve).length > 0;
+  const rawRank = effortRank(rawEffort);
+
+  const faster = REALTIME_EFFORT_ORDER.filter(
+    (eff) =>
+      eff in curvesResp &&
+      effortRank(eff) < rawRank &&
+      (!hasAbilityCurve || eff in abilityCurve) &&
+      (!allowedEfforts || allowedEfforts.includes(eff)),
+  );
+  faster.sort((a, b) => effortRank(b) - effortRank(a));
+
+  let bestClearingBoth = null;
+  let bestClearingResp = null;
+  for (const candEff of faster) {
+    const { value: candResp, source: candSrc } = bundleResponsiveness(bundle, info, policy, curves, {
+      effort: candEff,
+      harness: effHarness,
+      models,
+      aliases,
+      localTelemetry: ctx.localTelemetry || taskCtx?.localTelemetry,
+    });
+    if (candSrc === "not_applicable" || candResp === null || candResp < respFloor) {
+      continue;
+    }
+    if (bestClearingResp === null) {
+      bestClearingResp = [candEff, candResp, candSrc];
+    }
+    if (effortAbility(policy, curves, info, candEff) >= gate) {
+      bestClearingBoth = [candEff, candResp, candSrc];
+      break;
+    }
+  }
+
+  const chosen = bestClearingBoth || bestClearingResp;
+  if (chosen !== null) {
+    return makeReturn(chosen[0], chosen[1], chosen[2], rawEffort);
+  }
+  return makeReturn(rawEffort, respVal, respSource, null);
+}
+
 /**
  * Evaluate one `(model, effort)` candidate against a profiled task (`allocator.py:evaluate_bundle`).
  */
@@ -415,10 +1078,38 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const curvesTable = catalog.effortCurves || EFFORT_CURVES;
 
   const rawModel = candidate.model;
-  const { canonical, spec: info } = resolveModelSpec(rawModel, models, aliases);
-  const effort = candidate.effort || "high";
-  const curves = curvesTable[canonical] || {};
+  const { canonical, spec: info, fuzzyMatch } = resolveModelSpec(rawModel, models, aliases);
+  const rawEffort = scoringEffort(candidate, info);
+  const rawCurves = curvesTable[canonical] || {};
+  const extraResp =
+    !fuzzyMatch && !rawCurves.responsiveness
+      ? (catalog.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical]
+      : undefined;
+  const curves = fuzzyMatch
+    ? { ...rawCurves, responsiveness: undefined }
+    : extraResp
+      ? { ...rawCurves, responsiveness: extraResp }
+      : rawCurves;
   const excluded = [];
+  const notes = [];
+
+  if (candidate.disabled) {
+    excluded.push("unchecked in model management");
+  }
+  if (candidate.discovery_unavailable) {
+    excluded.push(
+      typeof candidate.discovery_unavailable === "string"
+        ? candidate.discovery_unavailable
+        : "model not detected by discovery for 7+ days",
+    );
+  }
+  if (candidate.id && taskCtx.unavailable instanceof Set && taskCtx.unavailable.has(candidate.id)) {
+    excluded.push("marked unavailable by the parent");
+  }
+  const cooling = bundleCooldownReason(candidate, taskCtx.launch_failures || taskCtx.launchFailures, taskCtx.now);
+  if (cooling) {
+    excluded.push(cooling);
+  }
 
   if (taskCtx.needs_visual && !info.visual) {
     excluded.push("task needs visual input");
@@ -436,13 +1127,41 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   }
   const routes = catalog.routes || CANONICAL_ROUTES;
   const route = routes[taskCtx.kind] || {};
-  const ability = effortAbility(policy, curves, info, effort);
-  const highAbility = effortAbility(policy, curves, info, "high");
   const demand = taskCtx.demand;
   const target = demand.required_ability;
   const floor = demand.floor ?? abilityFloor(policy, route, taskCtx.difficulty);
   const headroom = taskCtx.critical ? criticalHeadroom(policy, taskCtx.difficulty) : 0.0;
   const gate = floor + headroom;
+
+  let effort = rawEffort;
+  let respVal = null;
+  let respSource = null;
+  let steppedFrom = null;
+  const extraComponents = {};
+
+  if (taskCtx.realtime_loop) {
+    const resolved = resolveRealtimeEffort(candidate, taskCtx, catalog, {
+      canonical,
+      info,
+      fuzzyMatch,
+      policy,
+      curves,
+      gate,
+      now: taskCtx.now,
+    });
+    effort = resolved.effort;
+    respVal = resolved.responsiveness;
+    respSource = resolved.source;
+    steppedFrom = resolved.steppedFrom;
+    if (steppedFrom !== null) {
+      extraComponents.effort_stepped_down_from = steppedFrom;
+      notes.push(`effort stepped down from ${steppedFrom} to ${effort} for realtime_loop`);
+    }
+  }
+
+  const ability = effortAbility(policy, curves, info, effort);
+  const highAbility = effortAbility(policy, curves, info, "high");
+
   if (
     route.restrict_models &&
     taskCtx.specialist_available &&
@@ -455,7 +1174,40 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     excluded.push(`ability ${ability.toFixed(2)} below the ${taskCtx.difficulty} floor ${gate.toFixed(2)}`);
   }
 
-  // Subscription quota, safety margin, opportunity cost & pre-reset sprint evaluation
+  if (taskCtx.realtime_loop) {
+    const respCfg = responsivenessConfig(policy);
+    const pinnedChoice = isCandidatePinned(candidate, canonical, taskCtx);
+    extraComponents.responsiveness_source = respSource;
+    if (respSource === "not_applicable" || respVal === null || respVal === undefined) {
+      extraComponents.responsiveness = null;
+      if (pinnedChoice) {
+        const warn = `pinned ${candidate.id || rawModel} (${canonical}@${effort}) responsiveness is not_applicable for realtime_loop (too slow per turn for a live loop); kept per explicit user selection`;
+        extraComponents.realtime_slow_pin_warning = warn;
+        notes.push(warn);
+      } else {
+        excluded.push("responsiveness not_applicable for this channel (too slow per turn for a live loop)");
+      }
+    } else {
+      extraComponents.responsiveness = round3(respVal);
+      if (respSource === "default") {
+        notes.push("responsiveness: default");
+      }
+      const respFloor = Number(respCfg.floor ?? 0.5);
+      if (respVal < respFloor) {
+        if (pinnedChoice) {
+          const warn = `pinned ${candidate.id || rawModel} (${canonical}@${effort}) responsiveness ${respVal.toFixed(2)} is below the realtime_loop floor ${respFloor} (too slow per turn for a live loop); kept per explicit user selection`;
+          extraComponents.realtime_slow_pin_warning = warn;
+          notes.push(warn);
+        } else {
+          excluded.push(
+            `responsiveness ${respVal.toFixed(2)} below the realtime_loop floor ${respFloor} (too slow per turn for a live loop)`
+          );
+        }
+      }
+    }
+  }
+
+  // Subscription quota, safety margin, opportunity cost & pre-reset sprint evaluation (at stepped-down effort)
   const quotaEval = taskCtx.quotas
     ? evaluateModelQuota(
         rawModel,
@@ -507,6 +1259,17 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       const wV = Number(policy.profile?.vector_weight ?? 0.5);
       fit = (1 - wV) * fit + wV * vfit;
     }
+  }
+
+  if (taskCtx.realtime_loop && respVal !== null && respVal !== undefined) {
+    if ((taskCtx.needs_gui || taskCtx.profile?.needs_gui) && !route.capability_fit) {
+      const cuCap = routes.computer_use?.capability_fit || { gui: 1.0 };
+      const guiFit = capabilityScore(cuCap, canonical, catalog);
+      extraComponents.gui_fit = round3(guiFit);
+      fit = 0.5 * fit + 0.5 * guiFit;
+    }
+    const wResp = clamp(Number(responsivenessConfig(policy).weight ?? 0.35), 0.0, 1.0);
+    fit = (1.0 - wResp) * fit + wResp * respVal;
   }
 
   const sunkWeight = Number(quotaEval?.reset_sunk_weight ?? 0.0);
@@ -637,8 +1400,11 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       shortfallPenalty,
   );
 
-  return {
-    id: `${rawModel}:${effort}`,
+  const hours = Number(taskCtx.hours ?? taskCtx.profile?.expected_hours ?? 0.5);
+  const expectedUsd = round4(hours * Number(info.usd_per_hour ?? 3.0) * Math.max(effortScale, 0.0));
+
+  const out = {
+    id: candidate.id || `${rawModel}:${effort}`,
     model: rawModel,
     canonicalModel: canonical,
     effort,
@@ -679,8 +1445,21 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       effort_penalty: effortPenalty,
       overqualification,
       shortfall: shortfallPenalty,
+      ...extraComponents,
     },
   };
+
+  if (steppedFrom !== null) {
+    out.realtime_stepped_from = steppedFrom;
+  }
+  if (notes.length > 0) {
+    out.notes = notes;
+  }
+  if (taskCtx.realtime_loop) {
+    out.expected_usd = expectedUsd;
+  }
+
+  return out;
 }
 
 /**
@@ -694,9 +1473,30 @@ export function rankCandidates(profileInput, options = {}) {
   const aliases = catalog.aliases || MODEL_ALIASES;
   const nowMs = Number.isFinite(options.now) ? Number(options.now) : Date.now();
 
-  const profile = profileInput?.reasoning_depth
-    ? validateProfile(profileInput)
+  const rawProfile = profileInput?.reasoning_depth
+    ? profileInput
+    : profileInput?.profile?.reasoning_depth
+      ? profileInput.profile
+      : null;
+  let profile = rawProfile
+    ? validateProfile(rawProfile)
     : inferTaskProfile(profileInput || {}, routes);
+  const callerNeeds = profileInput?.needs && typeof profileInput.needs === "object" ? profileInput.needs : {};
+  const explicitRealtimeLoop =
+    "realtime_loop" in options && options.realtime_loop !== undefined && options.realtime_loop !== null
+      ? Boolean(options.realtime_loop)
+      : "realtime_loop" in callerNeeds && callerNeeds.realtime_loop !== undefined && callerNeeds.realtime_loop !== null
+        ? Boolean(callerNeeds.realtime_loop)
+        : rawProfile &&
+            profileInput !== rawProfile &&
+            "realtime_loop" in profileInput &&
+            profileInput.realtime_loop !== undefined &&
+            profileInput.realtime_loop !== null
+          ? Boolean(profileInput.realtime_loop)
+          : Boolean(profile.realtime_loop);
+  if (profile.realtime_loop !== explicitRealtimeLoop) {
+    profile = { ...profile, realtime_loop: explicitRealtimeLoop };
+  }
 
   const kind = profileKind(profile, policy);
   const difficulty = profileDifficulty(profile, policy);
@@ -738,6 +1538,7 @@ export function rankCandidates(profileInput, options = {}) {
   const unhealthySet = new Set(
     (options.unhealthyModels || []).map((m) => canonicalModel(m, aliases)).filter(Boolean)
   );
+  const unavailableSet = new Set(options.unavailable || profileInput?.unavailable || []);
   const continuity =
     options.continuity ||
     (options.previousModel
@@ -782,6 +1583,8 @@ export function rankCandidates(profileInput, options = {}) {
     high_precision: highPrecision,
     minimum_sufficient: minimumSufficient,
     needs_visual: profile.needs_visual,
+    needs_gui: profile.needs_gui,
+    realtime_loop: Boolean(profile.realtime_loop),
     local_only: Boolean(options.local_only ?? profile.local_only),
     dot_available: dotAvailable,
     specialist_available: specialistAvailable,
@@ -789,6 +1592,28 @@ export function rankCandidates(profileInput, options = {}) {
     requirements,
     subjective_weights: sWeights,
     unhealthy_models: unhealthySet,
+    unavailable: unavailableSet,
+    launch_failures: options.launchFailures || options.launch_failures || profileInput?.launch_failures || null,
+    pinned_bundle: options.pinnedBundle || options.pinned_bundle || profileInput?.pinned_bundle || null,
+    constraint_bundle: options.constraintBundle || options.constraint_bundle || profileInput?.constraint_bundle || null,
+    constraint_model:
+      options.constraintModel ||
+      options.constraint_model ||
+      options.pinnedModel ||
+      options.pinned_model ||
+      profileInput?.constraint_model ||
+      profileInput?.constraints?.model ||
+      null,
+    constraint_effort:
+      options.constraintEffort ||
+      options.constraint_effort ||
+      options.pinnedEffort ||
+      options.pinned_effort ||
+      profileInput?.constraint_effort ||
+      profileInput?.constraints?.effort ||
+      null,
+    constraints: options.constraints || profileInput?.constraints || null,
+    localTelemetry: options.localTelemetry || null,
     min_context_tokens: Number(options.minContextTokens || 0),
     continuity,
     quotas: normalizedQuotas,
@@ -799,33 +1624,40 @@ export function rankCandidates(profileInput, options = {}) {
     now: nowMs,
   };
 
-  const expanded = [];
+  const rawExpanded = [];
   for (const entry of candidateModels) {
     if (typeof entry === "string") {
       const colonIdx = entry.lastIndexOf(":");
       if (colonIdx > 0) {
         const suffix = entry.slice(colonIdx + 1).toLowerCase();
         if (EFFORT_ORDER.includes(suffix)) {
-          expanded.push({ model: entry.slice(0, colonIdx), effort: suffix });
+          rawExpanded.push({ model: entry.slice(0, colonIdx), effort: suffix });
           continue;
         }
       }
       const { spec } = resolveModelSpec(entry, models, aliases);
       const efforts = Array.isArray(spec.efforts) && spec.efforts.length > 0 ? spec.efforts : ["medium", "high"];
       for (const eff of efforts) {
-        expanded.push({ model: entry, effort: eff });
+        rawExpanded.push({ model: entry, effort: eff });
       }
     } else if (entry && typeof entry === "object" && entry.model) {
+      const { spec } = resolveModelSpec(entry.model, models, aliases);
+      const isBundleObj = Boolean(entry.id || entry.provider || entry.account || entry.harness || entry.when);
       const efforts = Array.isArray(entry.efforts)
         ? entry.efforts
         : entry.effort
           ? [entry.effort]
-          : ["medium", "high"];
+          : isBundleObj
+            ? [scoringEffort(entry, spec)]
+            : ["medium", "high"];
       for (const eff of efforts) {
-        expanded.push({ model: entry.model, effort: eff });
+        rawExpanded.push({ ...entry, model: entry.model, effort: eff });
       }
     }
   }
+
+  taskCtx.bundles = options.bundles || rawExpanded;
+  const expanded = rawExpanded.filter((c) => bundleApplies(c, taskCtx));
 
   const evaluated = expanded.map((c) => evaluateCandidate(c, taskCtx, catalog));
   const eligible = evaluated.filter((c) => c.eligible);
@@ -839,6 +1671,7 @@ export function rankCandidates(profileInput, options = {}) {
       high_precision: highPrecision,
       minimum_sufficient: minimumSufficient,
       required_ability: demand.required_ability,
+      realtime_loop: Boolean(profile.realtime_loop),
       subjective_weights: sWeights,
       profile,
     },
@@ -865,6 +1698,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     workKind: result.task.kind,
     difficulty: result.task.difficulty,
     requiredAbility: result.task.required_ability,
+    realtimeLoop: result.task.realtime_loop,
     score: top ? top.score : null,
     components: top ? top.components : null,
     profile: result.task.profile,
