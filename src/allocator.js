@@ -526,6 +526,29 @@ export function lookupCurveResponsiveness(curvesResp, effort, defaultEffort = "h
       return clamp(val, 0.0, 1.0);
     }
   }
+  const values = Object.values(curvesResp);
+  if (values.length === 1) {
+    const only = values[0];
+    if (typeof only === "number" && Number.isFinite(only)) {
+      return clamp(only, 0.0, 1.0);
+    }
+  }
+  let fallbacks;
+  if (["high", "xhigh", "max", "ultra"].includes(eff)) {
+    fallbacks = ["high", "default", "max", "xhigh"];
+  } else if (["none", "minimal", "low", "default"].includes(eff)) {
+    fallbacks = ["low", "none", "default", "medium"];
+  } else {
+    fallbacks = ["medium", "low", "default", "none", "high"];
+  }
+  for (const fb of fallbacks) {
+    if (fb in curvesResp) {
+      const val = curvesResp[fb];
+      if (typeof val === "number" && Number.isFinite(val)) {
+        return clamp(val, 0.0, 1.0);
+      }
+    }
+  }
   return null;
 }
 
@@ -579,11 +602,30 @@ export function bundleHarness(bundle, account = null, bundleId = null) {
   if (bid.startsWith("pi_") || bid.includes("__pi_") || launchM.startsWith("openai-codex/")) {
     return "pi";
   }
-  if (launchM.startsWith("opencode/")) {
+  if (
+    launchM.startsWith("opencode/") ||
+    model.startsWith("opencode/") ||
+    model.includes("deepseek-v4.1-flash-free")
+  ) {
     return "opencode";
   }
   if (prov === "dot" || prov === "chatgpt-web") {
     return prov;
+  }
+  if (model === "dot") {
+    return "dot";
+  }
+  if (model.startsWith("grok-bot")) {
+    return "grok-bot";
+  }
+  if (model.startsWith("grok-")) {
+    return "grok";
+  }
+  if (model.startsWith("gemini-")) {
+    return "antigravity-resilient";
+  }
+  if (model === "glm-5.2") {
+    return "omp";
   }
   if (model.includes("claude")) {
     return "claude";
@@ -641,9 +683,10 @@ export function bundleCooldownReason(bundle, launchFailures, nowMs = Date.now())
 
 export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
   if (!taskCtx || typeof taskCtx !== "object") return false;
-  if (bundle?.pinned === true || taskCtx.pinned === true) return true;
+  if (bundle?.pinned === true) return true;
   const bid = bundle?.id;
   const rawModel = bundle?.model;
+  const rawLeaf = rawModel && String(rawModel).includes("/") ? String(rawModel).split("/").pop() : rawModel;
   const pinnedBundle = taskCtx.pinned_bundle || taskCtx.pinnedBundle;
   const constraintBundle = taskCtx.constraint_bundle || taskCtx.constraintBundle || taskCtx.constraints?.bundle;
   const constraintModel =
@@ -670,6 +713,7 @@ export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
       normConstraint === bid ||
       modelPart === bid ||
       modelPart === rawModel ||
+      modelPart === rawLeaf ||
       modelPart === canonical
     ) {
       if (!effortPart && !constraintEffort) return true;
@@ -677,13 +721,42 @@ export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
       if ((effortPart && effortPart === candEff) || (constraintEffort && String(constraintEffort).toLowerCase() === candEff)) {
         return true;
       }
-      if (!effortPart && constraintEffort) return true;
+      return false;
     }
   }
-  if (constraintEffort && String(constraintEffort).toLowerCase() === String(bundle?.effort || "high").toLowerCase()) {
-    return true;
-  }
   return false;
+}
+
+function resolveModelCurves(rawModel, canonical, fuzzy, catalog = {}) {
+  const curvesTable = catalog.effortCurves || EFFORT_CURVES;
+  const respTable = catalog.effortResponsiveness || EFFORT_RESPONSIVENESS;
+  const rawKey = String(rawModel || "").trim();
+  const rawLeaf = rawKey.includes("/") ? rawKey.split("/").pop() : rawKey;
+  const dedicatedCurve = curvesTable?.[rawKey] || curvesTable?.[rawLeaf] || null;
+  const dedicatedResp =
+    dedicatedCurve?.responsiveness ||
+    respTable?.[rawKey] ||
+    respTable?.[rawLeaf];
+  if (dedicatedResp) {
+    if (dedicatedCurve) {
+      return { ...dedicatedCurve, responsiveness: dedicatedResp };
+    }
+    if (rawKey !== canonical && rawLeaf !== canonical) {
+      return {
+        ability: { default: 0.0, high: 0.0 },
+        burn: { default: 0.7, high: 0.7 },
+        responsiveness: dedicatedResp,
+      };
+    }
+    const rawCurves = curvesTable?.[canonical] || {};
+    return { ...rawCurves, responsiveness: dedicatedResp };
+  }
+  const rawCurves = curvesTable?.[canonical] || {};
+  if (fuzzy) {
+    return { ...rawCurves, responsiveness: undefined };
+  }
+  const canonResp = rawCurves.responsiveness || respTable?.[canonical];
+  return canonResp ? { ...rawCurves, responsiveness: canonResp } : rawCurves;
 }
 
 function attachTupleIterator(obj, tupleValues) {
@@ -734,18 +807,23 @@ export function bundleResponsiveness(
   const defaultEff = String(spec.default_effort || spec.fixed_effort || "high");
 
   let effectiveCurves = curves;
-  if (!effectiveCurves && !fuzzy && canonical) {
-    const baseCurves = (options.effortCurves || EFFORT_CURVES)?.[canonical] || {};
-    const respMap = baseCurves.responsiveness || (options.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical];
-    effectiveCurves = respMap ? { ...baseCurves, responsiveness: respMap } : baseCurves;
-  } else if (effectiveCurves && !effectiveCurves.responsiveness && !fuzzy && canonical) {
-    const respMap = (options.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical];
-    if (respMap) {
-      effectiveCurves = { ...effectiveCurves, responsiveness: respMap };
-    }
+  if (!effectiveCurves || (!effectiveCurves.responsiveness && canonical)) {
+    const resolvedCurves = resolveModelCurves(rawModel, canonical, fuzzy, {
+      effortCurves: options.effortCurves,
+      effortResponsiveness: options.effortResponsiveness,
+    });
+    effectiveCurves = effectiveCurves
+      ? { ...resolvedCurves, ...effectiveCurves, responsiveness: effectiveCurves.responsiveness || resolvedCurves.responsiveness }
+      : resolvedCurves;
   }
 
-  const curvesResp = !fuzzy && effectiveCurves && typeof effectiveCurves === "object" ? effectiveCurves.responsiveness : null;
+  const hasDedicatedRawResp =
+    (options.effortCurves || EFFORT_CURVES)?.[rawModel]?.responsiveness ||
+    (options.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[rawModel];
+  const curvesResp =
+    (!fuzzy || hasDedicatedRawResp) && effectiveCurves && typeof effectiveCurves === "object"
+      ? effectiveCurves.responsiveness
+      : null;
   let base = lookupCurveResponsiveness(curvesResp, eff, defaultEff);
 
   if (base === null && !fuzzy) {
@@ -773,15 +851,6 @@ export function bundleResponsiveness(
   if (base === null) {
     base = clamp(Number(cfg.default ?? 0.52), 0.0, 1.0);
     source = "default";
-  } else {
-    const effHarness = options.harness || bundle?.harness || bundleHarness(bundle, bundle?.account, bundle?.id);
-    const mult = harnessOverheadMultiplier(effHarness, policy);
-    if (Math.abs(mult - 1.0) > 1e-6) {
-      const fast = Number(cfg.fast_turn_seconds ?? 4.0);
-      const slow = Math.max(fast + 1e-6, Number(cfg.slow_turn_seconds ?? 45.0));
-      const impliedTurn = slow - base * (slow - fast);
-      base = turnSecondsToResponsiveness(impliedTurn * mult, policy);
-    }
   }
 
   // Optional local telemetry shrinkage when supplied in `options.localTelemetry`
@@ -850,26 +919,40 @@ export function resolveRealtimeEffort(
     // Called with Python 8-arg signature: (bundle, task, ctx, modelOrPolicy, info, policy, curves, gate)
     ctx = catalogOrCtx || {};
     const accounts = ctx.accounts || {};
+    const modelsMap = accounts.models || DEFAULT_MODELS;
+    const aliasesMap = accounts.aliases || MODEL_ALIASES;
+    const resolved = resolveModelSpec(bundle?.model || "", modelsMap, aliasesMap);
+    const fuzzy = Boolean(resolved.fuzzyMatch);
     if (infoArg === null && policyArg === null && curvesArg === null && typeof modelOrContext === "object") {
       policy = modelOrContext || DEFAULT_SCORING_POLICY;
-      canonical = canonicalModel(bundle?.model || "", accounts.aliases || MODEL_ALIASES);
-      info = (accounts.models || DEFAULT_MODELS)?.[canonical] || {};
-      curves = (accounts.effort_curves || EFFORT_CURVES)?.[canonical] || {};
+      canonical = resolved.canonical;
+      info = modelsMap?.[canonical] || resolved.spec || {};
+      curves = resolveModelCurves(bundle?.model || canonical, canonical, fuzzy, {
+        effortCurves: accounts.effort_curves || EFFORT_CURVES,
+        effortResponsiveness: accounts.effort_responsiveness || EFFORT_RESPONSIVENESS,
+      });
     } else {
-      canonical = String(modelOrContext || canonicalModel(bundle?.model || "", accounts.aliases || MODEL_ALIASES));
-      info = infoArg || (accounts.models || DEFAULT_MODELS)?.[canonical] || {};
+      canonical = String(modelOrContext || resolved.canonical);
+      info = infoArg || modelsMap?.[canonical] || resolved.spec || {};
       policy = policyArg || ctx.policy || accounts.scoring || DEFAULT_SCORING_POLICY;
-      curves = curvesArg || (accounts.effort_curves || EFFORT_CURVES)?.[canonical] || {};
+      const baseResolvedCurves = resolveModelCurves(bundle?.model || canonical, canonical, fuzzy, {
+        effortCurves: accounts.effort_curves || EFFORT_CURVES,
+        effortResponsiveness: accounts.effort_responsiveness || EFFORT_RESPONSIVENESS,
+      });
+      curves = curvesArg
+        ? { ...baseResolvedCurves, ...curvesArg, responsiveness: curvesArg.responsiveness || baseResolvedCurves.responsiveness }
+        : baseResolvedCurves;
     }
     const route = (ctx.capabilities?.routes || CANONICAL_ROUTES)?.[taskCtx?.kind || "other_or_mixed"] || {};
     const floor = taskCtx?.demand?.floor ?? abilityFloor(policy, route, taskCtx?.difficulty || "hard");
     const headroom = taskCtx?.critical ? criticalHeadroom(policy, taskCtx?.difficulty || "hard") : 0.0;
     gate = gateArg !== null && gateArg !== undefined ? Number(gateArg) : floor + headroom;
     catalog = {
-      models: accounts.models || DEFAULT_MODELS,
-      aliases: accounts.aliases || MODEL_ALIASES,
+      models: modelsMap,
+      aliases: aliasesMap,
       policy,
       effortCurves: accounts.effort_curves || EFFORT_CURVES,
+      effortResponsiveness: accounts.effort_responsiveness || EFFORT_RESPONSIVENESS,
       dispatchEfforts: accounts.dispatch_efforts || DISPATCH_EFFORTS,
     };
   } else {
@@ -884,15 +967,10 @@ export function resolveRealtimeEffort(
     canonical = resolved.canonical;
     info = resolved.spec || {};
     const fuzzy = Boolean(resolved.fuzzyMatch || info?.fuzzyMatch);
-    const rawCurves = ctx.curves || (catalog.effortCurves || EFFORT_CURVES)?.[canonical] || {};
-    const respMap = !fuzzy
-      ? rawCurves.responsiveness || (catalog.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical]
-      : undefined;
-    curves = fuzzy
-      ? { ...rawCurves, responsiveness: undefined }
-      : respMap
-        ? { ...rawCurves, responsiveness: respMap }
-        : rawCurves;
+    const resolvedCurves = resolveModelCurves(bundle?.model || "", canonical, fuzzy, catalog);
+    curves = ctx.curves
+      ? { ...resolvedCurves, ...ctx.curves, responsiveness: ctx.curves.responsiveness ?? resolvedCurves.responsiveness }
+      : resolvedCurves;
     const routes = catalog.routes || CANONICAL_ROUTES;
     const route = routes[taskCtx?.kind || "other_or_mixed"] || {};
     const floor = taskCtx?.demand?.floor ?? abilityFloor(policy, route, taskCtx?.difficulty || "hard");
@@ -911,6 +989,8 @@ export function resolveRealtimeEffort(
     harness: effHarness,
     models,
     aliases,
+    effortCurves: catalog.effortCurves,
+    effortResponsiveness: catalog.effortResponsiveness,
     localTelemetry: ctx.localTelemetry || taskCtx?.localTelemetry,
   });
   const respVal = initialResp.value;
@@ -949,7 +1029,13 @@ export function resolveRealtimeEffort(
     return makeReturn(rawEffort, respVal, respSource, null);
   }
 
-  if (isCandidatePinned(bundle, canonical, taskCtx)) {
+  const explicitEffortPin =
+    taskCtx?.constraint_effort ||
+    taskCtx?.constraintEffort ||
+    taskCtx?.pinned_effort ||
+    taskCtx?.pinnedEffort ||
+    taskCtx?.constraints?.effort;
+  if (isCandidatePinned(bundle, canonical, taskCtx) || explicitEffortPin) {
     return makeReturn(rawEffort, respVal, respSource, null);
   }
 
@@ -997,6 +1083,8 @@ export function resolveRealtimeEffort(
         harness: effHarness,
         models,
         aliases,
+        effortCurves: catalog.effortCurves,
+        effortResponsiveness: catalog.effortResponsiveness,
         localTelemetry: ctx.localTelemetry || taskCtx?.localTelemetry,
       });
       const sibAb = effortAbility(policy, curves, info, sibEff);
@@ -1018,12 +1106,21 @@ export function resolveRealtimeEffort(
   }
 
   let allowedEfforts = null;
-  const dispatchTable = provider && dispatchEffortsTable && typeof dispatchEffortsTable[provider] === "object"
-    ? dispatchEffortsTable[provider]
-    : null;
+  const dispatchTable =
+    (provider && dispatchEffortsTable && typeof dispatchEffortsTable[provider] === "object"
+      ? dispatchEffortsTable[provider]
+      : null) ||
+    (effHarness && dispatchEffortsTable && typeof dispatchEffortsTable[effHarness] === "object"
+      ? dispatchEffortsTable[effHarness]
+      : null);
   if (dispatchTable) {
     const rawModelKey = bundle?.model || canonical;
-    allowedEfforts = dispatchTable[rawModelKey] || dispatchTable[canonical] || null;
+    const rawLeafKey = String(rawModelKey || "").split("/").pop();
+    allowedEfforts =
+      dispatchTable[rawModelKey] ||
+      dispatchTable[rawLeafKey] ||
+      dispatchTable[canonical] ||
+      null;
   }
 
   const abilityCurve = curves && typeof curves.ability === "object" ? curves.ability : null;
@@ -1047,6 +1144,8 @@ export function resolveRealtimeEffort(
       harness: effHarness,
       models,
       aliases,
+      effortCurves: catalog.effortCurves,
+      effortResponsiveness: catalog.effortResponsiveness,
       localTelemetry: ctx.localTelemetry || taskCtx?.localTelemetry,
     });
     if (candSrc === "not_applicable" || candResp === null || candResp < respFloor) {
@@ -1075,21 +1174,11 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const models = catalog.models || DEFAULT_MODELS;
   const aliases = catalog.aliases || MODEL_ALIASES;
   const policy = catalog.policy || DEFAULT_SCORING_POLICY;
-  const curvesTable = catalog.effortCurves || EFFORT_CURVES;
 
   const rawModel = candidate.model;
   const { canonical, spec: info, fuzzyMatch } = resolveModelSpec(rawModel, models, aliases);
   const rawEffort = scoringEffort(candidate, info);
-  const rawCurves = curvesTable[canonical] || {};
-  const extraResp =
-    !fuzzyMatch && !rawCurves.responsiveness
-      ? (catalog.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[canonical]
-      : undefined;
-  const curves = fuzzyMatch
-    ? { ...rawCurves, responsiveness: undefined }
-    : extraResp
-      ? { ...rawCurves, responsiveness: extraResp }
-      : rawCurves;
+  const curves = resolveModelCurves(rawModel, canonical, fuzzyMatch, catalog);
   const excluded = [];
   const notes = [];
 
@@ -1105,6 +1194,48 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   }
   if (candidate.id && taskCtx.unavailable instanceof Set && taskCtx.unavailable.has(candidate.id)) {
     excluded.push("marked unavailable by the parent");
+  }
+  const pinnedBundle =
+    taskCtx.pinned_bundle ||
+    taskCtx.pinnedBundle ||
+    taskCtx.constraint_bundle ||
+    taskCtx.constraintBundle ||
+    taskCtx.constraints?.bundle;
+  if (pinnedBundle && candidate.id !== pinnedBundle) {
+    excluded.push("explicit bundle constraint");
+  }
+  const constraintModel =
+    taskCtx.constraint_model ||
+    taskCtx.constraintModel ||
+    taskCtx.pinned_model ||
+    taskCtx.pinnedModel ||
+    taskCtx.constraints?.model;
+  if (constraintModel) {
+    const normConstraint = String(constraintModel).trim();
+    const colonIdx = normConstraint.lastIndexOf(":");
+    const modelPart = colonIdx > 0 ? normConstraint.slice(0, colonIdx) : normConstraint;
+    const effortPart = colonIdx > 0 ? normConstraint.slice(colonIdx + 1).toLowerCase() : null;
+    const rawLeaf = rawModel && String(rawModel).includes("/") ? String(rawModel).split("/").pop() : rawModel;
+    const modelMatches =
+      normConstraint === candidate.id ||
+      modelPart === candidate.id ||
+      modelPart === rawModel ||
+      modelPart === rawLeaf ||
+      modelPart === canonical;
+    if (!modelMatches) {
+      excluded.push("explicit model constraint");
+    } else if (effortPart && String(rawEffort).toLowerCase() !== effortPart) {
+      excluded.push("explicit effort constraint");
+    }
+  }
+  const constraintEffort =
+    taskCtx.constraint_effort ||
+    taskCtx.constraintEffort ||
+    taskCtx.pinned_effort ||
+    taskCtx.pinnedEffort ||
+    taskCtx.constraints?.effort;
+  if (constraintEffort && String(rawEffort).toLowerCase() !== String(constraintEffort).toLowerCase()) {
+    excluded.push("explicit effort constraint");
   }
   const cooling = bundleCooldownReason(candidate, taskCtx.launch_failures || taskCtx.launchFailures, taskCtx.now);
   if (cooling) {
@@ -1636,7 +1767,11 @@ export function rankCandidates(profileInput, options = {}) {
         }
       }
       const { spec } = resolveModelSpec(entry, models, aliases);
-      const efforts = Array.isArray(spec.efforts) && spec.efforts.length > 0 ? spec.efforts : ["medium", "high"];
+      const efforts = spec.fixed_effort
+        ? [spec.fixed_effort]
+        : Array.isArray(spec.efforts) && spec.efforts.length > 0
+          ? spec.efforts
+          : ["medium", "high"];
       for (const eff of efforts) {
         rawExpanded.push({ model: entry, effort: eff });
       }
@@ -1649,7 +1784,11 @@ export function rankCandidates(profileInput, options = {}) {
           ? [entry.effort]
           : isBundleObj
             ? [scoringEffort(entry, spec)]
-            : ["medium", "high"];
+            : spec.fixed_effort
+              ? [spec.fixed_effort]
+              : Array.isArray(spec.efforts) && spec.efforts.length > 0
+                ? spec.efforts
+                : ["medium", "high"];
       for (const eff of efforts) {
         rawExpanded.push({ ...entry, model: entry.model, effort: eff });
       }
@@ -1662,6 +1801,7 @@ export function rankCandidates(profileInput, options = {}) {
   const evaluated = expanded.map((c) => evaluateCandidate(c, taskCtx, catalog));
   const eligible = evaluated.filter((c) => c.eligible);
   eligible.sort((a, b) => b.score - a.score);
+  const pinnedCand = eligible.find((c) => isCandidatePinned(c, c.canonicalModel, taskCtx));
 
   return {
     task: {
@@ -1675,7 +1815,7 @@ export function rankCandidates(profileInput, options = {}) {
       subjective_weights: sWeights,
       profile,
     },
-    selected: eligible[0] || null,
+    selected: pinnedCand || eligible[0] || null,
     ranking: eligible,
     allCandidates: evaluated,
   };
@@ -1687,6 +1827,9 @@ export function rankCandidates(profileInput, options = {}) {
 export function selectBestRoute(taskOrProfile, options = {}) {
   const result = rankCandidates(taskOrProfile, options);
   const top = result.selected;
+  const warnings = top?.components?.realtime_slow_pin_warning
+    ? [top.components.realtime_slow_pin_warning]
+    : [];
   return {
     ok: Boolean(top),
     targetModel: top ? top.model : null,
@@ -1699,6 +1842,9 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     difficulty: result.task.difficulty,
     requiredAbility: result.task.required_ability,
     realtimeLoop: result.task.realtime_loop,
+    responsiveness: top?.components?.responsiveness ?? null,
+    responsivenessSource: top?.components?.responsiveness_source ?? null,
+    warnings,
     score: top ? top.score : null,
     components: top ? top.components : null,
     profile: result.task.profile,

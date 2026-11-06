@@ -389,6 +389,11 @@ function routeClaimed(body, ctx, env, depth = 0) {
     quotas: options.quotas,
     meteredOk: options.meteredOk,
     now,
+    ...(facts.realtime_loop !== undefined
+      ? { realtime_loop: facts.realtime_loop }
+      : options.realtime_loop !== undefined
+        ? { realtime_loop: options.realtime_loop }
+        : {}),
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -403,6 +408,11 @@ function routeClaimed(body, ctx, env, depth = 0) {
       candidateModels,
       catalog: options.catalog,
       now,
+      ...(facts.realtime_loop !== undefined
+        ? { realtime_loop: facts.realtime_loop }
+        : options.realtime_loop !== undefined
+          ? { realtime_loop: options.realtime_loop }
+          : {}),
     });
   }
 
@@ -412,6 +422,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
 
   let finalEffort = decision.targetEffort;
   if (
+    !decision.realtimeLoop &&
     sessionState &&
     canonicalModel(decision.targetModel) === canonicalModel(sessionState.model) &&
     cont.why !== "cold" &&
@@ -453,6 +464,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
       effort: finalEffort,
       workKind: decision.workKind,
       difficulty: decision.difficulty,
+      realtimeLoop: Boolean(decision.realtimeLoop),
       why: cont.why,
       held: false,
       anchor,

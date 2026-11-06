@@ -290,6 +290,11 @@ export async function onRequest(body, ctx = {}) {
     quotas: liveQuotas,
     meteredOk: options.meteredOk,
     now,
+    ...(facts.realtime_loop !== undefined
+      ? { realtime_loop: facts.realtime_loop }
+      : options.realtime_loop !== undefined
+        ? { realtime_loop: options.realtime_loop }
+        : {}),
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -305,6 +310,11 @@ export async function onRequest(body, ctx = {}) {
       candidateModels,
       catalog: options.catalog,
       now,
+      ...(facts.realtime_loop !== undefined
+        ? { realtime_loop: facts.realtime_loop }
+        : options.realtime_loop !== undefined
+          ? { realtime_loop: options.realtime_loop }
+          : {}),
     });
   }
 
@@ -315,6 +325,7 @@ export async function onRequest(body, ctx = {}) {
 
   let finalEffort = decision.targetEffort;
   if (
+    !decision.realtimeLoop &&
     sessionState &&
     canonicalModel(decision.targetModel) === canonicalModel(sessionState.model) &&
     cont.why !== "cold" &&
@@ -339,6 +350,7 @@ export async function onRequest(body, ctx = {}) {
         effort: finalEffort,
         workKind: decision.workKind,
         difficulty: decision.difficulty,
+        realtimeLoop: Boolean(decision.realtimeLoop),
         why: cont.why,
         held: false,
       },
@@ -360,6 +372,7 @@ export async function onRequest(body, ctx = {}) {
     workKind: decision.workKind,
     difficulty: decision.difficulty,
     requiredAbility: decision.requiredAbility,
+    realtimeLoop: Boolean(decision.realtimeLoop),
     score: decision.score,
     components: decision.components,
     profile: decision.profile,

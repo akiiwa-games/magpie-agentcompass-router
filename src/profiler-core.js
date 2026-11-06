@@ -386,6 +386,14 @@ export function extractRequestFacts(body, ctx = {}) {
   );
 
   const tools = Array.isArray(body.tools) ? body.tools : [];
+  const explicitRealtimeLoop =
+    ctx && "realtime_loop" in ctx && ctx.realtime_loop !== undefined && ctx.realtime_loop !== null
+      ? Boolean(ctx.realtime_loop)
+      : body?.needs && "realtime_loop" in body.needs && body.needs.realtime_loop !== undefined && body.needs.realtime_loop !== null
+        ? Boolean(body.needs.realtime_loop)
+        : body && "realtime_loop" in body && body.realtime_loop !== undefined && body.realtime_loop !== null
+          ? Boolean(body.realtime_loop)
+          : undefined;
 
   return {
     model,
@@ -400,6 +408,7 @@ export function extractRequestFacts(body, ctx = {}) {
     hasVisual,
     hasCurrentTurnVisual: Boolean(turnState.hasCurrentTurnVisual),
     hasComputerUse,
+    ...(explicitRealtimeLoop !== undefined ? { realtime_loop: explicitRealtimeLoop } : {}),
     isToolFollowup: Boolean(turnState.isToolFollowup || turnState.within),
     within: Boolean(turnState.within || turnState.isToolFollowup),
     turn: turnState.turn,

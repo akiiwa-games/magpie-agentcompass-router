@@ -285,9 +285,22 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       ? state.previous_message_reasoning.trim().toLowerCase()
       : "";
 
+  const rawTaskObj = state.task && typeof state.task === "object" ? state.task : {};
+  const explicitStateRt =
+    state.realtime_loop !== undefined && state.realtime_loop !== null
+      ? Boolean(state.realtime_loop)
+      : state.needs && typeof state.needs === "object" && state.needs.realtime_loop !== undefined && state.needs.realtime_loop !== null
+        ? Boolean(state.needs.realtime_loop)
+        : rawTaskObj.realtime_loop !== undefined && rawTaskObj.realtime_loop !== null
+          ? Boolean(rawTaskObj.realtime_loop)
+          : rawTaskObj.needs && typeof rawTaskObj.needs === "object" && rawTaskObj.needs.realtime_loop !== undefined && rawTaskObj.needs.realtime_loop !== null
+            ? Boolean(rawTaskObj.needs.realtime_loop)
+            : undefined;
+
   // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)
   // when Magpie's `decide.go` passes `previous_message_kind` / `previous_message_reasoning`.
   if (
+    !explicitStateRt &&
     (prevKind || prevReasoning) &&
     isShortFollowupMessage(turnText) &&
     !isCompactionText(turnText)
@@ -358,16 +371,11 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     };
   }
 
-  const rawTaskObj = state.task && typeof state.task === "object" ? state.task : {};
   const taskFacts = {
     objective: turnText,
     previousUser: prevUser,
     hasVisualInput: Boolean(state.has_visual_input ?? rawTaskObj.hasVisualInput),
-    ...(state.realtime_loop !== undefined
-      ? { realtime_loop: state.realtime_loop }
-      : rawTaskObj.realtime_loop !== undefined
-        ? { realtime_loop: rawTaskObj.realtime_loop }
-        : {}),
+    ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   };
 
   const scorerCfg =
@@ -386,6 +394,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     jevApiKey: pluginOptions.jevApiKey || scorerCfg.jevApiKey,
     scorerTimeoutMs: pluginOptions.scorerTimeoutMs || scorerCfg.timeoutMs || 15000,
     fetch: pluginOptions.fetch,
+    ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   });
 
   const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions);
@@ -395,12 +404,14 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     catalog: pluginOptions.catalog,
     quotas: liveQuotas,
     meteredOk: pluginOptions.meteredOk,
+    ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   });
   if (!decision.ok && liveQuotas) {
     decision = selectBestRoute(profile, {
       objective: turnText,
       candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
       catalog: pluginOptions.catalog,
+      ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
     });
   }
 
@@ -417,8 +428,10 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   }
 
   // Monotonic effort ratchet (`keepsEffort`) when continuing on the same kind/intent
+  // (do not ratchet back up when `realtime_loop` intentionally stepped down effort).
   let effectiveEffort = decision.targetEffort;
   if (
+    !decision.realtimeLoop &&
     prevReasoning &&
     !isCompactionText(turnText) &&
     ((prevKind && matchedChoice && prevKind === matchedChoice) ||
@@ -474,6 +487,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       workKind: decision.workKind,
       difficulty: decision.difficulty,
       requiredAbility: decision.requiredAbility,
+      realtimeLoop: Boolean(decision.realtimeLoop),
       continuation: {
         held: false,
         why: prevKind ? "reclassified" : "first",

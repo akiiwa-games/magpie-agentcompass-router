@@ -630,6 +630,7 @@ export const DEFAULT_MODELS = {
     excluded_when: "local_only",
     text_only: true,
     disabled_by_default: true,
+    fixed_effort: "medium",
     responsiveness: "not_applicable",
     responsiveness_status: "not_applicable",
     efforts: ["high"],

@@ -101,12 +101,39 @@ export const JEV_SCORE_QUESTIONS = {
   ],
 };
 
+function extractExplicitRealtimeLoop(task, options = {}) {
+  if (
+    options &&
+    "realtime_loop" in options &&
+    options.realtime_loop !== undefined &&
+    options.realtime_loop !== null
+  ) {
+    return Boolean(options.realtime_loop);
+  }
+  const needs = task?.needs && typeof task.needs === "object" ? task.needs : {};
+  if ("realtime_loop" in needs && needs.realtime_loop !== undefined && needs.realtime_loop !== null) {
+    return Boolean(needs.realtime_loop);
+  }
+  if (task && "realtime_loop" in task && task.realtime_loop !== undefined && task.realtime_loop !== null) {
+    return Boolean(task.realtime_loop);
+  }
+  return undefined;
+}
+
 function cacheKeyOf(task, config) {
+  const explicitRt = extractExplicitRealtimeLoop(task, config);
+  const needs = task?.needs && typeof task.needs === "object" ? task.needs : {};
   return JSON.stringify([
-    task.objective?.slice(0, 4000) || "",
-    Boolean(task.hasVisualInput),
-    config.scorerType || "heuristic",
-    config.scorerModel || "",
+    task?.objective?.slice(0, 4000) || "",
+    Boolean(task?.hasVisualInput),
+    config?.scorerType || "heuristic",
+    config?.scorerModel || "",
+    explicitRt ?? null,
+    task?.work_kind || task?.kind || "",
+    task?.difficulty || "",
+    task?.needs_visual ?? needs.visual ?? null,
+    task?.needs_gui ?? needs.gui ?? null,
+    task?.local_only ?? needs.local_only ?? null,
   ]);
 }
 
@@ -256,6 +283,7 @@ function extractLastProfileJson(text) {
 export async function scoreTaskLive(task, options = {}) {
   const started = Date.now();
   const scorerType = options.scorerType || "heuristic";
+  const explicitRt = extractExplicitRealtimeLoop(task, options);
   const cacheKey = cacheKeyOf(task, options);
   if (options.useCache !== false) {
     const cached = getCachedProfile(cacheKey);
@@ -274,7 +302,10 @@ export async function scoreTaskLive(task, options = {}) {
   const externalAllowed = options.allowExternalScorer === true;
 
   if (scorerType === "heuristic" || !task?.objective?.trim() || !externalAllowed || !rawBaseUrl) {
-    const profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
+    let profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
+    if (explicitRt !== undefined) {
+      profile = { ...profile, realtime_loop: explicitRt };
+    }
     const meta = {
       source: "heuristic_twin",
       scorerType: "heuristic",
@@ -316,6 +347,9 @@ export async function scoreTaskLive(task, options = {}) {
       }
       const data = await res.json();
       profile = parseJevScorerAnswer(data, task);
+      if (explicitRt !== undefined) {
+        profile = { ...profile, realtime_loop: explicitRt };
+      }
     } else if (scorerType === "openai_compatible") {
       const url = baseUrl.endsWith("/chat/completions")
         ? baseUrl
@@ -362,7 +396,9 @@ export async function scoreTaskLive(task, options = {}) {
         throw new Error("Scorer returned no valid task profile JSON");
       }
       if (task.hasVisualInput) rawObj.needs_visual = true;
-      if (rawObj.realtime_loop === undefined || rawObj.realtime_loop === null) {
+      if (explicitRt !== undefined) {
+        rawObj.realtime_loop = explicitRt;
+      } else if (rawObj.realtime_loop === undefined || rawObj.realtime_loop === null) {
         rawObj.realtime_loop = false;
       }
       profile = validateProfile(rawObj);
@@ -380,7 +416,10 @@ export async function scoreTaskLive(task, options = {}) {
     return { profile, meta };
   } catch (err) {
     // Graceful deadline/error fallback to the <1ms deterministic twin so requests never fail closed
-    const profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
+    let profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
+    if (explicitRt !== undefined) {
+      profile = { ...profile, realtime_loop: explicitRt };
+    }
     const meta = {
       source: "heuristic_fallback",
       scorerType,

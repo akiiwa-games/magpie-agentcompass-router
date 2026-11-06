@@ -879,6 +879,9 @@ export function keepsEffort(
   if (!sessionState || !sessionState.effort || !sessionState.model) {
     return wantedEffort || "medium";
   }
+  if (options?.realtimeLoop === true || options?.realtime_loop === true) {
+    return wantedEffort || "medium";
+  }
   const ttlMs = coldAfterMs(sessionState.provider || sessionState.model, {
     ...sessionState,
     ...options,
@@ -1139,6 +1142,23 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     return {
       shouldHold: false,
       why: "turn_mode",
+      previousModel: currentModel,
+      previousEffort: sessionState.effort,
+      within: false,
+      turn: facts.turn || 1,
+    };
+  }
+
+  // Realtime loop capability outgrowth on a new user turn when the session was not already routed for realtime_loop
+  if (
+    affinityMode !== "strict" &&
+    Boolean(facts.realtime_loop ?? options.realtime_loop) &&
+    !sessionState.realtimeLoop
+  ) {
+    return {
+      shouldHold: false,
+      why: "capability_outgrown",
+      reasonDetail: "realtime_loop_required",
       previousModel: currentModel,
       previousEffort: sessionState.effort,
       within: false,

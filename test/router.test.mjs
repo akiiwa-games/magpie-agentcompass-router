@@ -12,6 +12,8 @@ import {
   effortAbility,
   effortValue,
   evaluateCandidate,
+  isCandidatePinned,
+  lookupCurveResponsiveness,
   namedRoute,
   rankCandidates,
   resolveRealtimeEffort,
@@ -3105,3 +3107,515 @@ test("10.8 v0.4.1 Non-realtime routing invariance: `realtime_loop: false` leaves
     );
   }
 });
+
+test("10.9 Finding 1: `lookupCurveResponsiveness` single-key & tier-aligned fallbacks (0 diffs across all 31 models x 9 efforts vs Python `bundle_responsiveness`)", () => {
+  // 1. Direct lookupCurveResponsiveness checks: single-key fallback and tier-aligned fallbacks
+  assert.equal(lookupCurveResponsiveness({ high: 0 }, "low"), 0);
+  assert.equal(lookupCurveResponsiveness({ high: 0 }, "medium"), 0);
+  assert.equal(lookupCurveResponsiveness({ high: 0 }, "max"), 0);
+  assert.equal(lookupCurveResponsiveness({ default: 0.964 }, "high"), 0.964);
+  assert.equal(lookupCurveResponsiveness({ low: 0.744, high: 0.201, xhigh: 0 }, "max"), 0.201);
+  assert.equal(lookupCurveResponsiveness({ low: 0.744, high: 0.201, xhigh: 0 }, "medium"), 0.744);
+  assert.equal(lookupCurveResponsiveness({ none: 1, high: 0.46, max: 0 }, "low"), 1);
+  assert.equal(lookupCurveResponsiveness({ default: 0, xhigh: 0 }, "low"), 0);
+  assert.equal(lookupCurveResponsiveness({ default: 0, xhigh: 0 }, "high"), 0);
+
+  // 2. Exhaustive 31 models x 9 efforts parity against Python `allocator._lookup_curve_responsiveness` + `bundle_responsiveness`
+  const pyLookupCurve = (curvesResp, effort, defaultEffort) => {
+    if (!curvesResp || typeof curvesResp !== "object") return null;
+    const eff = String(effort || defaultEffort || "high");
+    if (eff in curvesResp && typeof curvesResp[eff] === "number") {
+      return Math.max(0.0, Math.min(1.0, Number(curvesResp[eff])));
+    }
+    const vals = Object.values(curvesResp);
+    if (vals.length === 1 && typeof vals[0] === "number") {
+      return Math.max(0.0, Math.min(1.0, Number(vals[0])));
+    }
+    const fallbacks = ["high", "xhigh", "max", "ultra"].includes(eff)
+      ? ["high", "default", "max", "xhigh"]
+      : ["none", "minimal", "low", "default"].includes(eff)
+        ? ["low", "none", "default", "medium"]
+        : ["medium", "low", "default", "none", "high"];
+    for (const fb of fallbacks) {
+      if (fb in curvesResp && typeof curvesResp[fb] === "number") {
+        return Math.max(0.0, Math.min(1.0, Number(curvesResp[fb])));
+      }
+    }
+    return null;
+  };
+
+  const efforts = ["none", "off", "minimal", "low", "default", "medium", "high", "xhigh", "max"];
+  let checkedPairs = 0;
+  for (const [modelName, info] of Object.entries(DEFAULT_MODELS)) {
+    for (const eff of efforts) {
+      checkedPairs += 1;
+      const status = info.responsiveness_status;
+      const rawResp = info.responsiveness;
+      let pyVal = null;
+      let pySrc = "measured";
+      if (rawResp === "not_applicable" || status === "not_applicable") {
+        pyVal = null;
+        pySrc = "not_applicable";
+      } else {
+        const defaultEff = String(info.default_effort || info.fixed_effort || "high");
+        const curvesResp = EFFORT_CURVES[modelName]?.responsiveness || EFFORT_RESPONSIVENESS[modelName] || null;
+        let base = pyLookupCurve(curvesResp, eff, defaultEff);
+        if (base === null) {
+          if (rawResp && typeof rawResp === "object") {
+            base = pyLookupCurve(rawResp, eff, defaultEff);
+          } else if (typeof rawResp === "number" && !info.score_estimated && eff === defaultEff) {
+            base = Math.max(0.0, Math.min(1.0, Number(rawResp)));
+          }
+        }
+        if (base === null) {
+          base = 0.52;
+          pySrc = "default";
+        }
+        pyVal = Math.round(base * 10000) / 10000;
+      }
+      const [jsVal, jsSrc] = bundleResponsiveness({ model: modelName, effort: eff }, info, DEFAULT_SCORING_POLICY);
+      assert.equal(jsVal, pyVal, `bundleResponsiveness value mismatch on ${modelName}@${eff}`);
+      assert.equal(jsSrc, pySrc, `bundleResponsiveness source mismatch on ${modelName}@${eff}`);
+    }
+  }
+  assert.equal(checkedPairs, Object.keys(DEFAULT_MODELS).length * efforts.length);
+
+  // 3. Slow models at non-default efforts cannot escape exclusion, and grok-4.7:max steps down to low
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+  const ranked = rankCandidates(rtProfile, {
+    candidateModels: [
+      { id: "argon_med", provider: "antigravity", account: "agy", model: "gemini-4-argon-high", effort: "medium" },
+      { id: "argon_low", provider: "antigravity", account: "agy", model: "gemini-4-argon-high", effort: "low" },
+      { id: "qwen_max_low", provider: "opencode", account: "oc", model: "qwen3.8-max", effort: "low" },
+      { id: "grok_max", provider: "grok", account: "grok", model: "grok-4.7", effort: "max" },
+    ],
+  });
+  const byId = Object.fromEntries(ranked.allCandidates.map((c) => [c.id, c]));
+  assert.equal(byId.argon_med.eligible, false);
+  assert.equal(byId.argon_med.components.responsiveness, 0);
+  assert.equal(byId.argon_med.components.responsiveness_source, "measured");
+  assert.equal(byId.argon_low.eligible, false);
+  assert.equal(byId.argon_low.components.responsiveness, 0);
+  assert.equal(byId.qwen_max_low.eligible, false);
+  assert.equal(byId.qwen_max_low.components.responsiveness, 0);
+  assert.equal(byId.grok_max.eligible, true);
+  assert.equal(byId.grok_max.effort, "low", "grok-4.7:max must step down to low (0.744)");
+  assert.equal(byId.grok_max.realtime_stepped_from, "max");
+});
+
+test("10.10 Finding 2: `isCandidatePinned` only matches the user-pinned bundle/model; pinned slow model wins selection with warnings while unpinned slow models are excluded", () => {
+  // 1. Direct isCandidatePinned checks
+  assert.equal(
+    isCandidatePinned(
+      { id: "ag_argon", model: "gemini-4-argon-high", effort: "high" },
+      "gemini-4-argon-high",
+      { constraint_model: "claude-sonnet-5-5", constraint_effort: "high" },
+    ),
+    false,
+    "constraint_effort alone must not pin a different model",
+  );
+  assert.equal(
+    isCandidatePinned(
+      { id: "opus_high", model: "claude-opus-5-5", effort: "high" },
+      "claude-opus-5-5",
+      { constraint_model: "claude-opus-5-5", constraint_effort: "low" },
+    ),
+    false,
+    "wrong effort on constrained model must not be treated as pinned",
+  );
+  assert.equal(
+    isCandidatePinned(
+      { id: "opus_low", model: "claude-opus-5-5", effort: "low" },
+      "claude-opus-5-5",
+      { constraint_model: "claude-opus-5-5", constraint_effort: "low" },
+    ),
+    true,
+  );
+
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  // 2. When user pins claude-sonnet-5-5 at high, unpinned slow models at high are excluded without pin warnings
+  const sonnetPinnedRes = rankCandidates(rtProfile, {
+    constraintModel: "claude-sonnet-5-5",
+    constraintEffort: "high",
+    candidateModels: [
+      { id: "ag_argon", provider: "antigravity", account: "agy", model: "gemini-4-argon-high", effort: "high" },
+      { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      { id: "claude_sonnet_high", provider: "claude", account: "claude", model: "claude-sonnet-5-5", effort: "high" },
+    ],
+  });
+  assert.equal(sonnetPinnedRes.selected.id, "claude_sonnet_high");
+  const argonCand = sonnetPinnedRes.allCandidates.find((c) => c.id === "ag_argon");
+  const opusCand = sonnetPinnedRes.allCandidates.find((c) => c.id === "claude_opus_high");
+  assert.equal(argonCand.eligible, false);
+  assert.equal(argonCand.components.realtime_slow_pin_warning, undefined);
+  assert.equal(opusCand.eligible, false);
+  assert.equal(opusCand.components.realtime_slow_pin_warning, undefined);
+
+  // 3. When user pins a slow model in a multi-candidate pool, the pinned slow model wins selection and selectBestRoute exposes top-level warnings
+  const slowPinnedDecision = selectBestRoute(rtProfile, {
+    pinnedBundle: "ag_argon",
+    constraintModel: "gemini-4-argon-high",
+    candidateModels: [
+      { id: "ag_argon", provider: "antigravity", account: "agy", model: "gemini-4-argon-high", effort: "high" },
+      { id: "claude_sonnet_high", provider: "claude", account: "claude", model: "claude-sonnet-5-5", effort: "high" },
+    ],
+  });
+  assert.equal(slowPinnedDecision.ok, true);
+  assert.equal(slowPinnedDecision.targetModel, "gemini-4-argon-high");
+  assert.equal(slowPinnedDecision.targetEffort, "high");
+  assert.equal(slowPinnedDecision.warnings.length, 1);
+  assert.match(slowPinnedDecision.warnings[0], /too slow per turn for a live loop.*kept per explicit user selection/);
+});
+
+test("10.11 Finding 3: `scoreTaskLive` caller-explicit `realtime_loop` overrides external scorer and isolates LRU cache key", async () => {
+  clearProfileCache();
+  const objective = "Monitor live flash-sale inventory and submit order as soon as button turns active.";
+
+  const mockOpenAiRealtimeTrue = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                work_kind: "computer_use",
+                reasoning_depth: 2,
+                code_complexity: 0,
+                context_scale: 1,
+                divergence: 1,
+                hallucination_risk: 2,
+                error_cost: 2,
+                needs_visual: true,
+                needs_gui: true,
+                local_only: true,
+                realtime_loop: true,
+                interaction_style: "engineering",
+              }),
+            },
+          },
+        ],
+      };
+    },
+  });
+
+  // 1. Caller omitted realtime_loop -> external scorer's realtime_loop: true is used and cached under (objective, null)
+  const resFromLlm = await scoreTaskLive(
+    { objective },
+    {
+      allowExternalScorer: true,
+      scorerType: "openai_compatible",
+      scorerBaseUrl: "http://127.0.0.1:4096/v1",
+      fetch: mockOpenAiRealtimeTrue,
+      useCache: true,
+    },
+  );
+  assert.equal(resFromLlm.profile.realtime_loop, true);
+  assert.equal(resFromLlm.meta.cached, undefined);
+
+  // 2. Caller explicitly passes realtime_loop: false on the SAME objective with useCache: true -> must NOT hit the true cache entry and must override LLM output to false
+  const resCallerFalse = await scoreTaskLive(
+    { objective, realtime_loop: false },
+    {
+      allowExternalScorer: true,
+      scorerType: "openai_compatible",
+      scorerBaseUrl: "http://127.0.0.1:4096/v1",
+      fetch: mockOpenAiRealtimeTrue,
+      useCache: true,
+    },
+  );
+  assert.equal(resCallerFalse.profile.realtime_loop, false, "caller explicit realtime_loop: false must override LLM scorer");
+  assert.equal(resCallerFalse.meta.cached, undefined, "cache key must isolate explicit realtime_loop: false from omitted");
+
+  // 3. Jev scorer with caller explicit needs.realtime_loop: false also honors caller override
+  const mockJevRealtimeTrue = async () => ({
+    ok: true,
+    status: 200,
+    async json() {
+      return {
+        answers: {
+          work_kind: { choice: "computer_use" },
+          interaction_style: { choice: "engineering" },
+          reasoning_depth: { score: 1 },
+          code_complexity: { score: 0 },
+          context_scale: { score: 0 },
+          divergence: { score: 0 },
+          hallucination_risk: { score: 1 },
+          error_cost: { score: 1 },
+          needs_visual: { noul: 0.9 },
+          needs_gui: { noul: 0.9 },
+          local_only: { noul: 0.9 },
+          realtime_loop: { noul: 0.95 },
+        },
+      };
+    },
+  });
+  const resJevCallerFalse = await scoreTaskLive(
+    { objective, needs: { realtime_loop: false } },
+    {
+      allowExternalScorer: true,
+      scorerType: "jev",
+      jevBaseUrl: "http://127.0.0.1:4096",
+      fetch: mockJevRealtimeTrue,
+      useCache: false,
+    },
+  );
+  assert.equal(resJevCallerFalse.profile.realtime_loop, false, "caller needs.realtime_loop: false must override Jev scorer");
+});
+
+test("10.12 Finding 4: Continuation effort ratchet (`keepsEffort`, `handleSystemOneRequest`, `hooks.onRequest`, `middleware.onRequest`) never undoes `realtime_loop` step-down", async () => {
+  const now = 1_760_000_000_000;
+
+  // 1. Direct keepsEffort check: warm session at high does not ratchet stepped-down medium when realtimeLoop is true
+  const warmSession = {
+    model: "claude-opus-5-5",
+    effort: "high",
+    provider: "claude",
+    tokens: 5000,
+    requestTokens: 5000,
+    updatedAt: now - 10_000,
+  };
+  assert.equal(keepsEffort(warmSession, "medium", 5200, now, { realtimeLoop: false }), "high");
+  assert.equal(keepsEffort(warmSession, "medium", 5200, now, { realtimeLoop: true }), "medium");
+
+  // 2. handleSystemOneRequest with previous_message_reasoning: "high" and realtime_loop: true keeps stepped-down medium
+  const sysOneRes = await handleSystemOneRequest(
+    {
+      model: DECISION_MODEL_ID,
+      state: {
+        message: "Continue monitoring the live order book and placing limit orders on spread triggers.",
+        previous_message_kind: "general_implementation",
+        previous_message_reasoning: "high",
+        realtime_loop: true,
+      },
+      questions: {
+        intent: {
+          type: "choice",
+          criteria: {
+            general_implementation: "General software implementation",
+            bounded_bulk_work: "Routine work",
+          },
+        },
+        effort: {
+          type: "score",
+          criteria: ["low", "medium", "high", "xhigh"],
+        },
+      },
+    },
+    {
+      candidateModels: [
+        { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "high" },
+      ],
+    },
+  );
+  assert.equal(sysOneRes.agentcompass.realtimeLoop, true);
+  assert.equal(sysOneRes.agentcompass.targetEffort, "medium", "handleSystemOneRequest must not ratchet stepped-down medium back to high");
+  assert.equal(sysOneRes.answers.effort.score, 1, "effort answer score must be 1 (medium), not 2 (high)");
+
+  // 3. hooks.onRequest & middleware.onRequest on a warm session at high re-evaluate when realtime_loop: true and keep stepped-down medium
+  const store = new SessionContinuityStore();
+  const turn1Body = {
+    model: "agentcompass/auto",
+    session_id: "sess_rt_ratchet",
+    estimated_input_tokens: 4000,
+    messages: [{ role: "user", content: "Implement the order book parser module in TypeScript." }],
+  };
+  const turn1Ctx = {
+    now,
+    state: {},
+    options: {
+      continuityStore: store,
+      candidateModels: ["claude-opus-5-5:high"],
+    },
+  };
+  await hookOnRequest(turn1Body, turn1Ctx);
+  assert.equal(turn1Ctx.state.route.targetModel, "claude-opus-5-5");
+  assert.equal(turn1Ctx.state.route.targetEffort, "high");
+
+  const turn2Body = {
+    model: "agentcompass/auto",
+    session_id: "sess_rt_ratchet",
+    estimated_input_tokens: 4500,
+    realtime_loop: true,
+    messages: [
+      { role: "user", content: "Implement the order book parser module in TypeScript." },
+      { role: "assistant", content: "Implemented." },
+      { role: "user", content: "Now stay in the live loop watching the order book and firing orders." },
+    ],
+  };
+  const turn2Ctx = {
+    now: now + 5_000,
+    state: {},
+    options: {
+      continuityStore: store,
+      candidateModels: ["claude-opus-5-5:high"],
+    },
+  };
+  await hookOnRequest(turn2Body, turn2Ctx);
+  assert.equal(turn2Ctx.state.route.realtimeLoop, true);
+  assert.equal(turn2Ctx.state.route.targetEffort, "medium", "hooks.onRequest must not ratchet realtime_loop medium back to high");
+
+  const mwStore = new SessionContinuityStore();
+  mwOnRequest(
+    {
+      model: "agentcompass/auto",
+      session_id: "sess_mw_rt",
+      estimated_input_tokens: 4000,
+      messages: [{ role: "user", content: "Implement the order book parser module in TypeScript." }],
+    },
+    {
+      now,
+      options: {
+        continuityStore: mwStore,
+        candidateModels: ["claude-opus-5-5:high"],
+      },
+    },
+  );
+  const mwCtx2 = {
+    now: now + 5_000,
+    state: {},
+    options: {
+      continuityStore: mwStore,
+      candidateModels: ["claude-opus-5-5:high"],
+    },
+  };
+  const mwTurn2 = mwOnRequest(
+    {
+      model: "agentcompass/auto",
+      session_id: "sess_mw_rt",
+      estimated_input_tokens: 4500,
+      realtime_loop: true,
+      messages: [
+        { role: "user", content: "Implement the order book parser module in TypeScript." },
+        { role: "assistant", content: "Implemented." },
+        { role: "user", content: "Now stay in the live loop watching the order book and firing orders." },
+      ],
+    },
+    mwCtx2,
+  );
+  assert.equal(mwTurn2.model, "claude-opus-5-5:medium", "middleware.onRequest must not ratchet realtime_loop medium back to high");
+  assert.equal(mwCtx2.state.route.targetEffort, "medium");
+});
+
+test("10.13 Finding 5: String candidates and provider-less object candidates honor `spec.efforts` and `DISPATCH_EFFORTS` without fabricating step-down", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    reasoning_depth: 1,
+    code_complexity: 1,
+    work_kind: "bounded_bulk_work",
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  // 1. String candidate "claude-haiku-5-5:high": DISPATCH_EFFORTS.claude["claude-haiku-5-5"] is ["high"], so it cannot step down to medium and is excluded (0.439 < 0.50)
+  const haikuRes = rankCandidates(rtProfile, {
+    candidateModels: ["claude-haiku-5-5:high"],
+  });
+  const haikuCand = haikuRes.allCandidates[0];
+  assert.equal(haikuCand.effort, "high", "string candidate claude-haiku-5-5:high must respect DISPATCH_EFFORTS.claude=['high']");
+  assert.equal(haikuCand.realtime_stepped_from, undefined);
+  assert.equal(haikuCand.eligible, false);
+  assert.ok(haikuCand.excluded.some((e) => e.includes("too slow per turn for a live loop")));
+
+  // 2. String candidate "gpt-6-luna:xhigh": DISPATCH_EFFORTS.codex["gpt-6-luna"] is ["high"], so it steps down to high (0.664)
+  const lunaRes = rankCandidates(rtProfile, {
+    candidateModels: ["gpt-6-luna:xhigh"],
+  });
+  const lunaCand = lunaRes.allCandidates[0];
+  assert.equal(lunaCand.effort, "high");
+  assert.equal(lunaCand.realtime_stepped_from, "xhigh");
+  assert.equal(lunaCand.eligible, true);
+
+  // 3. Provider-less object candidates `{ model: "gpt-6.1-terra" }`, `{ model: "gemini-4-argon-high" }`, and `{ model: "grok-bot" }` honor spec.fixed_effort / spec.efforts
+  const objRes = rankCandidates(rtProfile, {
+    candidateModels: [{ model: "gpt-6.1-terra" }, { model: "gemini-4-argon-high" }, { model: "grok-bot" }],
+  });
+  assert.deepEqual(
+    objRes.allCandidates.map((c) => `${c.model}:${c.effort}`),
+    [
+      "gpt-6.1-terra:high",
+      "gemini-4-argon-high:low",
+      "gemini-4-argon-high:medium",
+      "gemini-4-argon-high:high",
+      "grok-bot:medium",
+    ],
+  );
+  assert.equal(objRes.allCandidates.find((c) => c.model === "gpt-6.1-terra").eligible, true);
+  assert.ok(
+    objRes.allCandidates
+      .filter((c) => c.model !== "gpt-6.1-terra")
+      .every((c) => c.eligible === false),
+  );
+});
+
+test("10.14 Finding 6: `MODEL_ALIASES` does not shadow dedicated `EFFORT_RESPONSIVENESS` / `DISPATCH_EFFORTS` for `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`, and `validateProfile` preserves `realtime_loop`", () => {
+  // 1. Legacy Claude 4.6 / 4.5 models use their own dedicated curves in EFFORT_RESPONSIVENESS and DISPATCH_EFFORTS
+  assert.deepEqual(
+    bundleResponsiveness({ model: "claude-opus-4-6", effort: "none" }),
+    { value: 0.853, source: "measured" },
+  );
+  assert.deepEqual(
+    bundleResponsiveness({ model: "claude-opus-4-6", effort: "high" }),
+    { value: 0, source: "measured" },
+  );
+  assert.deepEqual(
+    bundleResponsiveness({ model: "claude-sonnet-4-6", effort: "low" }),
+    { value: 0.874, source: "measured" },
+  );
+  assert.deepEqual(
+    bundleResponsiveness({ model: "claude-sonnet-4-6", effort: "high" }),
+    { value: 0, source: "measured" },
+  );
+  assert.deepEqual(
+    bundleResponsiveness({ model: "claude-haiku-4-5", effort: "none" }),
+    { value: 0.978, source: "measured" },
+  );
+  assert.deepEqual(
+    bundleResponsiveness({ model: "claude-haiku-4-5", effort: "high" }),
+    { value: 0, source: "measured" },
+  );
+
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+  const legacyClaudeRanked = rankCandidates(rtProfile, {
+    candidateModels: ["claude-opus-4-6:high", "claude-sonnet-4-6:high", "claude-haiku-4-5:high"],
+  });
+  for (const cand of legacyClaudeRanked.allCandidates) {
+    assert.equal(cand.effort, "high", `${cand.model} must not step down since DISPATCH_EFFORTS.claude only allows ['high']`);
+    assert.equal(cand.eligible, false, `${cand.model}@high has responsiveness 0.0 and must be excluded`);
+    assert.equal(cand.components.responsiveness, 0);
+  }
+
+  // 2. grok-bot has fixed_effort: "medium" in DEFAULT_MODELS
+  assert.equal(DEFAULT_MODELS["grok-bot"].fixed_effort, "medium");
+
+  // 3. validateProfile preserves realtime_loop (true when true, false when false or omitted)
+  const validatedTrue = validateProfile({ ...REALTIME_BASE_PROFILE, realtime_loop: true });
+  assert.equal(validatedTrue.realtime_loop, true);
+  assert.equal("realtime_loop" in validatedTrue, true);
+  const { realtime_loop: _omitted, ...withoutRt } = REALTIME_BASE_PROFILE;
+  const validatedOmitted = validateProfile(withoutRt);
+  assert.equal(validatedOmitted.realtime_loop, false);
+  assert.equal("realtime_loop" in validatedOmitted, true);
+});
+
