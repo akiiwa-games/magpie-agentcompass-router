@@ -630,7 +630,6 @@ export const DEFAULT_MODELS = {
     excluded_when: "local_only",
     text_only: true,
     disabled_by_default: true,
-    fixed_effort: "medium",
     responsiveness: "not_applicable",
     responsiveness_status: "not_applicable",
     efforts: ["high"],
@@ -1662,6 +1661,37 @@ export const DEFAULT_SCORING_POLICY = {
   },
 };
 
+const MODEL_SUFFIX_STRIP_RE = /(?:@\d{8}|-\d{8}|:\w+|-(?:latest|preview))$/i;
+
+function matchKnownModelOrAlias(
+  candidate,
+  aliases = MODEL_ALIASES,
+  models = DEFAULT_MODELS,
+  respTable = EFFORT_RESPONSIVENESS,
+) {
+  if (!candidate) return null;
+  if (aliases && aliases[candidate]) return aliases[candidate];
+  if (models && candidate in models) return candidate;
+  if (respTable && candidate in respTable) return candidate;
+  const low = candidate.toLowerCase();
+  if (aliases) {
+    for (const [k, v] of Object.entries(aliases)) {
+      if (k.toLowerCase() === low) return v;
+    }
+  }
+  if (models) {
+    for (const k of Object.keys(models)) {
+      if (k.toLowerCase() === low) return k;
+    }
+  }
+  if (respTable) {
+    for (const k of Object.keys(respTable)) {
+      if (k.toLowerCase() === low) return k;
+    }
+  }
+  return null;
+}
+
 /**
  * Strip provider prefix (`provider/model`) and `:effort` suffix if present, then resolve alias.
  */
@@ -1671,7 +1701,11 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
   const colonIdx = clean.lastIndexOf(":");
   if (colonIdx > 0) {
     const suffix = clean.slice(colonIdx + 1).toLowerCase();
-    if (["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto"].includes(suffix)) {
+    if (
+      ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto", "default"].includes(
+        suffix,
+      )
+    ) {
       clean = clean.slice(0, colonIdx);
     }
   }
@@ -1682,10 +1716,116 @@ export function canonicalModel(rawModel, aliases = MODEL_ALIASES) {
   // `resolve_canonical_model` does. An unknown id keeps only its first prefix stripped (`openrouter/qwen/foo` ->
   // `qwen/foo`), the key quota.js and continuity.js already match on.
   const last = clean.slice(clean.lastIndexOf("/") + 1);
-  for (const name of [unprefixed, unprefixed.toLowerCase(), last, last.toLowerCase()]) {
-    if (aliases[name]) return aliases[name];
+  for (const cand of [clean, unprefixed, last]) {
+    const direct = matchKnownModelOrAlias(cand, aliases, DEFAULT_MODELS, EFFORT_RESPONSIVENESS);
+    if (direct) return direct;
+    let cur = cand;
+    while (cur) {
+      const stripped = cur.replace(MODEL_SUFFIX_STRIP_RE, "").replace(/\[1m\]$/i, "");
+      if (stripped === cur) break;
+      cur = stripped;
+      const hit = matchKnownModelOrAlias(cur, aliases, DEFAULT_MODELS, EFFORT_RESPONSIVENESS);
+      if (hit) return hit;
+    }
+  }
+  const knownKeys = [
+    ...Object.keys(DEFAULT_MODELS),
+    ...Object.keys(EFFORT_RESPONSIVENESS),
+    ...Object.keys(aliases || {}),
+  ].sort((a, b) => b.length - a.length);
+  const lowLast = last.toLowerCase();
+  for (const k of knownKeys) {
+    const kl = k.toLowerCase();
+    if (lowLast.startsWith(`${kl}-`) || lowLast.startsWith(`${kl}:`)) {
+      return (aliases && aliases[k]) || k;
+    }
   }
   return unprefixed;
+}
+
+/**
+ * Resolve the model key used for responsiveness and dispatch-effort lookup (`allocator.py:canonical`),
+ * preserving dedicated curves for legacy models (e.g. `claude-opus-4-6`, `claude-sonnet-4-6`, `claude-haiku-4-5`)
+ * that `MODEL_ALIASES` maps to newer generations for general scoring.
+ */
+export function resolveResponsivenessModelKey(
+  rawModel,
+  models = DEFAULT_MODELS,
+  aliases = MODEL_ALIASES,
+  curvesTable = EFFORT_CURVES,
+  respTable = EFFORT_RESPONSIVENESS,
+) {
+  if (!rawModel || typeof rawModel !== "string") {
+    return { key: "", known: false };
+  }
+  let clean = rawModel.trim().replace(/\[1m\]$/i, "");
+  const colonIdx = clean.lastIndexOf(":");
+  if (colonIdx > 0) {
+    const suffix = clean.slice(colonIdx + 1).toLowerCase();
+    if (
+      ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "auto", "default"].includes(
+        suffix,
+      )
+    ) {
+      clean = clean.slice(0, colonIdx);
+    }
+  }
+  const leaf = clean.slice(clean.lastIndexOf("/") + 1);
+
+  const matchDirect = (s) => {
+    if (!s) return null;
+    if (respTable && s in respTable) return s;
+    if (curvesTable && s in curvesTable) return s;
+    if (models && s in models) return s;
+    const low = s.toLowerCase();
+    for (const tbl of [respTable, curvesTable, models]) {
+      if (!tbl) continue;
+      for (const k of Object.keys(tbl)) {
+        if (k.toLowerCase() === low) return k;
+      }
+    }
+    return null;
+  };
+
+  const matchAlias = (s) => {
+    if (!s || !aliases) return null;
+    const low = s.toLowerCase();
+    if (low === "claude-haiku-4-5@20251001") return "claude-haiku-4-5";
+    if (aliases[s]) return aliases[s];
+    for (const [k, v] of Object.entries(aliases)) {
+      if (k.toLowerCase() === low) return v;
+    }
+    return null;
+  };
+
+  for (const start of [clean, leaf]) {
+    let cur = start;
+    while (cur) {
+      const d = matchDirect(cur);
+      if (d) return { key: d, known: true };
+      const a = matchAlias(cur);
+      if (a) return { key: a, known: true };
+      const stripped = cur.replace(MODEL_SUFFIX_STRIP_RE, "").replace(/\[1m\]$/i, "");
+      if (stripped === cur) break;
+      cur = stripped;
+    }
+  }
+
+  const allKnown = [
+    ...Object.keys(respTable || {}),
+    ...Object.keys(curvesTable || {}),
+    ...Object.keys(models || {}),
+    ...Object.keys(aliases || {}),
+  ].sort((a, b) => b.length - a.length);
+  const lowLeaf = leaf.toLowerCase();
+  for (const k of allKnown) {
+    const kl = k.toLowerCase();
+    if (lowLeaf.startsWith(`${kl}-`) || lowLeaf.startsWith(`${kl}:`)) {
+      return { key: matchDirect(k) || matchAlias(k) || k, known: true };
+    }
+  }
+
+  return { key: leaf, known: false };
 }
 
 export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
@@ -1697,15 +1837,6 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
     Object.defineProperty(rest, "fuzzyMatch", { value: true, enumerable: false, configurable: true });
     return { canonical, spec: rest, fuzzyMatch: true };
   };
-  const rawLeaf = String(rawModel || "")
-    .trim()
-    .replace(/\[1m\]$/i, "")
-    .replace(/:(?:none|off|minimal|low|medium|high|xhigh|max|ultra|auto)$/i, "")
-    .split("/")
-    .pop();
-  if (rawLeaf && !(rawLeaf in models) && /(?:@\d{8}|-\d{8}|-(?:latest|preview))$/i.test(rawLeaf) && models[name]) {
-    return fuzzySpec(name);
-  }
   if (models[name]) return { canonical: name, spec: models[name] };
   // Fuzzy family fallback for provider-specific or date-suffixed model IDs
   const lower = name.toLowerCase();

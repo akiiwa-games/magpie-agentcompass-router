@@ -287,14 +287,14 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
 
   const rawTaskObj = state.task && typeof state.task === "object" ? state.task : {};
   const explicitStateRt =
-    state.realtime_loop !== undefined && state.realtime_loop !== null
-      ? Boolean(state.realtime_loop)
-      : state.needs && typeof state.needs === "object" && state.needs.realtime_loop !== undefined && state.needs.realtime_loop !== null
-        ? Boolean(state.needs.realtime_loop)
-        : rawTaskObj.realtime_loop !== undefined && rawTaskObj.realtime_loop !== null
-          ? Boolean(rawTaskObj.realtime_loop)
-          : rawTaskObj.needs && typeof rawTaskObj.needs === "object" && rawTaskObj.needs.realtime_loop !== undefined && rawTaskObj.needs.realtime_loop !== null
-            ? Boolean(rawTaskObj.needs.realtime_loop)
+    typeof state.realtime_loop === "boolean"
+      ? state.realtime_loop
+      : state.needs && typeof state.needs === "object" && typeof state.needs.realtime_loop === "boolean"
+        ? state.needs.realtime_loop
+        : typeof rawTaskObj.realtime_loop === "boolean"
+          ? rawTaskObj.realtime_loop
+          : rawTaskObj.needs && typeof rawTaskObj.needs === "object" && typeof rawTaskObj.needs.realtime_loop === "boolean"
+            ? rawTaskObj.needs.realtime_loop
             : undefined;
 
   // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)

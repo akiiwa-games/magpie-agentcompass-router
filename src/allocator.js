@@ -25,6 +25,7 @@ import {
   SUBJECTIVE_DIMENSIONS,
   canonicalModel,
   resolveModelSpec,
+  resolveResponsivenessModelKey,
 } from "./catalog.js";
 import { inferTaskProfile, validateProfile } from "./profiler-core.js";
 import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
@@ -584,6 +585,8 @@ export function bundleHarness(bundle, account = null, bundleId = null) {
   const bid = String(bundleId || bundle?.id || "").trim().toLowerCase();
   const launchM = String(bundle?.launch_model || "").trim().toLowerCase();
   const model = String(bundle?.model || "").trim().toLowerCase();
+  const modelLeaf = model.replace(/\[1m\]$/i, "").split("/").pop();
+  const canonLeaf = canonicalModel(modelLeaf).toLowerCase();
   if (
     [
       "claude",
@@ -605,42 +608,50 @@ export function bundleHarness(bundle, account = null, bundleId = null) {
   if (
     launchM.startsWith("opencode/") ||
     model.startsWith("opencode/") ||
-    model.includes("deepseek-v4.1-flash-free")
+    modelLeaf.includes("deepseek-v4.1-flash-free") ||
+    canonLeaf.includes("deepseek-v4.1-flash-free")
   ) {
     return "opencode";
   }
   if (prov === "dot" || prov === "chatgpt-web") {
     return prov;
   }
-  if (model === "dot") {
+  if (modelLeaf === "dot" || canonLeaf === "dot") {
     return "dot";
   }
-  if (model.startsWith("grok-bot")) {
+  if (modelLeaf.startsWith("grok-bot") || canonLeaf.startsWith("grok-bot")) {
     return "grok-bot";
   }
-  if (model.startsWith("grok-")) {
+  if (modelLeaf.startsWith("grok-") || canonLeaf.startsWith("grok-")) {
     return "grok";
   }
-  if (model.startsWith("gemini-")) {
+  if (modelLeaf.startsWith("gemini-") || canonLeaf.startsWith("gemini-")) {
     return "antigravity-resilient";
   }
-  if (model === "glm-5.2") {
+  if (modelLeaf === "glm-5.2" || canonLeaf === "glm-5.2") {
     return "omp";
   }
-  if (model.includes("claude")) {
+  if (modelLeaf.includes("claude") || canonLeaf.includes("claude")) {
     return "claude";
   }
   return "codex";
 }
 
 export function scoringEffort(bundle, info) {
-  return bundle?.effort || info?.fixed_effort || info?.default_effort || "high";
+  const raw = bundle?.effort || info?.fixed_effort || info?.default_effort || "high";
+  return String(raw).trim().toLowerCase() || "high";
 }
 
 export function bundleApplies(bundle, taskCtx = {}) {
   const rule = bundle?.when;
   if (!rule || typeof rule !== "object") return true;
-  if (taskCtx?.pinned_bundle && bundle?.id && taskCtx.pinned_bundle === bundle.id) {
+  const pinnedId =
+    taskCtx?.pinned_bundle ||
+    taskCtx?.pinnedBundle ||
+    taskCtx?.constraint_bundle ||
+    taskCtx?.constraintBundle ||
+    taskCtx?.constraints?.bundle;
+  if (pinnedId && bundle?.id && pinnedId === bundle.id) {
     return true;
   }
   if ("max_reasoning_depth" in rule) {
@@ -681,11 +692,37 @@ export function bundleCooldownReason(bundle, launchFailures, nowMs = Date.now())
   return null;
 }
 
+const KNOWN_EFFORT_SUFFIXES = [
+  "none",
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra",
+  "auto",
+  "default",
+];
+
+function splitPinModelAndEffort(normConstraint) {
+  const colonIdx = normConstraint.lastIndexOf(":");
+  if (colonIdx > 0) {
+    const suffix = normConstraint.slice(colonIdx + 1).trim().toLowerCase();
+    if (KNOWN_EFFORT_SUFFIXES.includes(suffix)) {
+      return { modelPart: normConstraint.slice(0, colonIdx).trim(), effortPart: suffix };
+    }
+  }
+  return { modelPart: normConstraint, effortPart: null };
+}
+
 export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
   if (!taskCtx || typeof taskCtx !== "object") return false;
-  if (bundle?.pinned === true) return true;
   const bid = bundle?.id;
   const rawModel = bundle?.model;
+  const candEff = String(bundle?.effort || "high").trim().toLowerCase();
+  const computedId = rawModel ? `${rawModel}:${candEff}` : null;
   const rawLeaf = rawModel && String(rawModel).includes("/") ? String(rawModel).split("/").pop() : rawModel;
   const pinnedBundle = taskCtx.pinned_bundle || taskCtx.pinnedBundle;
   const constraintBundle = taskCtx.constraint_bundle || taskCtx.constraintBundle || taskCtx.constraints?.bundle;
@@ -701,24 +738,37 @@ export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
     taskCtx.pinned_effort ||
     taskCtx.pinnedEffort ||
     taskCtx.constraints?.effort;
-  if (bid && (pinnedBundle === bid || constraintBundle === bid)) {
+  if (
+    (bid && (pinnedBundle === bid || constraintBundle === bid)) ||
+    (computedId && (pinnedBundle === computedId || constraintBundle === computedId))
+  ) {
     return true;
   }
   if (constraintModel) {
     const normConstraint = String(constraintModel).trim();
-    const colonIdx = normConstraint.lastIndexOf(":");
-    const modelPart = colonIdx > 0 ? normConstraint.slice(0, colonIdx) : normConstraint;
-    const effortPart = colonIdx > 0 ? normConstraint.slice(colonIdx + 1).toLowerCase() : null;
+    const { modelPart, effortPart } = splitPinModelAndEffort(normConstraint);
+    const aliases = taskCtx.aliases || MODEL_ALIASES;
+    const models = taskCtx.models || DEFAULT_MODELS;
+    const canonConstraint = canonicalModel(modelPart, aliases);
+    const respConstraint = resolveResponsivenessModelKey(modelPart, models, aliases).key;
+    const respCand = resolveResponsivenessModelKey(rawModel || canonical, models, aliases).key;
+    const candCanon = canonical || canonicalModel(rawModel, aliases);
     if (
       normConstraint === bid ||
+      normConstraint === computedId ||
       modelPart === bid ||
       modelPart === rawModel ||
       modelPart === rawLeaf ||
-      modelPart === canonical
+      modelPart === candCanon ||
+      (canonConstraint &&
+        (canonConstraint === candCanon ||
+          canonConstraint === rawModel ||
+          canonConstraint === rawLeaf)) ||
+      (respConstraint && (respConstraint === respCand || respConstraint === candCanon))
     ) {
       if (!effortPart && !constraintEffort) return true;
-      const candEff = String(bundle?.effort || "high").toLowerCase();
-      if ((effortPart && effortPart === candEff) || (constraintEffort && String(constraintEffort).toLowerCase() === candEff)) {
+      const normConstraintEff = constraintEffort ? String(constraintEffort).trim().toLowerCase() : null;
+      if ((!effortPart || effortPart === candEff) && (!normConstraintEff || normConstraintEff === candEff)) {
         return true;
       }
       return false;
@@ -728,20 +778,24 @@ export function isCandidatePinned(bundle, canonical, taskCtx = {}) {
 }
 
 function resolveModelCurves(rawModel, canonical, fuzzy, catalog = {}) {
+  const models = catalog.models || DEFAULT_MODELS;
+  const aliases = catalog.aliases || MODEL_ALIASES;
   const curvesTable = catalog.effortCurves || EFFORT_CURVES;
   const respTable = catalog.effortResponsiveness || EFFORT_RESPONSIVENESS;
-  const rawKey = String(rawModel || "").trim();
-  const rawLeaf = rawKey.includes("/") ? rawKey.split("/").pop() : rawKey;
-  const dedicatedCurve = curvesTable?.[rawKey] || curvesTable?.[rawLeaf] || null;
-  const dedicatedResp =
-    dedicatedCurve?.responsiveness ||
-    respTable?.[rawKey] ||
-    respTable?.[rawLeaf];
+  const { key: respKey, known } = resolveResponsivenessModelKey(
+    rawModel || canonical,
+    models,
+    aliases,
+    curvesTable,
+    respTable,
+  );
+  const dedicatedCurve = curvesTable?.[respKey] || null;
+  const dedicatedResp = dedicatedCurve?.responsiveness || respTable?.[respKey];
   if (dedicatedResp) {
     if (dedicatedCurve) {
       return { ...dedicatedCurve, responsiveness: dedicatedResp };
     }
-    if (rawKey !== canonical && rawLeaf !== canonical) {
+    if (respKey !== canonical) {
       return {
         ability: { default: 0.0, high: 0.0 },
         burn: { default: 0.7, high: 0.7 },
@@ -752,7 +806,7 @@ function resolveModelCurves(rawModel, canonical, fuzzy, catalog = {}) {
     return { ...rawCurves, responsiveness: dedicatedResp };
   }
   const rawCurves = curvesTable?.[canonical] || {};
-  if (fuzzy) {
+  if (fuzzy && !known) {
     return { ...rawCurves, responsiveness: undefined };
   }
   const canonResp = rawCurves.responsiveness || respTable?.[canonical];
@@ -809,6 +863,8 @@ export function bundleResponsiveness(
   let effectiveCurves = curves;
   if (!effectiveCurves || (!effectiveCurves.responsiveness && canonical)) {
     const resolvedCurves = resolveModelCurves(rawModel, canonical, fuzzy, {
+      models: options.models,
+      aliases: options.aliases,
       effortCurves: options.effortCurves,
       effortResponsiveness: options.effortResponsiveness,
     });
@@ -817,16 +873,21 @@ export function bundleResponsiveness(
       : resolvedCurves;
   }
 
-  const hasDedicatedRawResp =
-    (options.effortCurves || EFFORT_CURVES)?.[rawModel]?.responsiveness ||
-    (options.effortResponsiveness || EFFORT_RESPONSIVENESS)?.[rawModel];
+  const { known: isKnownModel } = resolveResponsivenessModelKey(
+    rawModel || canonical,
+    options.models || DEFAULT_MODELS,
+    options.aliases || MODEL_ALIASES,
+    options.effortCurves || EFFORT_CURVES,
+    options.effortResponsiveness || EFFORT_RESPONSIVENESS,
+  );
+  const unmeasuredFuzzy = fuzzy && !isKnownModel;
   const curvesResp =
-    (!fuzzy || hasDedicatedRawResp) && effectiveCurves && typeof effectiveCurves === "object"
+    !unmeasuredFuzzy && effectiveCurves && typeof effectiveCurves === "object"
       ? effectiveCurves.responsiveness
       : null;
   let base = lookupCurveResponsiveness(curvesResp, eff, defaultEff);
 
-  if (base === null && !fuzzy) {
+  if (base === null && !unmeasuredFuzzy) {
     if (rawResp && typeof rawResp === "object") {
       base = lookupCurveResponsiveness(rawResp, eff, defaultEff);
     } else if (typeof rawResp === "number" && Number.isFinite(rawResp)) {
@@ -836,7 +897,7 @@ export function bundleResponsiveness(
     }
   }
 
-  if (base === null && !fuzzy) {
+  if (base === null && !unmeasuredFuzzy) {
     const metrics = spec.speed_metrics && typeof spec.speed_metrics === "object" ? spec.speed_metrics : {};
     const ttft = metrics.ttft_s;
     const tps = metrics.output_tps;
@@ -981,6 +1042,7 @@ export function resolveRealtimeEffort(
   const models = catalog.models || DEFAULT_MODELS;
   const aliases = catalog.aliases || MODEL_ALIASES;
   const dispatchEffortsTable = catalog.dispatchEfforts || DISPATCH_EFFORTS;
+  const hasExplicitEffort = Boolean(bundle?.effort || info?.fixed_effort || info?.default_effort);
   const rawEffort = scoringEffort(bundle, info);
   const effHarness = ctx.harness || bundle?.harness || bundleHarness(bundle, bundle?.account, bundle?.id);
 
@@ -1003,7 +1065,8 @@ export function resolveRealtimeEffort(
     );
 
   if (respSource === "not_applicable" || respVal === null || respVal === undefined) {
-    return makeReturn(rawEffort, respVal, respSource, null);
+    const naEffort = hasExplicitEffort ? rawEffort : (bundle?.effort ?? info?.fixed_effort ?? null);
+    return makeReturn(naEffort, respVal, respSource, null);
   }
   const respFloor = Number(responsivenessConfig(policy).floor ?? 0.5);
   if (respVal >= respFloor) {
@@ -1115,10 +1178,18 @@ export function resolveRealtimeEffort(
       : null);
   if (dispatchTable) {
     const rawModelKey = bundle?.model || canonical;
-    const rawLeafKey = String(rawModelKey || "").split("/").pop();
+    const rawLeafKey = String(rawModelKey || "").replace(/\[1m\]$/i, "").split("/").pop();
+    const { key: respKey } = resolveResponsivenessModelKey(
+      rawModelKey,
+      models,
+      aliases,
+      catalog.effortCurves || EFFORT_CURVES,
+      catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+    );
     allowedEfforts =
       dispatchTable[rawModelKey] ||
       dispatchTable[rawLeafKey] ||
+      dispatchTable[respKey] ||
       dispatchTable[canonical] ||
       null;
   }
@@ -1178,7 +1249,9 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const rawModel = candidate.model;
   const { canonical, spec: info, fuzzyMatch } = resolveModelSpec(rawModel, models, aliases);
   const rawEffort = scoringEffort(candidate, info);
-  const curves = resolveModelCurves(rawModel, canonical, fuzzyMatch, catalog);
+  const curves = taskCtx.realtime_loop
+    ? resolveModelCurves(rawModel, canonical, fuzzyMatch, catalog)
+    : (catalog.effortCurves || EFFORT_CURVES)[canonical] || {};
   const excluded = [];
   const notes = [];
 
@@ -1195,13 +1268,14 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (candidate.id && taskCtx.unavailable instanceof Set && taskCtx.unavailable.has(candidate.id)) {
     excluded.push("marked unavailable by the parent");
   }
+  const computedId = rawModel ? `${rawModel}:${rawEffort}` : null;
   const pinnedBundle =
     taskCtx.pinned_bundle ||
     taskCtx.pinnedBundle ||
     taskCtx.constraint_bundle ||
     taskCtx.constraintBundle ||
     taskCtx.constraints?.bundle;
-  if (pinnedBundle && candidate.id !== pinnedBundle) {
+  if (pinnedBundle && candidate.id !== pinnedBundle && computedId !== pinnedBundle) {
     excluded.push("explicit bundle constraint");
   }
   const constraintModel =
@@ -1212,16 +1286,23 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     taskCtx.constraints?.model;
   if (constraintModel) {
     const normConstraint = String(constraintModel).trim();
-    const colonIdx = normConstraint.lastIndexOf(":");
-    const modelPart = colonIdx > 0 ? normConstraint.slice(0, colonIdx) : normConstraint;
-    const effortPart = colonIdx > 0 ? normConstraint.slice(colonIdx + 1).toLowerCase() : null;
+    const { modelPart, effortPart } = splitPinModelAndEffort(normConstraint);
     const rawLeaf = rawModel && String(rawModel).includes("/") ? String(rawModel).split("/").pop() : rawModel;
+    const canonConstraint = canonicalModel(modelPart, aliases);
+    const respConstraint = resolveResponsivenessModelKey(modelPart, models, aliases).key;
+    const respCand = resolveResponsivenessModelKey(rawModel || canonical, models, aliases).key;
     const modelMatches =
       normConstraint === candidate.id ||
+      normConstraint === computedId ||
       modelPart === candidate.id ||
       modelPart === rawModel ||
       modelPart === rawLeaf ||
-      modelPart === canonical;
+      modelPart === canonical ||
+      (canonConstraint &&
+        (canonConstraint === canonical ||
+          canonConstraint === rawModel ||
+          canonConstraint === rawLeaf)) ||
+      (respConstraint && (respConstraint === respCand || respConstraint === canonical));
     if (!modelMatches) {
       excluded.push("explicit model constraint");
     } else if (effortPart && String(rawEffort).toLowerCase() !== effortPart) {
@@ -1234,7 +1315,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
     taskCtx.pinned_effort ||
     taskCtx.pinnedEffort ||
     taskCtx.constraints?.effort;
-  if (constraintEffort && String(rawEffort).toLowerCase() !== String(constraintEffort).toLowerCase()) {
+  if (constraintEffort && String(rawEffort).toLowerCase() !== String(constraintEffort).trim().toLowerCase()) {
     excluded.push("explicit effort constraint");
   }
   const cooling = bundleCooldownReason(candidate, taskCtx.launch_failures || taskCtx.launchFailures, taskCtx.now);
@@ -1280,7 +1361,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       gate,
       now: taskCtx.now,
     });
-    effort = resolved.effort;
+    effort = resolved.effort || rawEffort;
     respVal = resolved.responsiveness;
     respSource = resolved.source;
     steppedFrom = resolved.steppedFrom;
@@ -1534,8 +1615,11 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   const hours = Number(taskCtx.hours ?? taskCtx.profile?.expected_hours ?? 0.5);
   const expectedUsd = round4(hours * Number(info.usd_per_hour ?? 3.0) * Math.max(effortScale, 0.0));
 
+  const preserveBundleId = Boolean(
+    candidate.id && (taskCtx.realtime_loop || isCandidatePinned(candidate, canonical, taskCtx)),
+  );
   const out = {
-    id: candidate.id || `${rawModel}:${effort}`,
+    id: preserveBundleId ? candidate.id : `${rawModel}:${effort}`,
     model: rawModel,
     canonicalModel: canonical,
     effort,
@@ -1593,6 +1677,66 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   return out;
 }
 
+function realtimeBareCandidateEfforts(
+  entryObj,
+  spec,
+  canonical,
+  models = DEFAULT_MODELS,
+  aliases = MODEL_ALIASES,
+  dispatchEffortsTable = DISPATCH_EFFORTS,
+  curvesTable = EFFORT_CURVES,
+  respTable = EFFORT_RESPONSIVENESS,
+) {
+  const rawModel = String(entryObj?.model || "").trim();
+  const encodedRaw = splitEffortFromModelId(rawModel, models, aliases).effort;
+  if (encodedRaw) return [encodedRaw];
+  const encodedCanon = splitEffortFromModelId(canonical, models, aliases).effort;
+  if (encodedCanon) return [encodedCanon];
+
+  const baseEfforts =
+    Array.isArray(spec?.efforts) && spec.efforts.length > 0 ? spec.efforts : ["medium", "high"];
+  const effHarness = entryObj?.harness || bundleHarness(entryObj, entryObj?.account, entryObj?.id);
+  const provider = entryObj?.provider || entryObj?.account;
+  if (
+    effHarness === "antigravity" ||
+    effHarness === "antigravity-resilient" ||
+    provider === "antigravity" ||
+    provider === "antigravity-resilient"
+  ) {
+    return [scoringEffort(entryObj, spec)];
+  }
+  const dispatchTable =
+    (provider && dispatchEffortsTable && typeof dispatchEffortsTable[provider] === "object"
+      ? dispatchEffortsTable[provider]
+      : null) ||
+    (effHarness && dispatchEffortsTable && typeof dispatchEffortsTable[effHarness] === "object"
+      ? dispatchEffortsTable[effHarness]
+      : null);
+  if (dispatchTable) {
+    const rawLeaf = rawModel.replace(/\[1m\]$/i, "").split("/").pop();
+    const { key: respKey } = resolveResponsivenessModelKey(
+      rawModel,
+      models,
+      aliases,
+      curvesTable,
+      respTable,
+    );
+    const allowed =
+      dispatchTable[rawModel] ||
+      dispatchTable[rawLeaf] ||
+      dispatchTable[respKey] ||
+      dispatchTable[canonical] ||
+      null;
+    if (Array.isArray(allowed) && allowed.length > 0) {
+      const filtered = baseEfforts.filter((e) => allowed.includes(e));
+      if (filtered.length > 0) return filtered;
+      const validAllowed = allowed.filter((e) => EFFORT_ORDER.includes(e));
+      if (validAllowed.length > 0) return validAllowed;
+    }
+  }
+  return baseEfforts;
+}
+
 /**
  * Expand candidate models into `(model, effort)` bundles and rank them for the given task profile.
  */
@@ -1613,17 +1757,14 @@ export function rankCandidates(profileInput, options = {}) {
     ? validateProfile(rawProfile)
     : inferTaskProfile(profileInput || {}, routes);
   const callerNeeds = profileInput?.needs && typeof profileInput.needs === "object" ? profileInput.needs : {};
+  const isTaskWrapper = Boolean(rawProfile && profileInput !== rawProfile);
   const explicitRealtimeLoop =
-    "realtime_loop" in options && options.realtime_loop !== undefined && options.realtime_loop !== null
-      ? Boolean(options.realtime_loop)
-      : "realtime_loop" in callerNeeds && callerNeeds.realtime_loop !== undefined && callerNeeds.realtime_loop !== null
-        ? Boolean(callerNeeds.realtime_loop)
-        : rawProfile &&
-            profileInput !== rawProfile &&
-            "realtime_loop" in profileInput &&
-            profileInput.realtime_loop !== undefined &&
-            profileInput.realtime_loop !== null
-          ? Boolean(profileInput.realtime_loop)
+    typeof options.realtime_loop === "boolean"
+      ? options.realtime_loop
+      : typeof callerNeeds.realtime_loop === "boolean"
+        ? callerNeeds.realtime_loop
+        : isTaskWrapper && typeof profileInput.realtime_loop === "boolean"
+          ? profileInput.realtime_loop
           : Boolean(profile.realtime_loop);
   if (profile.realtime_loop !== explicitRealtimeLoop) {
     profile = { ...profile, realtime_loop: explicitRealtimeLoop };
@@ -1669,7 +1810,8 @@ export function rankCandidates(profileInput, options = {}) {
   const unhealthySet = new Set(
     (options.unhealthyModels || []).map((m) => canonicalModel(m, aliases)).filter(Boolean)
   );
-  const unavailableSet = new Set(options.unavailable || profileInput?.unavailable || []);
+  const taskOpts = !rawProfile || isTaskWrapper ? profileInput : null;
+  const unavailableSet = new Set(options.unavailable || taskOpts?.unavailable || []);
   const continuity =
     options.continuity ||
     (options.previousModel
@@ -1724,26 +1866,28 @@ export function rankCandidates(profileInput, options = {}) {
     subjective_weights: sWeights,
     unhealthy_models: unhealthySet,
     unavailable: unavailableSet,
-    launch_failures: options.launchFailures || options.launch_failures || profileInput?.launch_failures || null,
-    pinned_bundle: options.pinnedBundle || options.pinned_bundle || profileInput?.pinned_bundle || null,
-    constraint_bundle: options.constraintBundle || options.constraint_bundle || profileInput?.constraint_bundle || null,
+    launch_failures: options.launchFailures || options.launch_failures || taskOpts?.launch_failures || null,
+    pinned_bundle: options.pinnedBundle || options.pinned_bundle || taskOpts?.pinned_bundle || null,
+    constraint_bundle: options.constraintBundle || options.constraint_bundle || taskOpts?.constraint_bundle || null,
     constraint_model:
       options.constraintModel ||
       options.constraint_model ||
       options.pinnedModel ||
       options.pinned_model ||
-      profileInput?.constraint_model ||
-      profileInput?.constraints?.model ||
+      taskOpts?.constraint_model ||
+      taskOpts?.constraints?.model ||
       null,
     constraint_effort:
       options.constraintEffort ||
       options.constraint_effort ||
       options.pinnedEffort ||
       options.pinned_effort ||
-      profileInput?.constraint_effort ||
-      profileInput?.constraints?.effort ||
+      taskOpts?.constraint_effort ||
+      taskOpts?.constraints?.effort ||
       null,
-    constraints: options.constraints || profileInput?.constraints || null,
+    constraints: options.constraints || taskOpts?.constraints || null,
+    models,
+    aliases,
     localTelemetry: options.localTelemetry || null,
     min_context_tokens: Number(options.minContextTokens || 0),
     continuity,
@@ -1760,15 +1904,24 @@ export function rankCandidates(profileInput, options = {}) {
     if (typeof entry === "string") {
       const colonIdx = entry.lastIndexOf(":");
       if (colonIdx > 0) {
-        const suffix = entry.slice(colonIdx + 1).toLowerCase();
+        const suffix = entry.slice(colonIdx + 1).trim().toLowerCase();
         if (EFFORT_ORDER.includes(suffix)) {
           rawExpanded.push({ model: entry.slice(0, colonIdx), effort: suffix });
           continue;
         }
       }
-      const { spec } = resolveModelSpec(entry, models, aliases);
-      const efforts = spec.fixed_effort
-        ? [spec.fixed_effort]
+      const { canonical, spec } = resolveModelSpec(entry, models, aliases);
+      const efforts = taskCtx.realtime_loop
+        ? realtimeBareCandidateEfforts(
+            { model: entry },
+            spec,
+            canonical,
+            models,
+            aliases,
+            catalog.dispatchEfforts || DISPATCH_EFFORTS,
+            catalog.effortCurves || EFFORT_CURVES,
+            catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+          )
         : Array.isArray(spec.efforts) && spec.efforts.length > 0
           ? spec.efforts
           : ["medium", "high"];
@@ -1776,19 +1929,26 @@ export function rankCandidates(profileInput, options = {}) {
         rawExpanded.push({ model: entry, effort: eff });
       }
     } else if (entry && typeof entry === "object" && entry.model) {
-      const { spec } = resolveModelSpec(entry.model, models, aliases);
+      const { canonical, spec } = resolveModelSpec(entry.model, models, aliases);
       const isBundleObj = Boolean(entry.id || entry.provider || entry.account || entry.harness || entry.when);
       const efforts = Array.isArray(entry.efforts)
-        ? entry.efforts
+        ? entry.efforts.map((e) => String(e).trim().toLowerCase()).filter(Boolean)
         : entry.effort
-          ? [entry.effort]
-          : isBundleObj
-            ? [scoringEffort(entry, spec)]
-            : spec.fixed_effort
-              ? [spec.fixed_effort]
-              : Array.isArray(spec.efforts) && spec.efforts.length > 0
-                ? spec.efforts
-                : ["medium", "high"];
+          ? [String(entry.effort).trim().toLowerCase()]
+          : !taskCtx.realtime_loop
+            ? ["medium", "high"]
+            : isBundleObj
+              ? [scoringEffort(entry, spec)]
+              : realtimeBareCandidateEfforts(
+                  entry,
+                  spec,
+                  canonical,
+                  models,
+                  aliases,
+                  catalog.dispatchEfforts || DISPATCH_EFFORTS,
+                  catalog.effortCurves || EFFORT_CURVES,
+                  catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+                );
       for (const eff of efforts) {
         rawExpanded.push({ ...entry, model: entry.model, effort: eff });
       }

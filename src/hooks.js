@@ -167,6 +167,12 @@ export async function onRequest(body, ctx = {}) {
     cacheTtl: options.cacheTtl,
     models: options.catalog?.models,
     aliases: options.catalog?.aliases,
+    realtime_loop:
+      typeof facts.realtime_loop === "boolean"
+        ? facts.realtime_loop
+        : typeof options.realtime_loop === "boolean"
+          ? options.realtime_loop
+          : undefined,
   });
 
   // Fast path: Hold active session Provider/Model without calling the intent classifier
@@ -290,9 +296,9 @@ export async function onRequest(body, ctx = {}) {
     quotas: liveQuotas,
     meteredOk: options.meteredOk,
     now,
-    ...(facts.realtime_loop !== undefined
+    ...(typeof facts.realtime_loop === "boolean"
       ? { realtime_loop: facts.realtime_loop }
-      : options.realtime_loop !== undefined
+      : typeof options.realtime_loop === "boolean"
         ? { realtime_loop: options.realtime_loop }
         : {}),
     continuity: {
@@ -310,9 +316,9 @@ export async function onRequest(body, ctx = {}) {
       candidateModels,
       catalog: options.catalog,
       now,
-      ...(facts.realtime_loop !== undefined
+      ...(typeof facts.realtime_loop === "boolean"
         ? { realtime_loop: facts.realtime_loop }
-        : options.realtime_loop !== undefined
+        : typeof options.realtime_loop === "boolean"
           ? { realtime_loop: options.realtime_loop }
           : {}),
     });

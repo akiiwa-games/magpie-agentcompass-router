@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
+  bundleHarness,
   bundleResponsiveness,
   burnScale,
   computeTurnSeconds,
@@ -23,13 +25,16 @@ import {
   turnSecondsToResponsiveness,
 } from "../src/allocator.js";
 import {
+  CANONICAL_ROUTES,
   DEFAULT_MODELS,
   DEFAULT_SCORING_POLICY,
   DISPATCH_EFFORTS,
   EFFORT_CURVES,
   EFFORT_RESPONSIVENESS,
+  MODEL_ALIASES,
   canonicalModel,
   resolveModelSpec,
+  resolveResponsivenessModelKey,
 } from "../src/catalog.js";
 import {
   CACHE_COLD_MS,
@@ -3012,7 +3017,7 @@ test("10.6 v0.4.1 User-pinned model or effort on `realtime_loop` is neither step
   );
 });
 
-test("10.7 v0.4.1 Unmeasured models & fuzzy date/family variants get conservative `0.52` and mark `responsiveness: default`", () => {
+test("10.7 v0.4.1 Unmeasured models get conservative `0.52` (`responsiveness: default`), while date/`-latest`/`-preview` variants of measured models use measured curves", () => {
   const rtProfile = validateProfile({
     ...REALTIME_BASE_PROFILE,
     work_kind: "general_implementation",
@@ -3021,16 +3026,16 @@ test("10.7 v0.4.1 Unmeasured models & fuzzy date/family variants get conservativ
     realtime_loop: true,
   });
 
+  // 1. Models that have no measured responsiveness in AgentCompass (Python also returns 0.52 / 'default')
   for (const unmeasuredModel of [
-    "claude-opus-5-5-20260901",
-    "gpt-6.1-sol-20260901",
-    "gpt-6-astra-preview",
-    "grok-4.7-latest",
-    "claude-opus-5-6",
+    "gpt-6-pro",
+    "doubao-seed-2-1-pro-260628",
+    "qwen3-max",
+    "qwen3-flash-2025-07-28",
+    "llama-4-maverick",
     "custom-unmeasured-model-v1",
   ]) {
     const resolved = resolveModelSpec(unmeasuredModel);
-    assert.equal(resolved.fuzzyMatch, true, `${unmeasuredModel} must be marked as fuzzyMatch`);
     const [respVal, respSrc] = bundleResponsiveness({ model: unmeasuredModel, effort: "high" }, resolved.spec);
     assert.equal(respVal, 0.52, `${unmeasuredModel} must use conservative default 0.52`);
     assert.equal(respSrc, "default", `${unmeasuredModel} must have source 'default'`);
@@ -3040,6 +3045,20 @@ test("10.7 v0.4.1 Unmeasured models & fuzzy date/family variants get conservativ
     assert.equal(cand.components.responsiveness, 0.52);
     assert.equal(cand.components.responsiveness_source, "default");
     assert.ok(cand.notes.includes("responsiveness: default"), `${unmeasuredModel} notes must include 'responsiveness: default'`);
+  }
+
+  // 2. Date / -latest / -preview variants of known measured models resolve to their measured responsiveness (matching Python canonical)
+  const measuredVariants = [
+    ["claude-opus-5-5-20260901", "high", 0.107],
+    ["gpt-6.1-sol-20260901", "high", 0],
+    ["gpt-6-astra-preview", "high", 0],
+    ["grok-4.7-latest", "high", 0.201],
+    ["claude-opus-5-6", "high", 0.107],
+  ];
+  for (const [variantModel, eff, expectedResp] of measuredVariants) {
+    const [respVal, respSrc] = bundleResponsiveness({ model: variantModel, effort: eff });
+    assert.equal(respVal, expectedResp, `${variantModel}@${eff} must resolve to measured ${expectedResp}`);
+    assert.equal(respSrc, "measured", `${variantModel}@${eff} must have source 'measured'`);
   }
 
   // Verify computeTurnSeconds and turnSecondsToResponsiveness math matches AgentCompass allocator.py
@@ -3541,7 +3560,7 @@ test("10.13 Finding 5: String candidates and provider-less object candidates hon
   assert.equal(lunaCand.realtime_stepped_from, "xhigh");
   assert.equal(lunaCand.eligible, true);
 
-  // 3. Provider-less object candidates `{ model: "gpt-6.1-terra" }`, `{ model: "gemini-4-argon-high" }`, and `{ model: "grok-bot" }` honor spec.fixed_effort / spec.efforts
+  // 3. Provider-less object candidates `{ model: "gpt-6.1-terra" }`, `{ model: "gemini-4-argon-high" }`, and `{ model: "grok-bot" }` honor DISPATCH_EFFORTS / splitEffortFromModelId / scoringEffort on realtime_loop
   const objRes = rankCandidates(rtProfile, {
     candidateModels: [{ model: "gpt-6.1-terra" }, { model: "gemini-4-argon-high" }, { model: "grok-bot" }],
   });
@@ -3549,10 +3568,8 @@ test("10.13 Finding 5: String candidates and provider-less object candidates hon
     objRes.allCandidates.map((c) => `${c.model}:${c.effort}`),
     [
       "gpt-6.1-terra:high",
-      "gemini-4-argon-high:low",
-      "gemini-4-argon-high:medium",
       "gemini-4-argon-high:high",
-      "grok-bot:medium",
+      "grok-bot:high",
     ],
   );
   assert.equal(objRes.allCandidates.find((c) => c.model === "gpt-6.1-terra").eligible, true);
@@ -3606,8 +3623,8 @@ test("10.14 Finding 6: `MODEL_ALIASES` does not shadow dedicated `EFFORT_RESPONS
     assert.equal(cand.components.responsiveness, 0);
   }
 
-  // 2. grok-bot has fixed_effort: "medium" in DEFAULT_MODELS
-  assert.equal(DEFAULT_MODELS["grok-bot"].fixed_effort, "medium");
+  // 2. grok-bot keeps fixed_effort unset in DEFAULT_MODELS so non-realtime effort remains 'high' (m6)
+  assert.equal(DEFAULT_MODELS["grok-bot"].fixed_effort, undefined);
 
   // 3. validateProfile preserves realtime_loop (true when true, false when false or omitted)
   const validatedTrue = validateProfile({ ...REALTIME_BASE_PROFILE, realtime_loop: true });
@@ -3618,4 +3635,654 @@ test("10.14 Finding 6: `MODEL_ALIASES` does not shadow dedicated `EFFORT_RESPONS
   assert.equal(validatedOmitted.realtime_loop, false);
   assert.equal("realtime_loop" in validatedOmitted, true);
 });
+
+test("10.15 Round-2 B1, M2, m6 + README 2304-profile grid & hooks e2e 94-route non-realtime 0-diff invariance vs origin/main", async () => {
+  const nonRtProfile = {
+    work_kind: "general_implementation",
+    reasoning_depth: 3,
+    code_complexity: 2,
+    context_scale: 3,
+    divergence: 2,
+    hallucination_risk: 2,
+    error_cost: 2,
+    interaction_style: "exploration",
+    needs_visual: false,
+    needs_gui: false,
+    local_only: false,
+    realtime_loop: false,
+  };
+
+  // B1: Legacy Claude names use canonical 5.5 ability/burn curves on non-realtime tasks
+  const opus46NonRt = rankCandidates(nonRtProfile, { candidateModels: ["claude-opus-4-6"] });
+  const opus46ByEff = Object.fromEntries(opus46NonRt.allCandidates.map((c) => [c.effort, c]));
+  assert.equal(opus46ByEff.low.components.ability_value, 3.76);
+  assert.equal(opus46ByEff.low.components.effort_penalty, 0);
+  assert.equal(opus46ByEff.medium.score, 0.3427);
+  assert.equal(opus46ByEff.high.score, 0.3547);
+  assert.equal(opus46ByEff.xhigh.components.effort_penalty, 0.0186);
+  assert.equal(opus46ByEff.max.components.effort_penalty, 0.0475);
+
+  const sonnet46NonRt = rankCandidates(nonRtProfile, { candidateModels: ["claude-sonnet-4-6"] });
+  const sonnet46ByEff = Object.fromEntries(sonnet46NonRt.allCandidates.map((c) => [c.effort, c]));
+  assert.equal(sonnet46ByEff.high.score, 0.284);
+  assert.equal(sonnet46ByEff.xhigh.components.effort_penalty, 0.0375);
+  assert.equal(sonnet46ByEff.max.components.effort_penalty, 0.1279);
+
+  // M2: Non-realtime object candidates without effort/efforts expand to ["medium", "high"] for both {model} and {id,provider,model}
+  for (const candObj of [
+    { model: "claude-opus-5-5" },
+    { id: "o", provider: "claude", model: "claude-opus-5-5" },
+    { model: "gpt-6.1-terra" },
+  ]) {
+    const res = rankCandidates(nonRtProfile, { candidateModels: [candObj] });
+    assert.deepEqual(
+      res.allCandidates.map((c) => c.effort),
+      ["medium", "high"],
+      `Non-realtime object candidate ${JSON.stringify(candObj)} must expand to ['medium', 'high']`,
+    );
+  }
+
+  // m6: grok-bot non-realtime effort remains "high" (not "medium")
+  const grokBotNonRt = rankCandidates(nonRtProfile, { candidateModels: ["grok-bot"] });
+  assert.equal(grokBotNonRt.selected.id, "grok-bot:high");
+  assert.equal(grokBotNonRt.selected.effort, "high");
+
+  // Materialize origin/main src/ into a temp dir and verify 0 diffs across the 2304-profile grid & 94 e2e routes
+  const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  const tmpMainDir = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-origin-main-"));
+  try {
+    const srcFiles = [
+      "allocator.js",
+      "catalog.js",
+      "continuity.js",
+      "hooks.js",
+      "index.js",
+      "middleware.js",
+      "profiler-core.js",
+      "quota-loader.js",
+      "quota.js",
+      "scorer-live.js",
+    ];
+    for (const f of srcFiles) {
+      const content = execFileSync("git", ["show", `origin/main:src/${f}`], {
+        cwd: repoRoot,
+        encoding: "utf8",
+      });
+      fs.writeFileSync(path.join(tmpMainDir, f), content, "utf8");
+    }
+    const mainUrl = (f) => pathToFileURL(path.join(tmpMainDir, f)).href;
+    const mainAlloc = await import(mainUrl("allocator.js"));
+    const mainHooks = await import(mainUrl("hooks.js"));
+    const mainMw = await import(mainUrl("middleware.js"));
+    const mainIdx = await import(mainUrl("index.js"));
+    const mainCont = await import(mainUrl("continuity.js"));
+
+    const NOW = 1790000000000;
+    const routes = Object.keys(CANONICAL_ROUTES);
+    const styles = ["engineering", "exploration", "text_only", "advisory"];
+    const grid = [];
+    for (const work_kind of routes) {
+      for (const reasoning_depth of [1, 2, 3, 4]) {
+        for (const code_complexity of [0, 1, 2, 3]) {
+          for (const divergence of [1, 2, 3]) {
+            for (const error_cost of [1, 2, 3]) {
+              grid.push({
+                work_kind,
+                reasoning_depth,
+                code_complexity,
+                context_scale: ((reasoning_depth + divergence) % 3) + 1,
+                divergence,
+                hallucination_risk: ((code_complexity + error_cost) % 3) + 1,
+                error_cost,
+                interaction_style: styles[(reasoning_depth + code_complexity) % 4],
+                needs_visual: work_kind === "visual_analysis" || work_kind === "computer_use",
+                needs_gui: work_kind === "computer_use",
+                local_only: false,
+              });
+            }
+          }
+        }
+      }
+    }
+    assert.equal(grid.length, 2304);
+
+    const shapes = {
+      "README pool (strings)": ["claude-opus-4-6", "claude-sonnet-4-6", "gpt-5.4", "gemini-2.5-pro", "gemini-2.5-flash"],
+      "legacy claude + modern": ["claude-opus-4-6:xhigh", "claude-sonnet-4-6:medium", "claude-haiku-4-5:medium", "claude-sonnet-5-5:high", "gpt-6-astra:high"],
+      "modern strings": ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra", "gpt-6.1-sol", "gemini-4-argon-high", "gemini-3.8-flash-high", "grok-4.7"],
+      "grok-bot string": ["grok-bot", "claude-sonnet-5-5:high"],
+      "{model} objects": [{ model: "claude-opus-5-5" }, { model: "claude-sonnet-5-5" }, { model: "gpt-6-astra" }, { model: "gpt-6.1-terra" }],
+      "{id,provider,model} no effort": [
+        { id: "o", provider: "claude", model: "claude-opus-5-5" },
+        { id: "s", provider: "claude", model: "claude-sonnet-5-5" },
+        { id: "a", provider: "codex", model: "gpt-6-astra" },
+      ],
+      "{id,provider,model,effort}": [
+        { id: "o", provider: "claude", model: "claude-opus-5-5", effort: "high" },
+        { id: "s", provider: "claude", model: "claude-sonnet-5-5", effort: "high" },
+        { id: "a", provider: "codex", model: "gpt-6-astra", effort: "high" },
+      ],
+    };
+
+    const pickSummary = (r) => (r.selected ? { id: r.selected.id, m: r.selected.model, e: r.selected.effort, s: r.selected.score } : null);
+    for (const [shapeName, pool] of Object.entries(shapes)) {
+      let diffs = 0;
+      for (const p of grid) {
+        const a = pickSummary(mainAlloc.rankCandidates(p, { candidateModels: pool, now: NOW }));
+        const b = pickSummary(rankCandidates(p, { candidateModels: pool, now: NOW }));
+        if (JSON.stringify(a) !== JSON.stringify(b)) {
+          diffs++;
+        }
+      }
+      assert.equal(diffs, 0, `2304-profile non-realtime grid must have 0 diffs vs origin/main on shape: ${shapeName}`);
+    }
+
+    // Hooks / middleware / index e2e 94-route invariance (47 calibration tasks x 2 turns)
+    const cleanRoute = (o) => {
+      if (!o || typeof o !== "object") return o;
+      if (Array.isArray(o)) return o.map(cleanRoute);
+      const out = {};
+      for (const [k, v] of Object.entries(o)) {
+        if (
+          [
+            "realtimeLoop",
+            "realtime_loop",
+            "scorer",
+            "latencyMs",
+            "sessionKey",
+            "responsiveness",
+            "responsivenessSource",
+            "warnings",
+          ].includes(k)
+        ) {
+          continue;
+        }
+        out[k] = cleanRoute(v);
+      }
+      return out;
+    };
+
+    const casesPath = "E:/PROJECTS/route_manager/skills/agent-compass/references/classifier-cases.json";
+    if (fs.existsSync(casesPath)) {
+      const casesDoc = JSON.parse(fs.readFileSync(casesPath, "utf8"));
+      const cases = Array.isArray(casesDoc) ? casesDoc : casesDoc.calibration_cases || casesDoc.cases || [];
+      const texts = cases.map((c) => c.task || c.objective).filter(Boolean);
+      assert.equal(texts.length, 47);
+
+      for (const [poolName, pool] of Object.entries({
+        README: shapes["README pool (strings)"],
+        modern: shapes["modern strings"],
+      })) {
+        let hookRoutes = 0;
+        let hookDiffs = 0;
+        let mwDiffs = 0;
+        let idxDiffs = 0;
+
+        for (const text of texts) {
+          const runHookTurns = async (onReqFn, StoreCls) => {
+            const store = new StoreCls();
+            const results = [];
+            const msgs = [{ role: "user", content: text }];
+            for (let i = 0; i < 2; i++) {
+              const body = { model: "agentcompass", messages: [...msgs], metadata: { session_id: "e2e" } };
+              const ctx = { options: { continuityStore: store, candidateModels: pool, now: NOW + i * 1000 }, state: {} };
+              await onReqFn(body, ctx);
+              results.push(ctx.state.route);
+              msgs.push({ role: "assistant", content: "ok" }, { role: "user", content: "Now also write the docs for this" });
+            }
+            return results;
+          };
+
+          const mainRes = await runHookTurns(mainHooks.onRequest, mainCont.SessionContinuityStore);
+          const headRes = await runHookTurns(hookOnRequest, SessionContinuityStore);
+          hookRoutes += 2;
+          for (let i = 0; i < 2; i++) {
+            if (JSON.stringify(cleanRoute(mainRes[i])) !== JSON.stringify(cleanRoute(headRes[i]))) {
+              hookDiffs++;
+            }
+          }
+
+          const runMwSingle = (mwFn, StoreCls) => {
+            const store = new StoreCls();
+            const body = { model: "agentcompass", messages: [{ role: "user", content: text }], metadata: { session_id: "m" } };
+            mwFn(body, { options: { continuityStore: store, candidateModels: pool, now: NOW }, state: {} });
+            return body;
+          };
+          if (JSON.stringify(runMwSingle(mainMw.onRequest, mainCont.SessionContinuityStore)) !== JSON.stringify(runMwSingle(mwOnRequest, SessionContinuityStore))) {
+            mwDiffs++;
+          }
+
+          const q = { effort: { question: "e", choices: { low: "low", medium: "medium", high: "high", xhigh: "xhigh", max: "max" } } };
+          for (const st of [{}, { previous_message_kind: "general_implementation", previous_message_reasoning: "high" }]) {
+            const mAns = (await mainIdx.handleSystemOneRequest({ model: "jev-6b-int8", state: { message: text, ...st }, questions: q }, { candidateModels: pool })).answers;
+            const hAns = (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: text, ...st }, questions: q }, { candidateModels: pool })).answers;
+            if (JSON.stringify(mAns) !== JSON.stringify(hAns)) {
+              idxDiffs++;
+            }
+          }
+        }
+
+        assert.equal(hookRoutes, 94);
+        assert.equal(hookDiffs, 0, `hooks 94 routes must have 0 diffs vs origin/main on pool=${poolName}`);
+        assert.equal(mwDiffs, 0, `middleware 47 bodies must have 0 diffs vs origin/main on pool=${poolName}`);
+        assert.equal(idxDiffs, 0, `handleSystemOneRequest 94 routes must have 0 diffs vs origin/main on pool=${poolName}`);
+      }
+    }
+  } finally {
+    fs.rmSync(tmpMainDir, { recursive: true, force: true });
+  }
+});
+
+test("10.16 Round-2 M1 & m5: `SessionContinuityStore.recordRequest` persists `realtimeLoop` so consecutive realtime turns hold on cache without re-scoring, and plugin-level `options.realtime_loop` reaches continuation evaluation", async () => {
+  const NOW = 1790000000000;
+  const pad = "\n" + "context ".repeat(800);
+  const msg = (t) => ({ role: "user", content: t });
+
+  // 1. M1: Consecutive realtime_loop turns hold on cache ("why: cache", held: true) and call external scorer only on turn 1
+  const store = new SessionContinuityStore();
+  let scorerCalls = 0;
+  const mockFetch = async () => {
+    scorerCalls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                reasoning_depth: 1,
+                code_complexity: 0,
+                context_scale: 1,
+                divergence: 1,
+                hallucination_risk: 1,
+                error_cost: 1,
+                needs_visual: false,
+                needs_gui: false,
+                local_only: false,
+                realtime_loop: true,
+                interaction_style: "engineering",
+                expected_hours: 0.2,
+                hours_confidence: "high",
+                urgency: "unknown",
+                multi_task: false,
+                task_count: "1",
+                work_kind: "general_implementation",
+              }),
+            },
+          },
+        ],
+      }),
+    };
+  };
+
+  clearProfileCache();
+  const msgs = [];
+  const routes = [];
+  let t = NOW;
+  for (const turnText of ["Keep driving the running browser game", "next action", "next action again"]) {
+    msgs.push(msg(turnText + pad));
+    const ctx = {
+      options: {
+        continuityStore: store,
+        candidateModels: ["claude-opus-5-5:high", "gpt-6.1-terra:high"],
+        allowExternalScorer: true,
+        scorerType: "openai_compatible",
+        scorerBaseUrl: "http://127.0.0.1:9999/v1",
+        fetch: mockFetch,
+        now: t,
+      },
+      state: {},
+    };
+    await hookOnRequest({ model: "agentcompass", messages: [...msgs], metadata: { session_id: "rt-session" } }, ctx);
+    routes.push({
+      modelWithEffort: ctx.state.route.modelWithEffort,
+      why: ctx.state.route.continuation.why,
+      held: ctx.state.route.continuation.held,
+    });
+    const sessionState = store.get(ctx.state.sessionKey, t);
+    assert.equal(sessionState.realtimeLoop, true, "SessionContinuityStore must persist realtimeLoop: true");
+    store.recordResponse(ctx.state.sessionKey, { usage: { input_tokens: 4000, output_tokens: 50 } }, { status: 200 }, t + 1);
+    t += 20000;
+    msgs.push({ role: "assistant", content: "done" });
+  }
+
+  assert.deepEqual(routes, [
+    { modelWithEffort: "gpt-6.1-terra:high", why: "first", held: false },
+    { modelWithEffort: "gpt-6.1-terra:high", why: "cache", held: true },
+    { modelWithEffort: "gpt-6.1-terra:high", why: "cache", held: true },
+  ]);
+  assert.equal(scorerCalls, 1, "External scorer must be called only once on turn 1 when warm cache holds");
+
+  // 2. m5: Plugin-level options.realtime_loop=true on a warm non-realtime session triggers capability_outgrown (realtime_loop_required)
+  for (const mode of ["hooks", "middleware"]) {
+    const m5Store = new SessionContinuityStore();
+    const msgs = [msg("Implement the parser module and unit tests" + pad)];
+    const ctx1 = {
+      options: { continuityStore: m5Store, candidateModels: ["claude-opus-5-5:high"], now: NOW },
+      state: {},
+    };
+    if (mode === "hooks") {
+      await hookOnRequest({ model: "agentcompass", messages: [...msgs], metadata: { session_id: "m5" } }, ctx1);
+    } else {
+      mwOnRequest({ model: "agentcompass", messages: [...msgs], metadata: { session_id: "m5" } }, ctx1);
+    }
+    assert.equal(ctx1.state.route.modelWithEffort, "claude-opus-5-5:high");
+    assert.equal(ctx1.state.route.continuation.why, "first");
+
+    msgs.push({ role: "assistant", content: "ok" }, msg("Now enter the live game loop and click on spawn" + pad));
+    const ctx2 = {
+      options: {
+        continuityStore: m5Store,
+        candidateModels: ["claude-opus-5-5:high"],
+        realtime_loop: true,
+        now: NOW + 10000,
+      },
+      state: {},
+    };
+    if (mode === "hooks") {
+      await hookOnRequest({ model: "agentcompass", messages: [...msgs], metadata: { session_id: "m5" } }, ctx2);
+    } else {
+      mwOnRequest({ model: "agentcompass", messages: [...msgs], metadata: { session_id: "m5" } }, ctx2);
+    }
+    assert.equal(ctx2.state.route.continuation.why, "capability_outgrown", `${mode} must break hold when options.realtime_loop=true`);
+    assert.equal(ctx2.state.route.continuation.held, false);
+    assert.equal(ctx2.state.route.modelWithEffort, "claude-opus-5-5:medium", `${mode} must step down claude-opus-5-5:high to medium`);
+  }
+});
+
+test("10.17 Round-2 M3: Bare string candidates and bare `{ model }` candidates on `realtime_loop` only expand to `DISPATCH_EFFORTS`-supported efforts", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    reasoning_depth: 1,
+    code_complexity: 1,
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  // Bare "claude-sonnet-4-6" and "claude-opus-4-6" only have ["high"] in DISPATCH_EFFORTS.claude, so they cannot expand to "medium" or "low"
+  const claudeBare = rankCandidates(rtProfile, {
+    candidateModels: ["claude-opus-4-6", "claude-sonnet-4-6", { model: "claude-sonnet-4-6" }],
+  });
+  assert.deepEqual(
+    claudeBare.allCandidates.map((c) => `${c.model}:${c.effort}`),
+    ["claude-opus-4-6:high", "claude-sonnet-4-6:high", "claude-sonnet-4-6:high"],
+  );
+  assert.ok(claudeBare.allCandidates.every((c) => c.eligible === false));
+
+  // On the README pool, realtime_loop never selects an undispatchable claude-sonnet-4-6:low/medium
+  const readmePool = ["claude-opus-4-6", "claude-sonnet-4-6", "gpt-5.4", "gemini-2.5-pro", "gemini-2.5-flash"];
+  const route = selectBestRoute(rtProfile, { candidateModels: readmePool });
+  assert.equal(route.ok, true);
+  assert.equal(route.targetModel, "gpt-5.4");
+  assert.ok(["low", "medium"].includes(route.targetEffort));
+});
+
+test("10.18 Round-2 M4: Model name normalization before responsiveness lookup matches Python AgentCompass across spellings, suffixes, and prefixes", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    reasoning_depth: 1,
+    code_complexity: 1,
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  const expectedSpellings = [
+    ["claude-sonnet-4-6:high", 0, "measured", false, "high"],
+    ["claude-sonnet-4-6[1m]:high", 0, "measured", false, "high"],
+    ["anthropic/claude-sonnet-4-6:high", 0, "measured", false, "high"],
+    ["CLAUDE-SONNET-4-6:high", 0, "measured", false, "high"],
+    ["openrouter/anthropic/claude-sonnet-4-6:high", 0, "measured", false, "high"],
+    ["claude-opus-4-6:high", 0, "measured", false, "high"],
+    ["claude-opus-4-6[1m]:high", 0, "measured", false, "high"],
+    ["anthropic/claude-opus-4-6:high", 0, "measured", false, "high"],
+    ["claude-haiku-4-5:medium", 0, "measured", false, "medium"],
+    ["claude-haiku-4-5[1m]:medium", 0, "measured", false, "medium"],
+    ["claude-haiku-4-5@20251001:high", 0, "measured", false, "high"],
+    ["claude-opus-5-5:high", 0.107, "measured", true, "medium"],
+    ["claude-opus-5-5[1m]:high", 0.107, "measured", true, "medium"],
+    ["anthropic/claude-opus-5-5:high", 0.107, "measured", true, "medium"],
+    ["openrouter/anthropic/claude-opus-5-5:high", 0.107, "measured", true, "medium"],
+    ["CLAUDE-OPUS-5-5:high", 0.107, "measured", true, "medium"],
+    ["claude-opus-5-5-20260101:high", 0.107, "measured", true, "medium"],
+    ["claude-opus-5-5-latest:high", 0.107, "measured", true, "medium"],
+    ["claude-opus-5-5@20260101:high", 0.107, "measured", true, "medium"],
+    ["claude-opus-4-8:high", 0.051, "measured", false, "high"],
+    ["anthropic/claude-opus-4-8:high", 0.051, "measured", false, "high"],
+    ["claude-opus-4-7:high", 0, "measured", false, "high"],
+    ["anthropic/claude-opus-4-7:high", 0, "measured", false, "high"],
+    ["gemini-4-carbon:high", 0, "measured", false, "high"],
+    ["google/gemini-4-carbon:high", 0, "measured", false, "high"],
+    ["grok-4.6:high", 0.129, "measured", false, "high"],
+    ["xai/grok-4.6:high", 0.129, "measured", false, "high"],
+    ["grok-4.7-latest:high", 0.201, "measured", true, "low"],
+    ["kimi-k2.6:high", 0, "measured", true, "none"],
+    ["moonshot/kimi-k2.6:high", 0, "measured", true, "none"],
+    ["gpt-6-astra:high", 0, "measured", true, "medium"],
+    ["openai/gpt-6-astra:high", 0, "measured", true, "medium"],
+    ["openrouter/openai/gpt-6-astra:high", 0, "measured", true, "medium"],
+    ["gemini-4-argon:high", 0, "measured", false, "high"],
+    ["gemini-2.5-pro:high", 0, "measured", false, "high"],
+    ["argon:high", 0, "measured", false, "high"],
+  ];
+
+  for (const [specStr, expectedRawResp, expectedSrc, expectedEligible, expectedEff] of expectedSpellings) {
+    const colon = specStr.lastIndexOf(":");
+    const m = specStr.slice(0, colon);
+    const e = specStr.slice(colon + 1);
+    const [val, src] = bundleResponsiveness({ model: m, effort: e });
+    assert.equal(val, expectedRawResp, `${specStr} raw responsiveness must be ${expectedRawResp}`);
+    assert.equal(src, expectedSrc, `${specStr} source must be ${expectedSrc}`);
+
+    const ranked = rankCandidates(rtProfile, { candidateModels: [specStr] });
+    const cand = ranked.allCandidates[0];
+    assert.equal(cand.eligible, expectedEligible, `${specStr} eligibility mismatch`);
+    assert.equal(cand.effort, expectedEff, `${specStr} effective effort mismatch`);
+  }
+
+  // Real Python allocator.py subprocess parity across all 58 models x 10 efforts (580 pairs) + 710 realtime bundle rows
+  const pyScriptsDir = "E:/PROJECTS/route_manager/skills/agent-compass/scripts";
+  const pyAccountsPath = "E:/PROJECTS/route_manager/skills/agent-compass/references/accounts.json";
+  if (fs.existsSync(pyScriptsDir) && fs.existsSync(pyAccountsPath)) {
+    const pyScript = `
+import json, sys, tempfile
+sys.path.insert(0, ${JSON.stringify(pyScriptsDir)})
+import allocator
+accounts = json.loads(open(${JSON.stringify(pyAccountsPath)}, encoding="utf-8-sig").read())
+policy = accounts["scoring"]
+empty = tempfile.mkdtemp()
+efforts = ["none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra", "default", "<noeffort>"]
+all_models = sorted(
+    {k for k, v in accounts["models"].items() if isinstance(v, dict)}
+    | {k for k, v in (accounts.get("effort_curves") or {}).items() if isinstance(v, dict)}
+)
+resp_out = {}
+for m in all_models:
+    info = allocator.model_spec(accounts, m)
+    curves = (accounts.get("effort_curves") or {}).get(m) or {}
+    resp_out[m] = {}
+    for e in efforts:
+        b = {"model": m} if e == "<noeffort>" else {"model": m, "effort": e}
+        v, s = allocator.bundle_responsiveness(b, info, policy, curves, state_dir=empty)
+        resp_out[m][e] = {"value": v, "source": s}
+print(json.dumps(resp_out))
+`;
+    const pyResp = JSON.parse(execFileSync("python", ["-X", "utf8", "-c", pyScript], { encoding: "utf8", maxBuffer: 1 << 26 }));
+    let totalCompared = 0;
+    let totalDiffs = 0;
+    for (const [m, effMap] of Object.entries(pyResp)) {
+      for (const [eff, pyRow] of Object.entries(effMap)) {
+        const bundle = eff === "<noeffort>" ? { model: m } : { model: m, effort: eff };
+        const jsRow = bundleResponsiveness(bundle);
+        totalCompared++;
+        if (jsRow.value !== pyRow.value || jsRow.source !== pyRow.source) {
+          totalDiffs++;
+        }
+      }
+    }
+    assert.equal(totalCompared, 580);
+    assert.equal(totalDiffs, 0, "All 580 (58 Python models x 10 efforts) must have 0 diffs vs Python bundle_responsiveness");
+  }
+});
+
+test("10.19 Round-2 M5 & m2: User pin canonicalization matches aliases/prefixes/computed IDs, and candidate `pinned:true` or profile-level fields never spoof user pins", () => {
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    reasoning_depth: 1,
+    code_complexity: 1,
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+
+  const argon = { id: "ag", provider: "antigravity-resilient", model: "gemini-4-argon-high", effort: "high" };
+  const opus = { id: "op", provider: "claude", model: "claude-opus-5-5", effort: "high" };
+  const fast = { id: "fast", provider: "claude", model: "claude-sonnet-5-5", effort: "medium" };
+
+  // M5: Pinning by alias, provider prefix, or [1m] selects the pinned slow model with warning
+  for (const [pin, cands, expectedSel] of [
+    ["gemini-4-argon-high", [argon, fast], "gemini-4-argon-high:high"],
+    ["gemini-4-argon", [argon, fast], "gemini-4-argon-high:high"],
+    ["google/gemini-4-argon-high", [argon, fast], "gemini-4-argon-high:high"],
+    ["argon", [argon, fast], "gemini-4-argon-high:high"],
+    ["gemini-2.5-pro", [argon, fast], "gemini-4-argon-high:high"],
+    ["claude-opus-5", [opus, fast], "claude-opus-5-5:high"],
+    ["anthropic/claude-opus-5-5", [opus, fast], "claude-opus-5-5:high"],
+    ["claude-opus-5-5[1m]", [opus, fast], "claude-opus-5-5:high"],
+  ]) {
+    const r = selectBestRoute(rtProfile, { constraintModel: pin, candidateModels: cands });
+    assert.equal(r.ok, true, `pin=${pin} must succeed`);
+    assert.equal(r.modelWithEffort, expectedSel, `pin=${pin} must select ${expectedSel}`);
+    assert.equal(r.warnings.length, 1, `pin=${pin} must emit slow-pin warning`);
+  }
+
+  // Computed ID pin on bare string candidates
+  const computedIdPin = selectBestRoute(rtProfile, {
+    pinnedBundle: "gemini-4-argon-high:high",
+    candidateModels: ["gemini-4-argon-high:high", "claude-sonnet-5-5:medium"],
+  });
+  assert.equal(computedIdPin.ok, true);
+  assert.equal(computedIdPin.modelWithEffort, "gemini-4-argon-high:high");
+  assert.equal(computedIdPin.warnings.length, 1);
+
+  // m2: Candidate with `pinned: true` on the candidate object itself is NOT a user pin
+  const spoofedCandidate = rankCandidates(rtProfile, {
+    candidateModels: [{ id: "ag", model: "gemini-4-argon-high", effort: "high", pinned: true }, fast],
+  });
+  const spoofedArgon = spoofedCandidate.allCandidates.find((c) => c.id === "ag");
+  assert.equal(spoofedArgon.eligible, false, "Candidate-level pinned:true must not bypass floor");
+  assert.equal(spoofedArgon.components.realtime_slow_pin_warning, undefined);
+  assert.equal(spoofedCandidate.selected.id, "fast");
+
+  // Pin fields attached to a flat profile object (when options has no pin) are ignored
+  const profileWithSmuggledPin = {
+    ...rtProfile,
+    pinned_bundle: "ag",
+    constraint_model: "gemini-4-argon-high",
+  };
+  const smuggledRes = selectBestRoute(profileWithSmuggledPin, { candidateModels: [argon, fast] });
+  assert.equal(smuggledRes.modelWithEffort, "claude-sonnet-5-5:medium");
+});
+
+test("10.20 Round-2 m1, m3, m4, m7: Strict boolean `realtime_loop` & non-object `body.needs`, prefix-invariant `bundleHarness`, case-insensitive effort, and `inferTaskProfile` origin/main parity", async () => {
+  // m1: Non-object body.needs does not throw; non-boolean realtime_loop ("false", 0, null) is never coerced to true
+  for (const badNeeds of ["visual", 1, null, true, []]) {
+    const facts = extractRequestFacts({
+      model: "agentcompass",
+      messages: [{ role: "user", content: "Fix the login button" }],
+      needs: badNeeds,
+    });
+    assert.equal(facts.realtime_loop, undefined);
+
+    const store = new SessionContinuityStore();
+    const hookBody = {
+      model: "agentcompass",
+      messages: [{ role: "user", content: "Fix the login button" }],
+      needs: badNeeds,
+    };
+    const hookCtx = { options: { continuityStore: store, candidateModels: ["claude-opus-5-5:high"] }, state: {} };
+    await hookOnRequest(hookBody, hookCtx);
+    assert.equal(hookCtx.state.route.modelWithEffort, "claude-opus-5-5:high");
+
+    const mwBody = {
+      model: "agentcompass",
+      messages: [{ role: "user", content: "Fix the login button" }],
+      needs: badNeeds,
+    };
+    mwOnRequest(mwBody, { options: { continuityStore: store, candidateModels: ["claude-opus-5-5:high"] }, state: {} });
+    assert.equal(mwBody.model, "claude-opus-5-5:high");
+  }
+
+  for (const falsyNonBool of ["false", "0", 0, null, undefined, {}, []]) {
+    assert.equal(extractRequestFacts({ messages: [], realtime_loop: falsyNonBool }).realtime_loop, undefined);
+    assert.equal(inferTaskProfile({ objective: "test", realtime_loop: falsyNonBool }).realtime_loop, false);
+    const liveRes = await scoreTaskLive({ objective: "test", realtime_loop: falsyNonBool }, { allowExternalScorer: false });
+    assert.equal(liveRes.profile.realtime_loop, false);
+  }
+
+  // m3: bundleHarness inspects leaf model name so provider prefix never changes harness inference
+  for (const [plain, prefixed, expectedHarness] of [
+    ["gemini-3.8-flash-high", "google/gemini-3.8-flash-high", "antigravity-resilient"],
+    ["gemini-4-argon-high", "openrouter/google/gemini-4-argon-high", "antigravity-resilient"],
+    ["grok-bot", "xai/grok-bot", "grok-bot"],
+    ["grok-4.7", "xai/grok-4.7", "grok"],
+    ["glm-5.2", "zhipu/glm-5.2", "omp"],
+    ["dot", "openai/dot", "dot"],
+    ["claude-opus-5-5", "anthropic/claude-opus-5-5", "claude"],
+  ]) {
+    assert.equal(bundleHarness({ model: plain }), expectedHarness);
+    assert.equal(bundleHarness({ model: prefixed }), expectedHarness);
+  }
+
+  const rtProfile = validateProfile({
+    ...REALTIME_BASE_PROFILE,
+    work_kind: "general_implementation",
+    reasoning_depth: 1,
+    code_complexity: 1,
+    needs_visual: false,
+    needs_gui: false,
+    realtime_loop: true,
+  });
+  const prefixedFlash = rankCandidates(rtProfile, { candidateModels: ["google/gemini-3.8-flash:high"] }).allCandidates[0];
+  assert.equal(prefixedFlash.effort, "high", "google/gemini-3.8-flash:high must infer antigravity-resilient and not step down");
+  assert.equal(prefixedFlash.eligible, false);
+
+  // m4: Object candidate effort is normalized to lowercase and trimmed
+  for (const rawEff of ["HIGH", " high ", "Max", "XHIGH"]) {
+    const r = rankCandidates(rtProfile, {
+      candidateModels: [{ id: "ag", provider: "antigravity-resilient", model: "claude-opus-5-5", effort: rawEff }],
+    });
+    const c = r.allCandidates[0];
+    assert.equal(c.effort, rawEff.trim().toLowerCase());
+    assert.equal(c.eligible, false, `claude-opus-5-5 with effort=${rawEff} on antigravity-resilient must be < 0.50 and excluded`);
+  }
+
+  // m7: inferTaskProfile preserves origin/main behavior for needs_gui / needs_visual / local_only
+  const pGuiFalseOnCu = inferTaskProfile({
+    objective: "click the settings button in the GUI",
+    work_kind: "computer_use",
+    needs: { gui: false },
+  });
+  assert.equal(pGuiFalseOnCu.needs_gui, true);
+
+  const pFlatNeedsGui = inferTaskProfile({
+    objective: "fix the bug",
+    needs_gui: true,
+  });
+  assert.equal(pFlatNeedsGui.needs_gui, false);
+  assert.equal(pFlatNeedsGui.needs_visual, false);
+
+  const pVisualOverride = inferTaskProfile({
+    objective: "fix the bug",
+    needs: { visual: false },
+    hasVisualInput: true,
+  });
+  assert.equal(pVisualOverride.needs_visual, true);
+});
+
 

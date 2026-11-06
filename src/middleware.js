@@ -266,6 +266,7 @@ function replayedState(body, ctx, env, chain, stale, depth) {
     provider: "",
     workKind: d.workKind || "general_implementation",
     difficulty: d.difficulty || "routine",
+    realtimeLoop: Boolean(d.realtimeLoop),
     tokens,
     requestTokens: tokens,
     compactedTokens: Number(stale?.compactedTokens || 0),
@@ -314,6 +315,12 @@ function routeClaimed(body, ctx, env, depth = 0) {
     cacheTtl: options.cacheTtl,
     models: options.catalog?.models,
     aliases: options.catalog?.aliases,
+    realtime_loop:
+      typeof facts.realtime_loop === "boolean"
+        ? facts.realtime_loop
+        : typeof options.realtime_loop === "boolean"
+          ? options.realtime_loop
+          : undefined,
   });
 
   if (cont.shouldHold && cont.model) {
@@ -389,9 +396,9 @@ function routeClaimed(body, ctx, env, depth = 0) {
     quotas: options.quotas,
     meteredOk: options.meteredOk,
     now,
-    ...(facts.realtime_loop !== undefined
+    ...(typeof facts.realtime_loop === "boolean"
       ? { realtime_loop: facts.realtime_loop }
-      : options.realtime_loop !== undefined
+      : typeof options.realtime_loop === "boolean"
         ? { realtime_loop: options.realtime_loop }
         : {}),
     continuity: {
@@ -408,9 +415,9 @@ function routeClaimed(body, ctx, env, depth = 0) {
       candidateModels,
       catalog: options.catalog,
       now,
-      ...(facts.realtime_loop !== undefined
+      ...(typeof facts.realtime_loop === "boolean"
         ? { realtime_loop: facts.realtime_loop }
-        : options.realtime_loop !== undefined
+        : typeof options.realtime_loop === "boolean"
           ? { realtime_loop: options.realtime_loop }
           : {}),
     });

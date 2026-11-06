@@ -1150,9 +1150,15 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
   }
 
   // Realtime loop capability outgrowth on a new user turn when the session was not already routed for realtime_loop
+  const reqRealtimeLoop =
+    typeof facts.realtime_loop === "boolean"
+      ? facts.realtime_loop
+      : typeof options.realtime_loop === "boolean"
+        ? options.realtime_loop
+        : false;
   if (
     affinityMode !== "strict" &&
-    Boolean(facts.realtime_loop ?? options.realtime_loop) &&
+    reqRealtimeLoop &&
     !sessionState.realtimeLoop
   ) {
     return {
@@ -1427,6 +1433,7 @@ export class SessionContinuityStore {
         anchor: decision.anchor ?? existing?.anchor ?? "",
         lastWhy: decision.why || "first",
         lastHeld: Boolean(decision.held),
+        realtimeLoop: decision.realtimeLoop ?? existing?.realtimeLoop ?? false,
       },
       now
     );

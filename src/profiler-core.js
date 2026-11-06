@@ -386,13 +386,14 @@ export function extractRequestFacts(body, ctx = {}) {
   );
 
   const tools = Array.isArray(body.tools) ? body.tools : [];
+  const needsObj = body?.needs && typeof body.needs === "object" ? body.needs : null;
   const explicitRealtimeLoop =
-    ctx && "realtime_loop" in ctx && ctx.realtime_loop !== undefined && ctx.realtime_loop !== null
-      ? Boolean(ctx.realtime_loop)
-      : body?.needs && "realtime_loop" in body.needs && body.needs.realtime_loop !== undefined && body.needs.realtime_loop !== null
-        ? Boolean(body.needs.realtime_loop)
-        : body && "realtime_loop" in body && body.realtime_loop !== undefined && body.realtime_loop !== null
-          ? Boolean(body.realtime_loop)
+    ctx && typeof ctx.realtime_loop === "boolean"
+      ? ctx.realtime_loop
+      : needsObj && typeof needsObj.realtime_loop === "boolean"
+        ? needsObj.realtime_loop
+        : body && typeof body.realtime_loop === "boolean"
+          ? body.realtime_loop
           : undefined;
 
   return {
@@ -817,17 +818,14 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     }
   }
   const gui =
-    needs.gui !== undefined && needs.gui !== null
-      ? Boolean(needs.gui)
-      : task.needs_gui !== undefined && task.needs_gui !== null
-        ? Boolean(task.needs_gui)
-        : kind === "computer_use" ||
-          (kind === "other_or_mixed" && GUI_WORDS.some((w) => lowerObj.includes(w)));
+    kind === "computer_use" ||
+    Boolean(needs.gui) ||
+    (kind === "other_or_mixed" && GUI_WORDS.some((w) => lowerObj.includes(w)));
   const realtimeLoop =
-    "realtime_loop" in needs && needs.realtime_loop !== undefined && needs.realtime_loop !== null
-      ? Boolean(needs.realtime_loop)
-      : "realtime_loop" in task && task.realtime_loop !== undefined && task.realtime_loop !== null
-        ? Boolean(task.realtime_loop)
+    typeof needs.realtime_loop === "boolean"
+      ? needs.realtime_loop
+      : typeof task.realtime_loop === "boolean"
+        ? task.realtime_loop
         : false;
 
   if (depth >= 3) {
@@ -846,17 +844,7 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
   const evidence = `${objective} ${capProfileText(task.context || "", 1000)} ${String(task.cwd || "").slice(0, 500)}`;
   const localHit = OBJECTIVE_LOCAL_RUNTIME_RE.test(evidence) || LOCAL_MACHINE_RE.test(evidence);
   const localOnly =
-    needs.local_only !== undefined && needs.local_only !== null
-      ? Boolean(needs.local_only)
-      : task.local_only !== undefined && task.local_only !== null
-        ? Boolean(task.local_only)
-        : Boolean(localHit || implies.local_only);
-  const needsVisual =
-    needs.visual !== undefined && needs.visual !== null
-      ? Boolean(needs.visual)
-      : task.needs_visual !== undefined && task.needs_visual !== null
-        ? Boolean(task.needs_visual)
-        : Boolean(task.hasVisualInput || implies.visual || gui);
+    needs.local_only !== undefined ? Boolean(needs.local_only) : Boolean(localHit || implies.local_only);
 
   const expectedHours =
     Number.isFinite(Number(task.expected_hours ?? task.hours)) && Number(task.expected_hours ?? task.hours) > 0
@@ -884,7 +872,7 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     divergence,
     hallucination_risk: risk,
     error_cost: cost,
-    needs_visual: needsVisual,
+    needs_visual: Boolean(needs.visual || task.hasVisualInput || implies.visual || gui),
     needs_gui: gui,
     local_only: localOnly,
     realtime_loop: realtimeLoop,

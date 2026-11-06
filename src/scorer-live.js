@@ -102,20 +102,15 @@ export const JEV_SCORE_QUESTIONS = {
 };
 
 function extractExplicitRealtimeLoop(task, options = {}) {
-  if (
-    options &&
-    "realtime_loop" in options &&
-    options.realtime_loop !== undefined &&
-    options.realtime_loop !== null
-  ) {
-    return Boolean(options.realtime_loop);
+  if (options && typeof options.realtime_loop === "boolean") {
+    return options.realtime_loop;
   }
   const needs = task?.needs && typeof task.needs === "object" ? task.needs : {};
-  if ("realtime_loop" in needs && needs.realtime_loop !== undefined && needs.realtime_loop !== null) {
-    return Boolean(needs.realtime_loop);
+  if (typeof needs.realtime_loop === "boolean") {
+    return needs.realtime_loop;
   }
-  if (task && "realtime_loop" in task && task.realtime_loop !== undefined && task.realtime_loop !== null) {
-    return Boolean(task.realtime_loop);
+  if (task && typeof task.realtime_loop === "boolean") {
+    return task.realtime_loop;
   }
   return undefined;
 }
