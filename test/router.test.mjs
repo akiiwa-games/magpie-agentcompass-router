@@ -2477,7 +2477,7 @@ test("9.9 PR #670 Round 2 & 3 Guard: Single-pass bounded work (`scannedChars`, `
 
 
 
-test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-1 route, the tool loop and the next turn", () => {
+test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-1 route, the tool loop, the next turn and past the cache TTL", () => {
   // Magpie hands each request a moejs runtime from a sync.Pool, and middleware has no storage across requests
   // (internal/middleware/middleware.go). Each store below is one runtime's module state; Magpie's ctx carries no
   // headers, so the session is known only by its body.
@@ -2544,6 +2544,48 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
   const loopD = mwOnRequest({ model: "agentcompass/auto", messages: turn2Loop }, runtime(new SessionContinuityStore(), t0 + 4_000));
   assert.equal(loopC.model, turn2B.model, "a record of turn 1 doesn't decide turn 2's tool loop");
   assert.equal(loopD.model, turn2B.model, "turn 2's tool loop is held on a fresh runtime too");
+
+  // Past the cache TTL. The history carries no time, so a fresh runtime can't know the age of the turn it decides
+  // again: its state holds only in the tool loop, and the runtime with the record, which sees the real age, goes
+  // cold as well. A turn 1 large enough that its cache is worth holding (>= 1024 tokens).
+  const dump = Array.from({ length: 300 }, (_, i) => `shard-${i} acquire ShardLock then TxLock; waiter=${i + 1} holds TxLock, wants ShardLock`).join("\n");
+  const big = { role: "user", content: `${first.content}\n\n${dump}` };
+  const auditTask = classifierAnswer(first.content);
+  const nudge = classifierAnswer("继续");
+  const bulkTask = classifierAnswer(bulk.content);
+  const storeE = new SessionContinuityStore();
+  const bigTurn1 = mwOnRequest({ model: "agentcompass/auto", messages: [big] }, runtime(storeE, t0, auditTask));
+  assert.ok(bigTurn1?.model, "the large turn 1 is routed");
+  const bigFollow = [big, { role: "assistant", content: "Found the inversion. Continue with the fix?" }, { role: "user", content: "继续" }];
+  const bigBulk = [big, { role: "assistant", content: "Fixed the lock inversion." }, bulk];
+  const bigLoop = [
+    big,
+    { role: "assistant", content: null, tool_calls: [{ id: "c3", type: "function", function: { name: "read_file", arguments: "{}" } }] },
+    { role: "tool", tool_call_id: "c3", content: "package lock" },
+  ];
+  const decide = (store, messages, at, profile) => {
+    const ctx = runtime(store, at, profile);
+    const out = mwOnRequest({ model: "agentcompass/auto", messages }, ctx);
+    return { model: out.model, held: ctx.state.agentcompass?.continuation?.held, why: ctx.state.agentcompass?.continuation?.why };
+  };
+  const rows = [
+    ["\"继续\" 30 min later", bigFollow, t0 + 30 * 60_000, nudge],
+    ["\"继续\" 3 h later", bigFollow, t0 + 3 * 3_600_000, nudge],
+    ["a new mechanical turn 30 min later", bigBulk, t0 + 30 * 60_000, bulkTask],
+  ];
+  for (const [label, messages, at, profile] of rows) {
+    // Each row on its own copy of the store that routed turn 1, so one row's record doesn't become the next one's
+    const withRecord = new SessionContinuityStore();
+    mwOnRequest({ model: "agentcompass/auto", messages: [big] }, runtime(withRecord, t0, auditTask));
+    const a = decide(withRecord, messages, at, profile);
+    const b = decide(new SessionContinuityStore(), messages, at, profile);
+    assert.equal(a.held, false, `${label}: the runtime with the record lets the session go cold (${a.why})`);
+    assert.deepEqual(b, a, `${label}: a fresh runtime agrees with the runtime that has the record`);
+  }
+  // Inside the TTL the tool loop still holds on a fresh runtime: time doesn't matter there
+  const loopE = decide(new SessionContinuityStore(), bigLoop, t0 + 30 * 60_000, auditTask);
+  assert.equal(loopE.model, bigTurn1.model, "a tool loop holds turn 1's route on a fresh runtime whatever the pause");
+  assert.equal(loopE.why, "turn");
 });
 
 const REALTIME_BASE_PROFILE = {

@@ -481,9 +481,12 @@ test("M3-R3: middleware keeps realtimeLoop through holds and across stateless re
   assert.equal(second.route.targetEffort, first.route.targetEffort);
 
   // A pooled runtime that never saw the session replays it from the history, whose first turn carried the flag.
+  // The replay can't know the turn's age, so the TTL-gated `realtime_loop` hold doesn't apply: the turn routes
+  // again, as realtime, to the same model.
   const replay = await turn(new SessionContinuityStore(), m3, { realtime_loop: true });
   assert.equal(replay.route.realtimeLoop, true);
-  assert.equal(replay.route.continuation.held, true);
+  assert.equal(replay.route.continuation.held, false);
+  assert.equal(replay.route.continuation.why, "cold");
   assert.equal(replay.route.continuation.replayed, true);
   assert.equal(replay.route.targetModel, first.route.targetModel);
 });
