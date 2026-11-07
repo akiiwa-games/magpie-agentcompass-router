@@ -31,9 +31,12 @@ import {
 } from "./continuity.js";
 import { extractRequestFacts, inferTaskProfile } from "./profiler-core.js";
 import {
+  areCandidatesAccountBlocked,
   healthOnlyQuotas,
   listQuotaAccounts,
+  normalizeProviderFamily,
   orderSeatsByQuotaEconomics,
+  providersMatch,
   quotaAccountWarnings,
 } from "./quota.js";
 import { loadLiveQuotas } from "./quota-loader.js";
@@ -112,6 +115,17 @@ function extractModelList(source) {
     return keys.length > 0 ? keys : null;
   }
   return null;
+}
+
+function extractAllProviderModels(options = {}) {
+  const map = options?.modelsByProvider;
+  if (!map || typeof map !== "object" || Array.isArray(map)) return [];
+  const out = [];
+  for (const val of Object.values(map)) {
+    const list = extractModelList(val);
+    if (list) out.push(...list);
+  }
+  return out;
 }
 
 function resolveCandidateModels(body, ctx = {}, options = {}) {
@@ -478,6 +492,29 @@ function routeClaimed(body, ctx, env, depth = 0) {
   }
 
   if (!decision || !decision.targetModel) {
+    if (decision) {
+      const candidateAccountBlocked = Boolean(
+        liveQuotas &&
+          (areCandidatesAccountBlocked(candidateModels, liveQuotas, options, now) ||
+            selectBestRoute(profile, {
+              objective: facts.objective,
+              candidateModels,
+              catalog: options.catalog,
+              unhealthyModels,
+              minContextTokens,
+              quotas: undefined,
+              meteredOk: options.meteredOk,
+              now,
+              ...realtimeOption,
+              ...pins,
+            }).ok)
+      );
+      const providerModelsAll = extractAllProviderModels(options);
+      const hasDispatchableProviderModels =
+        providerModelsAll.length > 0 &&
+        (!liveQuotas || !areCandidatesAccountBlocked(providerModelsAll, liveQuotas, options, now));
+      decision.accountBlocked = candidateAccountBlocked && !hasDispatchableProviderModels;
+    }
     return { facts, sessionKey, record: null, decision };
   }
 
@@ -526,12 +563,14 @@ export function onRequest(body, ctx = {}) {
 
   const options = ctx.options || {};
   const isClaimedModel = shouldRoute(body.model, options);
+  const providerModelsAll = extractAllProviderModels(options);
+  const hasModelsByProvider = providerModelsAll.length > 0;
   const stateRoute =
     isClaimedModel &&
     ctx?.state?.route &&
     typeof ctx.state.route === "object" &&
     ((typeof ctx.state.route.targetModel === "string" && ctx.state.route.targetModel.trim()) ||
-      ctx.state.route.ok === false)
+      (ctx.state.route.ok === false && ctx.state.route.accountBlocked === true && !hasModelsByProvider))
       ? ctx.state.route
       : null;
 
@@ -620,14 +659,22 @@ export function onRequest(body, ctx = {}) {
       }
     }
 
-    if (decision && typeof decision === "object") {
-      ctx.state = ctx.state || {};
-      ctx.state.agentcompass = decision;
-      ctx.state.route = decision;
-    }
-
     if (!decision || decision.ok === false || !decision.targetModel) {
-      if (decision && decision.ok === false && typeof ctx?.reject === "function") {
+      if (
+        decision &&
+        typeof decision === "object" &&
+        (decision.accountBlocked === true || hasModelsByProvider)
+      ) {
+        ctx.state = ctx.state || {};
+        ctx.state.agentcompass = decision;
+        ctx.state.route = decision;
+      }
+      if (
+        decision &&
+        decision.ok === false &&
+        decision.accountBlocked === true &&
+        typeof ctx?.reject === "function"
+      ) {
         return ctx.reject(
           503,
           `agentcompass: no eligible model/account available (${decision.reason || "no_eligible_candidate"})`
@@ -635,6 +682,10 @@ export function onRequest(body, ctx = {}) {
       }
       return dropRealtimeFlag(body) ? body : undefined;
     }
+
+    ctx.state = ctx.state || {};
+    ctx.state.agentcompass = decision;
+    ctx.state.route = decision;
 
     const allowModelRewrite =
       canRewriteModel ||
@@ -679,13 +730,18 @@ export function onProvider(body, ctx = {}) {
     extractModelList(options.modelsByProvider?.[prov?.name]);
 
   const prevDecision = ctx?.state?.agentcompass || ctx?.state?.route;
-  if (prevDecision?.ok === false) {
+  if (
+    prevDecision?.ok === false &&
+    prevDecision?.accountBlocked === true &&
+    (!providerModels || providerModels.length === 0)
+  ) {
     return undefined;
   }
 
   if (providerModels && providerModels.length > 0 && prevDecision?.profile) {
     const needProviderRoute =
       isVirtualModelName(body.model, options) ||
+      prevDecision.ok === false ||
       prevDecision.canRewriteModel === false ||
       prevDecision.hasExplicitCandidates === false ||
       !providerModels.includes(prevDecision.targetModel) ||
@@ -716,10 +772,13 @@ export function onProvider(body, ctx = {}) {
         const updated = {
           ...prevDecision,
           ok: true,
+          accountBlocked: false,
           targetModel: routed.targetModel,
           canonicalModel: routed.canonicalModel,
           targetEffort: routed.targetEffort || prevDecision.targetEffort || "high",
           modelWithEffort: `${routed.targetModel}:${routed.targetEffort || prevDecision.targetEffort || "high"}`,
+          selectedAccount: routed.selectedAccount ?? prevDecision.selectedAccount ?? null,
+          quota: routed.quota ?? prevDecision.quota ?? null,
           canRewriteModel: true,
           hasExplicitCandidates: true,
           ...(routed.warnings?.length ? { warnings: routed.warnings } : {}),
@@ -741,24 +800,23 @@ export function onProvider(body, ctx = {}) {
     typeof prov?.model === "string" &&
     prov.model.trim()
   ) {
-    if (liveQuotas) {
-      const check = selectBestRoute(prevDecision?.profile || { objective: "" }, {
-        objective: "",
-        candidateModels: [prov.model.trim()],
-        catalog: options.catalog,
-        quotas: healthOnlyQuotas(liveQuotas, now, options.catalog?.policy),
-        meteredOk: options.meteredOk,
-        now,
-      });
-      if (!check.ok || !check.targetModel) {
-        return undefined;
-      }
+    if (prevDecision?.ok === false && prevDecision?.accountBlocked === true) {
+      return undefined;
+    }
+    if (liveQuotas && areCandidatesAccountBlocked([prov.model.trim()], liveQuotas, options, now)) {
+      return undefined;
     }
     const fallbackDecision = {
       ...(prevDecision || {}),
+      ok: true,
+      accountBlocked: false,
       targetModel: prov.model.trim(),
       targetEffort: prevDecision?.targetEffort || "high",
     };
+    if (prevDecision && ctx.state && typeof ctx.state === "object") {
+      ctx.state.agentcompass = fallbackDecision;
+      ctx.state.route = fallbackDecision;
+    }
     applyRoutedModelAndEffort(body, fallbackDecision, ctx);
     return body;
   }
@@ -803,7 +861,7 @@ export function onResponse(body, ctx = {}) {
 export function onAccount(accountOrBody, ctx = {}) {
   const decision = ctx?.state?.agentcompass || ctx?.state?.route;
   const options = ctx?.options || {};
-  if (decision?.ok === false) {
+  if (decision?.ok === false && decision?.accountBlocked === true) {
     return { skip: true };
   }
 
@@ -835,27 +893,49 @@ export function onAccount(accountOrBody, ctx = {}) {
     if (quotaAccounts.some((a) => a.key === "pool/quotas" && a.dispatchable === false)) {
       return { skip: true };
     }
-    const acctIds = new Set(
+    const rawProv =
+      acct.provider ||
+      ctx?.provider?.id ||
+      ctx?.provider?.name ||
+      (typeof acct.key === "string" && acct.key.includes("/") ? acct.key.split("/")[0] : "") ||
+      (typeof acct.ref === "string" && acct.ref.includes("/") ? acct.ref.split("/")[0] : "");
+    const acctProv = normalizeProviderFamily(rawProv);
+    const fullKeys = new Set(
       [
-        acct.key,
-        acct.ref,
-        acct.name,
-        acct.account,
+        typeof acct.key === "string" && acct.key.includes("/") ? acct.key : "",
+        typeof acct.ref === "string" && acct.ref.includes("/") ? acct.ref : "",
         acct.provider && acct.name ? `${acct.provider}/${acct.name}` : "",
         acct.provider && acct.account ? `${acct.provider}/${acct.account}` : "",
+        acctProv && acct.name ? `${acctProv}/${acct.name}` : "",
+        acctProv && acct.account ? `${acctProv}/${acct.account}` : "",
       ]
         .filter((v) => typeof v === "string" && v.trim())
         .map((v) => v.trim())
     );
-    const exactMatches = quotaAccounts.filter((a) => acctIds.has(a.key) || acctIds.has(a.account));
+    const bareNames = new Set(
+      [
+        acct.name,
+        acct.account,
+        typeof acct.key === "string" && !acct.key.includes("/") ? acct.key : "",
+        typeof acct.ref === "string" && !acct.ref.includes("/") ? acct.ref : "",
+      ]
+        .filter((v) => typeof v === "string" && v.trim())
+        .map((v) => v.trim())
+    );
+    const exactMatches = quotaAccounts.filter((a) => {
+      if (a.key === "pool/quotas") return false;
+      if (fullKeys.has(a.key)) return true;
+      const provOk = !acctProv || !a.provider || providersMatch(acctProv, a.provider);
+      if (!provOk) return false;
+      return bareNames.has(a.account) || bareNames.has(a.key);
+    });
     if (exactMatches.length > 0) {
       if (exactMatches.some((a) => a.dispatchable === false)) {
         return { skip: true };
       }
-    } else if (typeof acct.provider === "string" && acct.provider.trim()) {
-      const prov = acct.provider.trim().toLowerCase();
+    } else if (acctProv) {
       const provMatches = quotaAccounts.filter(
-        (a) => a.key !== "pool/quotas" && String(a.provider || "").toLowerCase() === prov
+        (a) => a.key !== "pool/quotas" && providersMatch(acctProv, a.provider)
       );
       if (provMatches.length > 0 && provMatches.every((a) => a.dispatchable === false)) {
         return { skip: true };

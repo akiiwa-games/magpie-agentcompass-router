@@ -349,6 +349,34 @@ export function inferModelProviderFamily(rawModel, aliases = MODEL_ALIASES) {
 }
 
 /**
+ * Normalize a provider identifier (`claude`/`anthropic`, `codex`/`openai`, `antigravity`/`gemini`/`google`, etc.)
+ * into its canonical provider family.
+ */
+export function normalizeProviderFamily(raw) {
+  const s = String(raw || "").trim().toLowerCase();
+  if (!s) return "";
+  const slash = s.indexOf("/");
+  const p = slash > 0 ? s.slice(0, slash) : s;
+  if (p === "anthropic" || p === "claude" || p === "claude-code") return "claude";
+  if (p === "openai" || p === "codex" || p === "chatgpt") return "codex";
+  if (p === "antigravity" || p === "gemini" || p === "google") return "antigravity";
+  if (p === "xai" || p === "grok") return "grok";
+  if (p === "glm" || p === "zai") return "zai";
+  if (p === "moonshot" || p === "kimi") return "kimi";
+  return p;
+}
+
+/**
+ * Check whether two provider identifiers belong to the same provider family.
+ */
+export function providersMatch(provA, provB) {
+  const fa = normalizeProviderFamily(provA);
+  const fb = normalizeProviderFamily(provB);
+  if (!fa || !fb) return false;
+  return fa === fb;
+}
+
+/**
  * Check whether an account's provider matches a candidate model's provider family.
  */
 export function providerMatchesModel(accountProvider, rawModel, aliases = MODEL_ALIASES) {
@@ -1596,6 +1624,49 @@ export function isModelQuotaExhausted(
 }
 
 /**
+ * True when `rawQuotas` is present and every model in `candidateModels` (or the default catalog
+ * when `candidateModels` is omitted) is blocked by account non-dispatchability (`excluded`,
+ * `pool/quotas` expired >= 6h, exhausted prepaid balance <= 0, or `meteredOk: false`).
+ */
+export function areCandidatesAccountBlocked(
+  candidateModels,
+  rawQuotas,
+  options = {},
+  nowMs = Date.now()
+) {
+  if (!rawQuotas || typeof rawQuotas !== "object") return false;
+  const catalog = options?.catalog || {};
+  const policy = catalog.policy || DEFAULT_SCORING_POLICY;
+  const models = catalog.models || DEFAULT_MODELS;
+  const hq = healthOnlyQuotas(rawQuotas, nowMs, policy);
+  const list = Array.isArray(hq?._normalized) ? hq._normalized : [];
+  if (list.length === 0) return false;
+  if (list.some((e) => e.poolLevel && e.excluded)) return true;
+
+  const rawCandidates =
+    Array.isArray(candidateModels) && candidateModels.length > 0
+      ? candidateModels
+      : Object.keys(models).filter((m) => m !== "deepseek-v4.1-flash-free" && !models[m]?.disabled_by_default);
+  const modelNames = rawCandidates
+    .map((item) => {
+      if (typeof item === "string") return item.trim();
+      if (item && typeof item === "object") return String(item.model || item.id || item.name || "").trim();
+      return "";
+    })
+    .filter(Boolean);
+  if (modelNames.length === 0) return false;
+
+  const taskCtx = {
+    hours: 0.5,
+    metered_ok: options?.meteredOk !== false,
+  };
+  return modelNames.every((m) => {
+    const qEval = evaluateModelQuota(m, "high", taskCtx, hq, catalog, nowMs);
+    return Boolean(qEval && !qEval.eligible);
+  });
+}
+
+/**
  * Magpie Pool Seat Ordering Strategy (`strategies.agentcompass` & `strategies["agentcompass-pure"]`).
  *
  * Combines Magpie's `Seat` telemetry (`internal/middleware/points.go:201-212`:
@@ -1648,13 +1719,29 @@ function matchSeatQuotaEntry(seat, poolProvider, normalizedQuotas) {
 
   for (const e of normalizedQuotas) {
     if (e.poolLevel) continue;
-    if (key && (e.key === key || (prov && e.key === `${prov}/${key}`) || (!key.includes("/") && e.account === key))) {
+    const provOk = !prov || !e.provider || providersMatch(prov, e.provider);
+    if (
+      key &&
+      (e.key === key ||
+        (prov && e.key === `${prov}/${key}`) ||
+        (!key.includes("/") && provOk && e.account === key))
+    ) {
       return e;
     }
-    if (acct && (e.key === acct || (prov && e.key === `${prov}/${acct}`) || e.account === acct)) {
+    if (
+      acct &&
+      (e.key === acct ||
+        (prov && e.key === `${prov}/${acct}`) ||
+        (!acct.includes("/") && provOk && e.account === acct))
+    ) {
       return e;
     }
-    if (name && (e.key === name || (prov && e.key === `${prov}/${name}`) || e.account === name)) {
+    if (
+      name &&
+      (e.key === name ||
+        (prov && e.key === `${prov}/${name}`) ||
+        (!name.includes("/") && provOk && e.account === name))
+    ) {
       return e;
     }
   }

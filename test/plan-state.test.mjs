@@ -536,3 +536,151 @@ test("M5: Codex pro and pro100 treat five_hour as observation-only (block only a
   assert.equal(m5b.opportunity_cost, 0);
   assert.equal(m5b.reset_bonus, 0);
 });
+
+test("R2-M1: 503 and onAccount global skip only trigger on account-blocked candidates; routeAllModels ability-floor pass-through and modelsByProvider two-stage routing work", async () => {
+  const hardMsg = [{ role: "user", content: "Audit the cross-module state machine for deadlocks and prove liveness invariants." }];
+
+  for (const quotas of [
+    undefined,
+    [{ provider: "claude", account: "healthy-acc", plan: "max20", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 90 })] }],
+  ]) {
+    let hookRej = null;
+    const hookCtx = {
+      protocol: "chat",
+      state: {},
+      options: { routeAllModels: true, injectProtocolEffort: true, quotas, now: T0 },
+      reject(code, msg) {
+        hookRej = { code, msg };
+      },
+    };
+    await hookOnRequest({ model: "claude-haiku-4-5", messages: hardMsg }, hookCtx);
+    assert.equal(hookRej, null);
+
+    let mwRej = null;
+    const mwCtx = {
+      protocol: "chat",
+      state: {},
+      options: { routeAllModels: true, injectProtocolEffort: true, quotas, now: T0 },
+      reject(code, msg) {
+        mwRej = { code, msg };
+      },
+    };
+    mwOnRequest({ model: "claude-haiku-4-5", messages: hardMsg }, mwCtx);
+    assert.equal(mwRej, null);
+    assert.equal(mwOnAccount({ provider: "claude", name: "healthy-acc" }, mwCtx), undefined);
+  }
+
+  // Two-stage defaultModel + modelsByProvider when defaultModel is below floor
+  const req1 = { model: "agentcompass/auto", messages: hardMsg };
+  let rej1 = null;
+  const state1 = {};
+  const opts1 = {
+    defaultModel: "claude-haiku-4-5",
+    injectProtocolEffort: true,
+    modelsByProvider: { anthropic: ["claude-haiku-4-5", "claude-sonnet-4-6", "claude-opus-4-6"] },
+    now: T0,
+  };
+  mwOnRequest(req1, {
+    protocol: "chat",
+    state: state1,
+    options: opts1,
+    reject(code, msg) {
+      rej1 = { code, msg };
+    },
+  });
+  assert.equal(rej1, null);
+  const provRes1 = mwOnProvider(req1, {
+    protocol: "chat",
+    state: state1,
+    provider: { id: "anthropic", name: "Anthropic", account: "work", model: req1.model },
+    options: opts1,
+  });
+  assert.ok(provRes1);
+  assert.equal(state1.route.ok, true);
+  assert.match(req1.model, /^claude-(sonnet|opus)-4-6:/);
+
+  // Two-stage defaultModel (claude inactive) + modelsByProvider (openai healthy)
+  const req2 = { model: "agentcompass/auto", messages: [{ role: "user", content: "Write a parser" }] };
+  let rej2 = null;
+  const state2 = {};
+  const opts2 = {
+    defaultModel: "claude-sonnet-4-6",
+    injectProtocolEffort: true,
+    quotas: [
+      { provider: "claude", account: "dead", plan: "free", status: "expired", updated_at: iso(T0 - 60_000), windows: [win()] },
+      { provider: "codex", account: "good", plan: "pro", status: "ok", updated_at: iso(T0 - 60_000), windows: [win()] },
+    ],
+    modelsByProvider: {
+      anthropic: ["claude-sonnet-4-6"],
+      openai: ["gpt-5.4"],
+    },
+    now: T0,
+  };
+  mwOnRequest(req2, {
+    protocol: "chat",
+    state: state2,
+    options: opts2,
+    reject(code, msg) {
+      rej2 = { code, msg };
+    },
+  });
+  assert.equal(rej2, null);
+  const provRes2 = mwOnProvider(req2, {
+    protocol: "chat",
+    state: state2,
+    provider: { id: "openai", name: "OpenAI", account: "good", model: "gpt-5.4" },
+    options: opts2,
+  });
+  assert.ok(provRes2);
+  assert.equal(state2.route.ok, true);
+  assert.match(req2.model, /^gpt-5\.4:/);
+  assert.equal(mwOnAccount({ provider: "codex", name: "good" }, { state: state2, options: opts2 }), undefined);
+});
+
+test("R2-M2: cross-provider identical account names validate provider in onAccount and matchSeatQuotaEntry", () => {
+  const mixedQuotas = [
+    { provider: "claude", account: "acct1", plan: "free", status: "expired", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 95 })] },
+    { provider: "codex", account: "acct1", plan: "pro", status: "ok", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 90 })] },
+    { provider: "codex", account: "exhausted", plan: "pro", status: "ok", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 0 })] },
+  ];
+  const body = { model: "agentcompass", messages: [{ role: "user", content: "Write a parser in TypeScript" }] };
+  const ctx = {
+    options: {
+      candidateModels: ["claude-sonnet-4-6", "gpt-5.3-codex"],
+      quotas: mixedQuotas,
+      now: T0,
+    },
+    state: {},
+  };
+  mwOnRequest(body, ctx);
+  assert.equal(ctx.state.route.selectedAccount, "codex/acct1");
+  assert.deepEqual(mwOnAccount({ provider: "claude", name: "acct1" }, ctx), { skip: true });
+  assert.equal(mwOnAccount({ provider: "codex", name: "acct1" }, ctx), undefined);
+
+  const codexSeats = [
+    { key: "codex/acct1", account: "acct1", known: true, learns: 1, used: 10, soon: [T0 + 24 * HOUR], pace: 0, weight: 1, resting: false, tokens: 0 },
+    { key: "codex/exhausted", account: "exhausted", known: true, learns: 1, used: 100, soon: [T0 + 24 * HOUR], pace: 0, weight: 1, resting: true, tokens: 0 },
+  ];
+  const orderCodex = strategies.agentcompass("codex", codexSeats, { now: T0, quotas: mixedQuotas });
+  assert.deepEqual(orderCodex, [0, 1]);
+  assert.equal(codexSeats[orderCodex[0]].key, "codex/acct1");
+});
+
+test("R2-M3: default catalog candidates are not pruned to quota providers when candidateModels is omitted", () => {
+  const onlyClaudeHealthy = [{ provider: "claude", account: "c1", plan: "max20", updated_at: iso(T0 - 60_000), windows: [win()] }];
+  const rImpl = selectBestRoute(implProfile, { quotas: onlyClaudeHealthy, now: T0 });
+  assert.equal(rImpl.ok, true);
+  assert.equal(rImpl.targetModel, "gpt-6.1-sol");
+
+  const rPin = selectBestRoute(
+    { ...implProfile, realtime_loop: true },
+    { quotas: onlyClaudeHealthy, pinnedModel: "gemini-4-argon-high", now: T0 }
+  );
+  assert.equal(rPin.ok, true);
+  assert.equal(rPin.targetModel, "gemini-4-argon-high");
+
+  const onlyClaudeInactive = [{ provider: "claude", account: "c1", plan: "free", status: "expired", updated_at: iso(T0 - 60_000), windows: [win()] }];
+  const rInactive = selectBestRoute(implProfile, { quotas: onlyClaudeInactive, now: T0 });
+  assert.equal(rInactive.ok, true);
+  assert.equal(rInactive.targetModel, "gpt-6.1-sol");
+});

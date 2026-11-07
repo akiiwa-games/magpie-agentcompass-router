@@ -16,7 +16,12 @@ import {
   keepsEffort,
 } from "./continuity.js";
 import { extractRequestFacts } from "./profiler-core.js";
-import { healthOnlyQuotas, listQuotaAccounts, quotaAccountWarnings } from "./quota.js";
+import {
+  areCandidatesAccountBlocked,
+  healthOnlyQuotas,
+  listQuotaAccounts,
+  quotaAccountWarnings,
+} from "./quota.js";
 import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
@@ -350,9 +355,30 @@ export async function onRequest(body, ctx = {}) {
   emitWarnings(decision.warnings, ctx);
 
   if (!decision.ok || !decision.targetModel) {
+    const accountBlocked = Boolean(
+      liveQuotas &&
+        (areCandidatesAccountBlocked(candidateModels, liveQuotas, options, now) ||
+          selectBestRoute(profile, {
+            objective: facts.objective,
+            candidateModels,
+            catalog: options.catalog,
+            unhealthyModels,
+            minContextTokens,
+            quotas: undefined,
+            meteredOk: options.meteredOk,
+            now,
+            ...realtimeOption,
+            ...pinOptionsOf(options),
+          }).ok)
+    );
+    if (!accountBlocked) {
+      ctx.report?.("empty");
+      return undefined;
+    }
     const failedCarrier = {
       v: 1,
       ok: false,
+      accountBlocked: true,
       reason: decision.reason || "no_eligible_candidate",
       targetModel: null,
       canonicalModel: null,
