@@ -27,7 +27,7 @@
  * - Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down, on every protocol
  * - Scenario 11: A realtime session's later turns hold, with no reroute and no effort ratchet
  * - Scenario 12: A pinned slow model is kept, with a warning in Magpie's log
- * - Scenario 13: Real upstreams (`REAL_CODEX_AUTH`, `REAL_CLAUDE_AUTH`, `REAL_GROK_AUTH`): for each, no `realtime_loop` on
+ * - Scenario 13: Real upstreams (run-linux-sandbox.sh's `REAL_*_AUTH`): for each, no `realtime_loop` on
  *   the wire, routes as on the mock, and the `openai_compatible` classifier on 12 paired hard cases
  */
 
@@ -37,14 +37,13 @@ import fs from "node:fs";
 import http from "node:http";
 import os from "node:os";
 import path from "node:path";
+import { redactSecrets } from "./sign-in-copy.mjs";
 
 const SANDBOX_ROOT = process.env.MAGPIE_SANDBOX_ROOT || "/run/magpie-sandbox";
 const MAGPIE_BIN = process.env.MAGPIE_BIN || path.join(SANDBOX_ROOT, "magpie");
 const PLUGIN_DIR = process.env.PLUGIN_DIR || path.join(SANDBOX_ROOT, "agentcompass");
 const BASELINE_PLUGIN_DIR = process.env.BASELINE_PLUGIN_DIR || "";
-const REAL_CODEX_AUTH = process.env.REAL_CODEX_AUTH || "";
-const REAL_CLAUDE_AUTH = process.env.REAL_CLAUDE_AUTH || "";
-const REAL_GROK_AUTH = process.env.REAL_GROK_AUTH || "";
+const REAL_SIGN_INS_DIR = process.env.REAL_SIGN_INS_DIR || "";
 
 const ALL_MODELS = [
   "claude-opus-5-5",
@@ -1813,35 +1812,31 @@ async function main() {
     // =========================================================================
     // SCENARIO 13: Real upstreams (each account's sign-in) behind one gateway and plugin
     // =========================================================================
-    // Only access tokens go in. Refresh tokens rotate: a client refreshing a copy of one would sign the machine's own agent
-    // out (refresh_token_reused), and `magpie accounts import` spends it outright, so neither is used.
+    // run-linux-sandbox.sh has made copies of the sign-ins with only the fields test/sign-in-copy.mjs lists, then hidden the
+    // host from all this: Magpie runs Claude Code and Grok Build as programs, the sandbox installs its own of each, and they run
+    // as root. `magpie accounts import` would spend a sign-in outright, so it isn't used.
     // The copies live on the sandbox's tmpfs and go with this scenario. Nothing here logs a credential or a real log line
     // other than the observer's, and the requests' model and effort come from the observer plugin.
-    // Magpie runs Claude Code and Grok Build as programs: the sandbox installs its own of each, and run-linux-sandbox.sh
-    // keeps Windows' directories off PATH, where one would run on the host with the host's sign-ins.
     const REAL_ACCOUNTS = [
       {
         name: "codex",
-        auth: REAL_CODEX_AUTH,
         file: ".codex/auth.json",
         pool: ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"],
         named: "gpt-6-luna",
       },
       {
         name: "claude",
-        auth: REAL_CLAUDE_AUTH,
         file: ".claude/.credentials.json",
         pool: ["claude-opus-5-5", "claude-sonnet-5-5", "claude-haiku-5-5"],
         named: "claude-haiku-5-5",
       },
       {
         name: "grok",
-        auth: REAL_GROK_AUTH,
         file: ".grok/auth.json",
         pool: ["grok-4.7", "grok-4.7-build-fast"],
         named: "grok-4.7-build-fast",
       },
-    ].filter((a) => a.auth);
+    ].filter((a) => REAL_SIGN_INS_DIR && fs.existsSync(path.join(REAL_SIGN_INS_DIR, `${a.name}.json`)));
     if (REAL_ACCOUNTS.length === 0) {
       report.scenarios.scenario13_real_upstream = { pass: null, skipped: "No REAL_*_AUTH set" };
       console.log("[SKIP] Scenario 13 (real upstream): no REAL_*_AUTH set");
@@ -1850,8 +1845,12 @@ async function main() {
       const realGw = 13429;
       const realWeb = 13430;
       const realCookie = `magpie_web_${realWeb}=${webKey}`;
+      // Named one by one: what the caller's environment holds (a vendor's CODEX_HOME, a key) is no part of this
       const realEnv = {
-        ...Object.fromEntries(Object.entries(env).filter(([k]) => !/^(ANTHROPIC|OPENAI|XAI|GROK|CLAUDE)/.test(k))),
+        PATH: env.PATH,
+        MAGPIE_BUN: env.MAGPIE_BUN,
+        MAGPIE_WEB_KEY: webKey,
+        NO_COLOR: "1",
         HOME: path.join(root, "home"),
         TMPDIR: path.join(root, "tmp"),
         XDG_CONFIG_HOME: path.join(root, "config"),
@@ -1860,24 +1859,22 @@ async function main() {
         XDG_STATE_HOME: path.join(root, "state"),
         MAGPIE_ADDR: `127.0.0.1:${realGw}`,
       };
+      assert.equal(process.env.MAGPIE_HOST_HIDDEN, "1", "A real sign-in may only run with the host hidden");
+      assert.equal(fs.existsSync("/mnt/host/c/Windows") || fs.existsSync("/mnt/c/Windows"), false, "A real sign-in must not see the host's drives");
       assert.equal(/(^|:)\/mnt\//.test(realEnv.PATH), false, "A real sign-in must not reach a program on the host");
+      const isolation = JSON.parse(fs.readFileSync(path.join(SANDBOX_ROOT, "isolation.json"), "utf8"));
       const observerDir = path.join(PLUGIN_DIR, "test", "fixtures", "route-observer");
       const realLogs = [];
       let realProc = null;
       try {
         for (const dir of ["home", "tmp", "config", "cache", "data", "state"]) fs.mkdirSync(path.join(root, dir), { recursive: true, mode: 0o700 });
-        const withoutRefreshTokens = (value) =>
-          !value || typeof value !== "object" || Array.isArray(value)
-            ? value
-            : Object.fromEntries(Object.entries(value).filter(([k]) => !/refresh.?token/i.test(k)).map(([k, v]) => [k, withoutRefreshTokens(v)]));
-        const hostFileTime = (a) => fs.statSync(a.auth).mtimeMs;
         for (const a of REAL_ACCOUNTS) {
-          a.hostFileTime = hostFileTime(a);
-          const copy = JSON.stringify(withoutRefreshTokens(JSON.parse(fs.readFileSync(a.auth, "utf8"))));
-          assert.equal(/refresh.?token"/i.test(copy), false, `${a.name}: the copy must hold no refresh token`);
+          const copy = path.join(REAL_SIGN_INS_DIR, `${a.name}.json`);
+          a.fields = JSON.parse(fs.readFileSync(`${copy}.fields`, "utf8"));
           const target = path.join(root, "home", a.file);
           fs.mkdirSync(path.dirname(target), { recursive: true, mode: 0o700 });
-          fs.writeFileSync(target, copy, { mode: 0o600 });
+          fs.renameSync(copy, target);
+          fs.chmodSync(target, 0o600);
         }
         const realBin = path.join(root, "magpie");
         fs.copyFileSync(MAGPIE_BIN, realBin);
@@ -1889,13 +1886,15 @@ async function main() {
           try {
             await run();
           } catch (err) {
-            throw new Error(`Scenario 13 ${step} failed: ${String(err.message).replace(/[^\s"]+@[^\s"]+/g, "<redacted>").slice(0, 400)}`);
+            throw new Error(`Scenario 13 ${step} failed: ${redactSecrets(err.message).slice(0, 400)}`);
           }
         };
-        await runMagpieCli(["plugin", "add", PLUGIN_DIR], realEnv, realBin);
-        await runMagpieCli(["plugin", "options", PLUGIN_DIR, JSON.stringify(optionsFor(REAL_ACCOUNTS[0]))], realEnv, realBin);
-        await runMagpieCli(["plugin", "login", "agentcompass"], realEnv, realBin);
-        await runMagpieCli(["plugin", "add", observerDir], realEnv, realBin);
+        await signInStep("plugins", async () => {
+          await runMagpieCli(["plugin", "add", PLUGIN_DIR], realEnv, realBin);
+          await runMagpieCli(["plugin", "options", PLUGIN_DIR, JSON.stringify(optionsFor(REAL_ACCOUNTS[0]))], realEnv, realBin);
+          await runMagpieCli(["plugin", "login", "agentcompass"], realEnv, realBin);
+          await runMagpieCli(["plugin", "add", observerDir], realEnv, realBin);
+        });
         if (REAL_ACCOUNTS.some((a) => a.name === "claude")) {
           await signInStep("claude-code install", () => {
             execFileSync(realBin, ["claude-code", "install"], { env: realEnv, input: "y\n", stdio: ["pipe", "ignore", "ignore"], timeout: 300_000 });
@@ -1909,7 +1908,9 @@ async function main() {
           await signInStep("grok plugin", () => runMagpieCli(["plugin", "add", "@magpie-community/opencode-grok-auth"], realEnv, realBin));
           await signInStep("grok sign-in", () => runMagpieCli(["plugin", "login", "grok", "Use Grok Build's current sign-in"], realEnv, realBin));
         }
-        realProc = await startMagpieWeb(realEnv, realGw, realWeb, realCookie, realLogs, realBin);
+        await signInStep("gateway", async () => {
+          realProc = await startMagpieWeb(realEnv, realGw, realWeb, realCookie, realLogs, realBin);
+        });
 
         const observed = () =>
           realLogs
@@ -1939,7 +1940,7 @@ async function main() {
             status: resp.status,
             ms: Date.now() - started,
             replied: replied ? replied.slice(0, 40) : null,
-            error: resp.status === 200 ? null : text.slice(0, 200),
+            error: resp.status === 200 ? null : redactSecrets(text).slice(0, 200),
             sent: seen[seen.length - 1] || null,
           };
         };
@@ -2032,7 +2033,7 @@ async function main() {
               expectedKind: c.work_kind,
               gotKind: profile.work_kind,
               source: meta.source,
-              error: meta.fallbackReason || null,
+              error: meta.fallbackReason ? redactSecrets(meta.fallbackReason) : null,
               ms: meta.durationMs ?? null,
             });
           }
@@ -2044,7 +2045,8 @@ async function main() {
 
           accountsReport[a.name] = {
             pass: true,
-            upstream: `${a.name} sign-in, access token only (refresh token never copied)`,
+            upstream: `${a.name} sign-in, only the fields test/sign-in-copy.mjs lists`,
+            signInFields: a.fields,
             routes: {
               nonRealtime: { real: asRoute(plain.sent), mock: mockPlainRoute, ms: plain.ms, status: plain.status },
               realtime: { real: asRoute(live.sent), mock: mockLiveRoute, ms: live.ms, status: live.status },
@@ -2070,13 +2072,12 @@ async function main() {
           );
         }
 
-        const hostFilesChanged = REAL_ACCOUNTS.filter((a) => hostFileTime(a) !== a.hostFileTime).map((a) => a.name);
-        report.scenarios.scenario13_real_upstream = { pass: true, accounts: accountsReport, hostFilesChanged };
+        report.scenarios.scenario13_real_upstream = { pass: true, isolation, accounts: accountsReport };
         report.steps.push({
           test: "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases",
           ...report.scenarios.scenario13_real_upstream,
         });
-        console.log(`[PASS] Scenario 13 (real upstream): accounts ${REAL_ACCOUNTS.map((a) => a.name).join(", ")}; host sign-in files changed during the run: ${JSON.stringify(hostFilesChanged)}`);
+        console.log(`[PASS] Scenario 13 (real upstream): accounts ${REAL_ACCOUNTS.map((a) => a.name).join(", ")}; isolation ${JSON.stringify(isolation)}`);
       } catch (err) {
         report.scenarios.scenario13_real_upstream = { pass: false };
         console.error(`[Linux Sandbox] Scenario 13 observer lines: ${realLogs.join("").split("\n").filter((l) => l.includes("route-observer {")).slice(-8).join(" | ")}`);
@@ -2087,7 +2088,8 @@ async function main() {
           await new Promise((r) => setTimeout(r, 300));
         }
         fs.rmSync(root, { recursive: true, force: true });
-        assert.equal(fs.existsSync(root), false, "the sign-in copies must be gone after Scenario 13");
+        fs.rmSync(REAL_SIGN_INS_DIR, { recursive: true, force: true });
+        assert.equal(fs.existsSync(root) || fs.existsSync(REAL_SIGN_INS_DIR), false, "the sign-in copies must be gone after Scenario 13");
       }
     }
 

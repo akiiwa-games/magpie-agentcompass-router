@@ -548,7 +548,10 @@ export function onRequest(body, ctx = {}) {
       if (
         !hasExplicitCandidates ||
         !Array.isArray(candidateModels) ||
-        candidateModels.includes(stateRoute.targetModel)
+        candidateModels.includes(stateRoute.targetModel) ||
+        // A pool may spell the model with an effort suffix, and when only the classifier called this realtime the
+        // hooks' route is all there is to say so
+        (stateRoute.realtimeLoop === true && candidateModels.some((m) => stripEffortSuffix(m) === stateRoute.targetModel))
       ) {
         decision = stateRoute;
       }

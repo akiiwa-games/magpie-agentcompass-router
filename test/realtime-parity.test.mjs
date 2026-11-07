@@ -197,7 +197,7 @@ test("R3 parity: non-realtime options and inputs main ignores or treats its own 
 
 test("R3 parity: canonicalModel and resolveModelSpec match origin/main on every spelling", (t) => {
   if (!baseline) return t.skip(baselineSkip);
-  const names = [...Object.keys(FIXTURE.canonical), "claude-opus-5-5:default", "openrouter/qwen/foo", "qwen/foo", "OpenRouter/OpenAI/GPT-5-Mini"];
+  const names = [...Object.keys(FIXTURE.canonical), "claude-opus-5-5:default", "openrouter/qwen/foo", "qwen/foo", "OpenRouter/OpenAI/GPT-5-Mini", "spark", "gemini-spark", "grok-spark", "gpt-5.3-spark", "gpt-5.3-codex_spark"];
   for (const name of names) {
     assert.equal(canonicalModel(name), baseline.catalog.canonicalModel(name), name);
     if (name.includes("codex-spark")) continue; // has its own entry now; see the Spark tests
@@ -732,17 +732,55 @@ test("Sandbox: pin options reach routing through the middleware and warn in the 
 });
 
 test("m1-R4: a middleware with its own store keeps the realtime flag of the hooks' route", async () => {
-  const pool = ["gpt-6-astra:medium", "claude-sonnet-5-5:medium"];
+  const pool = ["gpt-6-astra", "claude-sonnet-5-5"];
   const hooksStore = new SessionContinuityStore();
   const middlewareStore = new SessionContinuityStore();
-  const body = { model: "agentcompass/auto", messages: [{ role: "user", content: REALTIME_FIRST_TURN }], realtime_loop: true };
+  const messages = [{ role: "user", content: REALTIME_FIRST_TURN }];
   const ctx = { state: {}, options: { continuityStore: hooksStore, candidateModels: pool, now: NOW } };
-  await hooksOnRequest(body, ctx);
+  await hooksOnRequest({ model: "agentcompass/auto", messages, realtime_loop: true }, ctx);
   const route = ctx.state.route;
   assert.equal(route.realtimeLoop, true);
-  await middlewareOnRequest({ ...body, model: "agentcompass/auto" }, { state: { route }, options: { continuityStore: middlewareStore, candidateModels: pool, now: NOW } });
+  // The flag reached the hooks only: the middleware has the route to go by
+  middlewareOnRequest({ model: "agentcompass/auto", messages }, { state: { route }, options: { continuityStore: middlewareStore, candidateModels: pool, now: NOW } });
   assert.equal(middlewareStore.get(route.continuation.sessionKey, NOW).realtimeLoop, true);
   assert.equal(hooksStore.get(route.continuation.sessionKey, NOW).realtimeLoop, true);
+});
+
+const classifierSays = (realtime_loop) => {
+  const answer = JSON.stringify({ reasoning_depth: 4, code_complexity: 3, context_scale: 2, divergence: 1, hallucination_risk: 3, error_cost: 3, interaction_style: "engineering", needs_visual: false, needs_gui: false, realtime_loop, work_kind: "debug_review", confidence: 0.9 });
+  const reply = JSON.stringify({ choices: [{ message: { content: answer } }] });
+  const fetch = async () => ({ ok: true, status: 200, text: async () => reply, json: async () => JSON.parse(reply) });
+  return { scorerType: "openai_compatible", allowExternalScorer: true, scorerBaseUrl: "http://127.0.0.1:9/v1", scorerApiKey: "k", scorerModel: "m", fetch, useCache: false };
+};
+
+test("P1: a Tandem middleware with its own store follows a classifier-only realtime route on an effort-suffixed pool", async () => {
+  const pools = {
+    suffixed: ["claude-opus-5-5:xhigh", "gemini-4-argon-high:high", "gpt-6-astra:high", "claude-sonnet-5-5:medium"],
+    bare: ["claude-opus-5-5", "gemini-4-argon-high", "gpt-6-astra", "claude-sonnet-5-5"],
+  };
+  const tandem = async (pool, shared, realtime) => {
+    const hooksStore = new SessionContinuityStore();
+    const store = shared ? hooksStore : new SessionContinuityStore();
+    const options = { candidateModels: pool, now: NOW, ...classifierSays(realtime) };
+    const body = { model: "agentcompass/auto", messages: [{ role: "user", content: "Find the root cause of the race in the scheduler across modules" }] };
+    const ctx = { state: {}, options: { ...options, continuityStore: hooksStore } };
+    await hooksOnRequest(body, ctx);
+    const route = ctx.state.route;
+    middlewareOnRequest(body, { state: { route }, options: { ...options, continuityStore: store } });
+    return { route, final: body.model, stored: store.get(route.continuation.sessionKey, NOW)?.realtimeLoop };
+  };
+  for (const [name, pool] of Object.entries(pools)) {
+    const own = await tandem(pool, false, true);
+    assert.equal(own.route.realtimeLoop, true, name);
+    assert.equal(own.final, `${own.route.targetModel}:${own.route.targetEffort}`, name);
+    assert.equal(own.final, (await tandem(pool, true, true)).final, name);
+    assert.equal(own.stored, true, name);
+    assert.doesNotMatch(own.final, /^gemini-4-argon-high/, name);
+  }
+  // Without realtime the middleware routes for itself on a suffixed pool, as it does on origin/main
+  const solo = { model: "agentcompass/auto", messages: [{ role: "user", content: "Find the root cause of the race in the scheduler across modules" }] };
+  middlewareOnRequest(solo, { state: {}, options: { candidateModels: pools.suffixed, now: NOW, continuityStore: new SessionContinuityStore() } });
+  assert.equal((await tandem(pools.suffixed, false, false)).final, solo.model);
 });
 
 test("m2-R4: onProvider and the decision provider honor pins, and only under realtime_loop", async (t) => {
@@ -767,6 +805,14 @@ test("m2-R4: onProvider and the decision provider honor pins, and only under rea
   assert.deepEqual(await effort({ realtime_loop: true }, { ...pin, pinnedEffort: "high" }), await effort({ realtime_loop: true }, { candidateModels: ["gemini-4-argon-high"], ...pin }));
   assert.notDeepEqual(await effort({ realtime_loop: true }, pin), await effort({ realtime_loop: true }, {}));
   assert.deepEqual(await effort({}, pin), await effort({}, {}), "no pin effect without realtime_loop");
+
+  // When the quotas leave nothing, the second try without them keeps the pin too
+  const spent = { kind: "subscription", quota: { windows: [{ name: "7d", used: 100, remaining: 0, resetsAt: new Date(Date.now() + 48 * 3600 * 1000).toISOString() }] } };
+  const quotas = Object.fromEntries(["codex", "gemini", "antigravity", "openai", "google"].map((p) => [`${p}/a@example.com`, spent]));
+  const intent = async (pins) =>
+    (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", realtime_loop: true, quotas }, questions }, { candidateModels: pool, ...pins })).answers.intent.choice;
+  assert.equal(await intent(pin), "argon");
+  assert.equal(await intent({}), "astra");
 });
 
 test("m3-R4: the slow pin warning names the model the speed was read for", () => {
@@ -775,6 +821,8 @@ test("m3-R4: the slow pin warning names the model the speed was read for", () =>
   const row = (m) => FIXTURE.responsiveness[m].high[0].toFixed(2);
   assert.match(warningOf("claude-opus-4-6:high", "claude-opus-4-6"), new RegExp(`\\(claude-opus-4-6@high\\) responsiveness ${row("claude-opus-4-6")}`));
   assert.match(warningOf("gemini-4-argon-high:high", "gemini-4-argon-high"), /\(gemini-4-argon-high@high\)/);
+  // A model whose speed doesn't apply is named as the speed was read too: this spelling's canonical model is grok-4.7
+  assert.match(warningOf("grok-bot-20260101", "grok-bot-20260101"), /\(grok-bot@high\) responsiveness is not_applicable/);
 });
 
 const SPARK = "gpt-5.3-codex-spark";
@@ -795,6 +843,8 @@ test("Spark: every spelling has its own conservative entry and none resolves to 
   // Other codex names keep the family fallback, the default pool never picks Spark
   assert.equal(resolveModelSpec("gpt-5.3-codex").canonical, "gpt-6.1-sol");
   assert.equal(resolveModelSpec("some-codex-model").canonical, "gpt-6.1-sol");
+  // Spark's entry is for this model: another model's "spark" is not it
+  for (const name of ["spark", "gemini-spark", "grok-spark", "gpt-5.3-spark", "gpt-5.3-codex_spark"]) assert.notEqual(resolveModelSpec(name).canonical, SPARK, name);
   assert.ok(rankCandidates(GRID[0], { now: NOW }).allCandidates.every((c) => c.canonicalModel !== SPARK));
   // Named in a realtime pool it runs on the same default as in AgentCompass
   assert.deepEqual(FIXTURE.responsiveness[SPARK].high, [0.52, "default"]);
