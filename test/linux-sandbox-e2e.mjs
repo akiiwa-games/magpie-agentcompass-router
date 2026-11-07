@@ -9,26 +9,30 @@
  * (no `magpie.hooks`, no async scorer): Mode A is `src/middleware.js` on the virtual models `agentcompass` /
  * `agentcompass/*`, Mode B is the decision provider's `/v1/systemone` (opt-in `enableDecisionProvider`).
  *
+ * Routing rests on a task profile: from the request (`body.profile`) on Mode A, from a classifier or the state on Mode B.
+ * Without one a request is not routed (README, "Without a classifier"). A task's words decide nothing.
+ *
  * Scenarios:
  * - Scenario 1: CLI Plugin Lifecycle (`magpie plugin add`, `login`, `list`, `magpie.name`, `magpie.icon`)
  * - Scenario 2: Plugin Market (`MAGPIE_PLUGIN_MARKET` registry.json) & Web/GUI API (`/api/plugins/listings`,
  *   `/api/plugins`, `/api/plugins/page`, `POST /api/plugins/off` toggle, `POST /api/plugins/options`)
- * - Scenario 3: Mode A latency/budget (`agentcompass/auto` never waits for a 1,600ms System One scorer; overhead
- *   inside moejs's 250ms budget; no candidateModels -> HTTP 400)
- * - Scenario 4: Mode A Model DNA differentiation (ideation, self-contained coding on `/v1/responses`, bulk, debugging)
- * - Scenario 5: Mode A Anthropic `/v1/messages` & `/v1/chat/completions` SSE streaming (`stream: true`)
- * - Scenario 6: Degradation when System One is unavailable/slow (Mode B scorer HTTP 500 / timeout -> heuristic;
- *   Mode A unaffected)
- * - Scenario 7: Mode B Native Routing Group (`group/compass-group`) via `/v1/systemone` Decision Provider
+ * - Scenario 3: Mode A latency/budget (a request with its profile never waits for a 1,600ms classifier; overhead
+ *   inside moejs's 250ms budget; a virtual model with no candidateModels or defaultModel -> HTTP 400)
+ * - Scenario 4: Mode A Model DNA differentiation by profile (ideation, self-contained coding on `/v1/responses`, bulk, debugging)
+ * - Scenario 5: Mode A Anthropic `/v1/messages` & `/v1/chat/completions` SSE streaming (`stream: true`), with a profile
+ * - Scenario 6: Classifier unavailable or slow (Mode B HTTP 500 / timeout -> not routed, the group's fallback; Mode A unaffected)
+ * - Scenario 7: Mode B Native Routing Group (`group/compass-group`) via `/v1/systemone` Decision Provider and a classifier
  *   (specific intent rules, `"none of these"` fallback rule, and `effort=auto` 4-level Jev logprobs scaling)
- * - Scenario 8: Mode A session affinity, mid-turn tool lock (`within: true`) & short follow-up hold
- * - Scenario 9: Non-realtime requests reach the upstream exactly as a second Magpie running the origin/main build sends
- *   them (`BASELINE_PLUGIN_DIR`; pools, name spellings, protocols, sessions)
+ * - Scenario 8: Mode A session affinity, mid-turn tool lock (`within: true`) & short follow-up hold, with a profile on each request
+ * - Scenario 9: Given the answers the removed text rules gave, requests reach the upstream exactly as a second Magpie running
+ *   the build before their removal sends them (`BASELINE_PLUGIN_DIR`; pools, name spellings, protocols, sessions)
  * - Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down, on every protocol
  * - Scenario 11: A realtime session's later turns hold, with no reroute and no effort ratchet
  * - Scenario 12: A pinned slow model is kept, with a warning in Magpie's log
  * - Scenario 13: Real upstreams (run-linux-sandbox.sh's `REAL_*_AUTH`): for each, no `realtime_loop` on
  *   the wire, routes as on the mock, and the `openai_compatible` classifier on 12 paired hard cases
+ * - Scenario 14: A caller's profile routes, and rewording the task changes nothing (`test/task_text_corpus.mjs`)
+ * - Scenario 15: No profile: not routed, said in Magpie's log and, where it can be, in the reply; what reaches the client
  */
 
 import assert from "node:assert/strict";
@@ -426,7 +430,8 @@ async function main() {
     res.end(JSON.stringify({ error: { message: `Unhandled ${req.method} ${url.pathname}` } }));
   });
 
-  // 2. Start Configurable Async System-One Scorer Server (supports delay, HTTP 500 fault, and timeout simulation)
+  // 2. Start Configurable Async System-One Scorer Server (supports delay, HTTP 500 fault, and timeout simulation).
+  // This is the classifier model, played by a test double: reading the task is its job, and the only place that happens here.
   const scorerCalls = [];
   let scorerDelayMs = 1600;
   let scorerForceStatus = 200;
@@ -446,6 +451,26 @@ async function main() {
         });
         res.writeHead(scorerForceStatus, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: { message: "Simulated System-One scorer failure" } }));
+        return;
+      }
+
+      // Magpie's own questions, passed on by `askClassifier`: no label here is one of the double's, and these are no scale
+      if (String(body.messages?.[0]?.content || "").includes("structured routing questions")) {
+        const { questions = {} } = JSON.parse(userPrompt);
+        const answers = {};
+        for (const [name, question] of Object.entries(questions)) {
+          answers[name] = name === "levels" ? { noul: 0.05 } : { choice: Object.keys(question.criteria || {}).find((c) => c.startsWith("none")) };
+        }
+        scorerCalls.push({ userAgent: req.headers["user-agent"] || "", elapsedMs: Date.now() - started, questions: Object.keys(questions) });
+        res.writeHead(200, { "Content-Type": "application/json" });
+        res.end(
+          JSON.stringify({
+            id: `scorer_${scorerCalls.length}`,
+            object: "chat.completion",
+            model: body.model || "systemone-10d",
+            choices: [{ index: 0, message: { role: "assistant", content: JSON.stringify({ answers }) }, finish_reason: "stop" }],
+          })
+        );
         return;
       }
 
@@ -745,9 +770,9 @@ async function main() {
     }
 
     // Mode A is the shipped middleware alone (`src/middleware.js`) on the virtual models `agentcompass` /
-    // `agentcompass/*`: it runs synchronously in Magpie's `moejs` VM (250ms budget), calls no external scorer,
-    // and picks from `candidateModels`. Scenarios 3-6 and 8 drive that path; Mode B (Scenario 7) is the decision
-    // provider's `/v1/systemone`.
+    // `agentcompass/*`: it runs synchronously in Magpie's `moejs` VM (250ms budget), has no network, and picks from
+    // `candidateModels` by the profile the request brings. Scenarios 3-5 and 8 drive that path; Mode B (Scenarios 6-7)
+    // is the decision provider's `/v1/systemone`, which asks the classifier.
     const gwHeaders = { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" };
     const postChat = (body, headers = {}) =>
       fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
@@ -784,12 +809,54 @@ async function main() {
     report.hostEffortReadyMs = await awaitModelCatalog(postChat);
     console.log(`[Linux Sandbox] Magpie forwards claude-opus-5-5:xhigh as xhigh after ${report.hostEffortReadyMs}ms`);
 
+    // What a request reached the upstream as
+    const lastUp = () => upstreamCalls[upstreamCalls.length - 1];
+    const routedAs = (u) => `${u.model}:${u.reasoning_effort}`;
+    const postTo = (port, requestPath, body, headers) =>
+      fetch(`http://127.0.0.1:${port}${requestPath}`, { method: "POST", headers, body: JSON.stringify(body) });
+    const anthropicHeaders = { "Content-Type": "application/json", "x-api-key": "sk-local-agent", "anthropic-version": "2023-06-01" };
+    const IDEATION = "Brainstorm 5 unconventional first-principles creative architectural directions and novel product mechanics.";
+    const CODING = "Implement a standalone self-contained LRU cache module in TypeScript with unit tests.";
+    const BULK = "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures.";
+    const DEBUG = "Conduct a cross-module deadlock and race condition security audit across the distributed transaction coordinator.";
+    const userMsg = (content) => ({ role: "user", content });
+    // What a classifier answered for each of those tasks: the request carries it, since moejs can't ask one
+    const answer = (work_kind, interaction_style, reasoning_depth, code_complexity, context_scale, divergence, hallucination_risk, error_cost) => ({
+      work_kind,
+      interaction_style,
+      reasoning_depth,
+      code_complexity,
+      context_scale,
+      divergence,
+      hallucination_risk,
+      error_cost,
+      needs_visual: false,
+      needs_gui: false,
+      local_only: false,
+      realtime_loop: false,
+    });
+    const PROFILE = {
+      ideation: answer("direction_reasoning", "advisory", 3, 0, 2, 3, 3, 1),
+      coding: answer("self_contained_code", "engineering", 2, 2, 1, 1, 1, 1),
+      bulk: answer("bounded_bulk_work", "engineering", 1, 1, 2, 1, 1, 1),
+      debug: answer("debug_review", "engineering", 3, 2, 2, 2, 3, 2),
+    };
+    const NOT_ROUTED = "未路由：分类不可用";
+    const unroutedLogged = () => magpieLogs.join("").split("\n").filter((l) => l.includes("[warn]") && l.includes(NOT_ROUTED));
+    const awaitUnroutedLogged = async (n) => {
+      for (let i = 0; i < 25 && unroutedLogged().length < n; i++) await new Promise((r) => setTimeout(r, 200));
+      return unroutedLogged();
+    };
+    // Mode B's classifier, for Scenarios 6 and 7
+    const classifierOptions = { ...basePluginOptions, allowExternalScorer: true };
+
     // =========================================================================
-    // SCENARIO 3: Mode A latency / budget — `agentcompass/auto` never waits for System One
+    // SCENARIO 3: Mode A latency / budget — a request with its profile never waits for a classifier
     // =========================================================================
     {
-      // A System One scorer that would take 1,600ms is configured but Mode A must not call it:
-      // the middleware has to stay inside moejs's 250ms budget and add no scorer round trip.
+      // A classifier that would take 1,600ms is configured and allowed, and Mode A must not call it: the middleware has
+      // no network, stays inside moejs's 250ms budget, and takes the profile the request brings.
+      await setPluginOptions(classifierOptions);
       scorerDelayMs = 1600;
       scorerForceStatus = 200;
       const scorerBefore = scorerCalls.length;
@@ -803,7 +870,7 @@ async function main() {
       const baselineMs = Date.now() - tBase;
 
       const t0 = Date.now();
-      const resp = await postChat({ model: "agentcompass/auto", messages: [{ role: "user", content: prompt }] });
+      const resp = await postChat({ model: "agentcompass/auto", messages: [{ role: "user", content: prompt }], profile: PROFILE.debug });
       const elapsedMs = Date.now() - t0;
       const data = await resp.json();
       assert.equal(resp.status, 200, `Expected 200, got ${resp.status}: ${JSON.stringify(data)}`);
@@ -811,17 +878,18 @@ async function main() {
       assert.ok(ALL_MODELS.includes(up.model), `Mode A must route agentcompass/auto to a catalog model, got ${up.model}`);
       assert.ok(up.reasoning_effort, "Mode A must set a reasoning effort on the routed request");
       assert.equal(up.hasRouteCarrier, false, "middleware.js must not leave __agentcompass_route in the body");
+      assert.ok(!("profile" in up.body), "profile is for the router; a real upstream rejects a field it does not know");
       assert.equal(scorerCalls.length, scorerBefore, "Mode A must not call an external scorer");
       assert.ok(elapsedMs < 1000, `Routed request took ${elapsedMs}ms; it must not wait on the 1,600ms scorer`);
       const overheadMs = elapsedMs - baselineMs;
       assert.ok(overheadMs < 250, `Routing overhead ${overheadMs}ms exceeds moejs's 250ms middleware budget`);
 
-      // Without candidateModels the virtual model has nothing to pick from: the middleware rejects with 400
+      // With neither candidateModels nor defaultModel the virtual model has nowhere to go: a configuration error, profile or not
       await setPluginOptions({ ...basePluginOptions, candidateModels: [] });
-      const rejected = await postChat({ model: "agentcompass/auto", messages: [{ role: "user", content: prompt }] });
+      const rejected = await postChat({ model: "agentcompass/auto", messages: [{ role: "user", content: prompt }], profile: PROFILE.debug });
       const rejectedBody = await rejected.text();
       assert.equal(rejected.status, 400, `Expected ctx.reject(400) without candidateModels, got ${rejected.status}: ${rejectedBody}`);
-      assert.ok(/candidateModels/.test(rejectedBody), `400 must name the missing option: ${rejectedBody}`);
+      assert.ok(/candidateModels/.test(rejectedBody) && /defaultModel/.test(rejectedBody), `400 must name the missing options: ${rejectedBody}`);
       await setPluginOptions(basePluginOptions);
 
       report.scenarios.scenario3_mode_a_latency_budget = {
@@ -837,7 +905,7 @@ async function main() {
         noCandidateModelsStatus: rejected.status,
       };
       report.steps.push({
-        test: "Scenario 3: Mode A latency/budget (`agentcompass/auto` -> middleware.js [moejs]; 1,600ms scorer configured but never called; no candidateModels -> 400)",
+        test: "Scenario 3: Mode A latency/budget (`agentcompass/auto` with a profile -> middleware.js [moejs]; 1,600ms classifier configured but never called; no candidateModels or defaultModel -> 400)",
         routedModel: up.model,
         routedEffort: up.reasoning_effort,
         routedElapsedMs: elapsedMs,
@@ -857,6 +925,7 @@ async function main() {
       // 4a. Divergent ideation
       const resp1 = await postChat({
         model: "agentcompass/auto",
+        profile: PROFILE.ideation,
         messages: [
           {
             role: "user",
@@ -873,6 +942,7 @@ async function main() {
         headers: gwHeaders,
         body: JSON.stringify({
           model: "agentcompass/auto",
+          profile: PROFILE.coding,
           input: [
             {
               role: "user",
@@ -892,6 +962,7 @@ async function main() {
       // 4c. Routine bounded bulk work
       const resp3 = await postChat({
         model: "agentcompass/auto",
+        profile: PROFILE.bulk,
         messages: [
           { role: "user", content: "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures." },
         ],
@@ -902,6 +973,7 @@ async function main() {
       // 4d. Coupled root-cause debugging
       const resp4 = await postChat({
         model: "agentcompass/auto",
+        profile: PROFILE.debug,
         messages: [
           {
             role: "user",
@@ -932,6 +1004,7 @@ async function main() {
       for (const u of [up1, up2, up3, up4]) {
         assert.ok(ALL_MODELS.includes(u.model));
         assert.equal(u.hasRouteCarrier, false);
+        assert.ok(!("profile" in u.body));
       }
       assert.equal(scorerCalls.length, scorerBefore, "Mode A must not call an external scorer");
 
@@ -961,6 +1034,7 @@ async function main() {
         headers: { "Content-Type": "application/json", "x-api-key": "sk-local-agent", "anthropic-version": "2023-06-01" },
         body: JSON.stringify({
           model: "agentcompass/auto",
+          profile: PROFILE.debug,
           max_tokens: 1024,
           messages: [
             {
@@ -976,10 +1050,12 @@ async function main() {
       const anthUp = upstreamCalls[upstreamCalls.length - 1];
       assert.equal(anthUp.model, "claude-opus-5-5", "Coupled deadlock audit on /v1/messages routes to claude-opus-5-5");
       assert.equal(anthUp.hasRouteCarrier, false);
+      assert.ok(!("profile" in anthUp.body));
 
       // 5b. OpenAI `/v1/chat/completions` with `stream: true` (SSE)
       const streamResp = await postChat({
         model: "agentcompass/auto",
+        profile: PROFILE.coding,
         stream: true,
         messages: [{ role: "user", content: "Implement a standalone self-contained LRU cache algorithm in TypeScript." }],
       });
@@ -995,6 +1071,7 @@ async function main() {
       assert.equal(streamUp.model, "gpt-6.1-sol", "Self-contained coding over SSE routes to gpt-6.1-sol");
       assert.equal(streamUp.reasoning_effort, "high");
       assert.equal(streamUp.hasRouteCarrier, false);
+      assert.ok(!("profile" in streamUp.body));
       // The routed model is the one the stream was served by
       assert.ok(sseText.includes(streamUp.model), "SSE chunks must carry the routed model");
 
@@ -1020,79 +1097,91 @@ async function main() {
     }
 
     // =========================================================================
-    // SCENARIO 6: Degradation when System One is unavailable or slow
+    // SCENARIO 6: The classifier unavailable or slow: not routed, and no guess
     // =========================================================================
     {
-      // The only System One consumer left is the Mode B decision provider (`allowExternalScorer: true` opts it in
-      // to the remote scorer); it must fall back to the local heuristic profile instead of failing the request.
-      // Mode A never calls the scorer, so a dead scorer must not touch it at all.
-      const externalOptions = { ...basePluginOptions, allowExternalScorer: true, scorerTimeoutMs: 300 };
+      // Mode B is what can call a classifier. When it fails the decision provider says "none of these", so the group's
+      // fallback (its first model, gpt-6-luna) serves the request, with no effort from the plugin. Mode A has no network,
+      // so a dead classifier can't touch it.
+      const externalOptions = { ...classifierOptions, scorerTimeoutMs: 300 };
       const groupReq = (content) =>
         postChat({ model: "group/compass-group", messages: [{ role: "user", content }] });
       const creative = "Brainstorm a novel creative gameplay scheme and first-principles roadmap for an AI simulation game.";
 
-      // 6a. Healthy scorer: sanity check that Mode B really reaches it with the option on
+      // 6a. Healthy classifier: sanity check that Mode B really reaches it with the option on
       await setPluginOptions(externalOptions);
       scorerForceStatus = 200;
       scorerDelayMs = 20;
       const calls6a = scorerCalls.length;
       const r6a = await groupReq(creative);
       assert.equal(r6a.status, 200);
-      const up6a = upstreamCalls[upstreamCalls.length - 1];
-      assert.ok(scorerCalls.length > calls6a, "With allowExternalScorer on, Mode B must call the System One scorer");
+      const up6a = lastUp();
+      assert.ok(scorerCalls.length > calls6a, "With allowExternalScorer on, Mode B must call the classifier");
       assert.equal(up6a.model, "gemini-4-argon-high");
 
-      // 6b. Scorer HTTP 500 -> heuristic fallback, same routing, request still 200
+      // 6b. HTTP 500 -> not routed, the group's fallback, request still 200
       scorerForceStatus = 500;
       const calls6b = scorerCalls.length;
+      const logged6b = unroutedLogged().length;
       const r6b = await groupReq(creative + " (variant b)");
-      assert.equal(r6b.status, 200, "Mode B must succeed via heuristic fallback when the scorer returns HTTP 500");
-      const up6b = upstreamCalls[upstreamCalls.length - 1];
-      assert.ok(scorerCalls.length > calls6b, "the failing scorer must have been attempted");
-      assert.equal(up6b.model, "gemini-4-argon-high", "heuristic fallback must still classify creative work as direction_reasoning");
+      assert.equal(r6b.status, 200, "Mode B must still serve the request when the classifier returns HTTP 500");
+      const up6b = lastUp();
+      assert.ok(scorerCalls.length > calls6b, "the failing classifier must have been attempted");
+      assert.equal(up6b.model, "gpt-6-luna", "with no classifier answer the same words must not reach the rule they would have matched");
+      const lines6b = await awaitUnroutedLogged(logged6b + 1);
+      assert.ok(lines6b.length > logged6b, `Not routing must be said in Magpie's log:\n${magpieLogs.join("").slice(-2000)}`);
 
-      // 6c. Scorer slower than scorerTimeoutMs -> heuristic fallback quickly
+      // 6c. Slower than scorerTimeoutMs -> not routed, quickly
       scorerForceStatus = 200;
       scorerDelayMs = 2000;
       const t6c = Date.now();
       const r6c = await groupReq(creative + " (variant c)");
       const timeoutElapsedMs = Date.now() - t6c;
-      assert.equal(r6c.status, 200, "Mode B must succeed via heuristic fallback when the scorer times out");
-      const up6c = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up6c.model, "gemini-4-argon-high");
-      assert.ok(timeoutElapsedMs < 1500, `Scorer timeout fallback should finish quickly (<1500ms), took ${timeoutElapsedMs}ms`);
+      assert.equal(r6c.status, 200, "Mode B must still serve the request when the classifier times out");
+      const up6c = lastUp();
+      assert.equal(up6c.model, "gpt-6-luna");
+      assert.ok(timeoutElapsedMs < 1500, `A classifier timeout should cost little (<1500ms), took ${timeoutElapsedMs}ms`);
 
-      // 6d. Mode A with the scorer down: unaffected, zero scorer calls
+      // 6d. No classifier configured: not routed, no call
+      await setPluginOptions(basePluginOptions);
+      scorerDelayMs = 20;
+      const calls6d0 = scorerCalls.length;
+      const r6d0 = await groupReq(creative + " (variant d)");
+      assert.equal(r6d0.status, 200);
+      const up6d0 = lastUp();
+      assert.equal(up6d0.model, "gpt-6-luna");
+      assert.equal(scorerCalls.length, calls6d0, "with allowExternalScorer off the classifier must not be called");
+      await setPluginOptions(externalOptions);
+
+      // 6e. Mode A with the classifier down: unaffected, zero calls
       scorerForceStatus = 500;
-      const calls6d = scorerCalls.length;
-      const r6d = await postChat({
-        model: "agentcompass/auto",
-        messages: [{ role: "user", content: "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures." }],
-      });
-      assert.equal(r6d.status, 200);
-      const up6d = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up6d.model, "gemini-3.8-flash-high");
-      assert.equal(scorerCalls.length, calls6d, "Mode A must not touch the scorer even when it is down");
+      const calls6e = scorerCalls.length;
+      const r6e = await postChat({ model: "agentcompass/auto", profile: PROFILE.bulk, messages: [userMsg(`${BULK} [6e]`)] });
+      assert.equal(r6e.status, 200);
+      const up6e = lastUp();
+      assert.equal(up6e.model, "gemini-3.8-flash-high");
+      assert.equal(scorerCalls.length, calls6e, "Mode A must not touch the classifier even when it is down");
 
       // Restore
       scorerForceStatus = 200;
       scorerDelayMs = 100;
       await setPluginOptions(basePluginOptions);
 
-      report.scenarios.scenario6_system_one_degradation = {
+      report.scenarios.scenario6_classifier_unavailable = {
         pass: true,
-        healthyScorerModeB: up6a.model,
-        http500FallbackModeB: up6b.model,
-        timeoutFallbackModeB: up6c.model,
-        timeoutFallbackElapsedMs: timeoutElapsedMs,
-        modeAWithScorerDown: up6d.model,
+        healthyClassifierModeB: up6a.model,
+        http500ModeB: up6b.model,
+        timeoutModeB: up6c.model,
+        timeoutElapsedMs,
+        noClassifierModeB: up6d0.model,
+        modeAWithClassifierDown: up6e.model,
       };
       report.steps.push({
-        test: "Scenario 6: Degradation when System One is unavailable or slow (Mode B scorer HTTP 500 / timeout -> local heuristic; Mode A unaffected)",
-        ...report.scenarios.scenario6_system_one_degradation,
+        test: "Scenario 6: the classifier unavailable or slow (Mode B HTTP 500 / timeout / none configured -> not routed, the group's fallback; Mode A unaffected)",
+        ...report.scenarios.scenario6_classifier_unavailable,
       });
       console.log(
-        `[PASS] Scenario 6 (System One degradation): Mode B 500 -> ${up6b.model}, timeout (${timeoutElapsedMs}ms) -> ${up6c.model}; Mode A with scorer down -> ${up6d.model}`
+        `[PASS] Scenario 6 (classifier unavailable): healthy -> ${up6a.model}; Mode B 500 -> ${up6b.model}, timeout (${timeoutElapsedMs}ms) -> ${up6c.model}, none configured -> ${up6d0.model}; Mode A with it down -> ${up6e.model}`
       );
     }
 
@@ -1100,6 +1189,11 @@ async function main() {
     // SCENARIO 7: Mode B — Native Routing Group (`group/compass-group`) via `/v1/systemone`
     // =========================================================================
     {
+      // Mode B asks the classifier: its answer, not the words, is what matches a rule
+      await setPluginOptions(classifierOptions);
+      scorerForceStatus = 200;
+      scorerDelayMs = 20;
+
       // 7a. Matches `intent=direction_reasoning` rule + upgrades effort medium -> high
       const resp1 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
         method: "POST",
@@ -1161,6 +1255,8 @@ async function main() {
         "gpt-6-luna",
         "When /v1/systemone returns choice='none of these', group/compass-group must fall back to its first default model (gpt-6-luna)"
       );
+      scorerDelayMs = 100;
+      await setPluginOptions(basePluginOptions);
 
       report.scenarios.scenario7_mode_b_systemone_group = {
         pass: true,
@@ -1185,7 +1281,8 @@ async function main() {
     // =========================================================================
     // Magpie hands each request a moejs runtime from a sync.Pool, so a session's requests land on different
     // runtimes. The middleware decides the turn a request continues again from the history the client resends,
-    // so the route holds whichever runtime serves it. The sessions below are run SCENARIO8_REPEATS times on the
+    // so the route holds whichever runtime serves it. That takes the profile on every request of the session: a runtime that
+    // has not seen the session has nothing else to decide from. The sessions below are run SCENARIO8_REPEATS times on the
     // default GOMAXPROCS, each its own session, and every tool-loop step and follow-up is counted.
     {
       const repeats = Math.max(1, Number(process.env.SCENARIO8_REPEATS || 20));
@@ -1196,6 +1293,7 @@ async function main() {
       let up8a;
       let up8b;
       let up8c;
+      const withoutProfile = {};
 
       for (let i = 0; i < repeats; i++) {
         // the session is known by its first message (Magpie gives middleware no headers); run 0 is the original
@@ -1208,7 +1306,7 @@ async function main() {
         const sessionHeaders = { "x-session-id": `e2e-sticky-session-${i + 1}` };
 
         // 8a. Turn 1 (`why: "first"`): routed by the middleware
-        const resp8a = await postChat({ model: "agentcompass/auto", messages: [stickyFirstMsg] }, sessionHeaders);
+        const resp8a = await postChat({ model: "agentcompass/auto", profile: PROFILE.debug, messages: [stickyFirstMsg] }, sessionHeaders);
         assert.equal(resp8a.status, 200);
         const a = upstreamCalls[upstreamCalls.length - 1];
         assert.equal(a.model, "claude-opus-5-5", `run ${i}: turn 1 routes to claude-opus-5-5`);
@@ -1218,6 +1316,7 @@ async function main() {
         const resp8b = await postChat(
           {
             model: "agentcompass/auto",
+            profile: PROFILE.debug,
             messages: [
               stickyFirstMsg,
               {
@@ -1243,6 +1342,7 @@ async function main() {
         const resp8c = await postChat(
           {
             model: "agentcompass/auto",
+            profile: PROFILE.debug,
             messages: [
               stickyFirstMsg,
               { role: "assistant", content: "I found the lock inversion between ShardLock and TxLock. Shall I continue with the fix?" },
@@ -1264,6 +1364,21 @@ async function main() {
           followup: `${c.model}:${c.reasoning_effort}`,
         });
         if (i === 0) [up8a, up8b, up8c] = [a, b, c];
+
+        // A client that stops sending the profile mid-session: only a runtime that served this session can hold it, and Magpie
+        // picks the runtime from a pool. Recorded, not asserted.
+        const upstreamBefore = upstreamCalls.length;
+        const bare = await postChat({
+          model: "agentcompass/auto",
+          messages: [
+            stickyFirstMsg,
+            { role: "assistant", content: null, tool_calls: [{ id: "call_lock_2", type: "function", function: { name: "read_file", arguments: "{}" } }] },
+            { role: "tool", tool_call_id: "call_lock_2", content: "ok" },
+          ],
+        });
+        await bare.text();
+        const seen = `${bare.status} ${upstreamCalls.length > upstreamBefore ? routedAs(lastUp()) : "no upstream call"}`;
+        withoutProfile[seen] = (withoutProfile[seen] || 0) + 1;
       }
 
       const rerouted = runs.filter((r) => r.toolLoop !== r.turn1 || r.followup !== r.turn1);
@@ -1277,6 +1392,7 @@ async function main() {
       const resp8d = await postChat(
         {
           model: "agentcompass/auto",
+          profile: PROFILE.bulk,
           messages: [
             { role: "user", content: "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures." },
           ],
@@ -1299,6 +1415,7 @@ async function main() {
         midTurnToolLoopRouted: `${up8b.model}:${up8b.reasoning_effort}`,
         shortFollowupRouted: `${up8c.model}:${up8c.reasoning_effort}`,
         otherSessionRouted: `${up8d.model}:${up8d.reasoning_effort}`,
+        toolLoopWithoutProfile: { outcomes: withoutProfile, asserted: false },
         scorerCalls: scorerCalls.length - scorerBefore8,
       };
       report.steps.push({
@@ -1306,29 +1423,21 @@ async function main() {
         ...report.scenarios.scenario8_session_continuity_and_turn_lock,
       });
       console.log(
-        `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): ${repeats} sessions, ${toolLoopReroutes} tool-loop / ${followupReroutes} follow-up re-routes; turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort}, followup=${up8c.model}:${up8c.reasoning_effort}, otherSession=${up8d.model}`
+        `[PASS] Scenario 8 (Session Continuity & Mid-Turn Lock): ${repeats} sessions, ${toolLoopReroutes} tool-loop / ${followupReroutes} follow-up re-routes; turn1=${up8a.model}:${up8a.reasoning_effort}, toolLoop=${up8b.model}:${up8b.reasoning_effort}, followup=${up8c.model}:${up8c.reasoning_effort}, otherSession=${up8d.model}; tool-loop step with no profile ${JSON.stringify(withoutProfile)}`
       );
     }
 
-    // What a request reached the upstream as, for the realtime scenarios below
-    const lastUp = () => upstreamCalls[upstreamCalls.length - 1];
-    const routedAs = (u) => `${u.model}:${u.reasoning_effort}`;
-    const postTo = (port, requestPath, body, headers) =>
-      fetch(`http://127.0.0.1:${port}${requestPath}`, { method: "POST", headers, body: JSON.stringify(body) });
-    const anthropicHeaders = { "Content-Type": "application/json", "x-api-key": "sk-local-agent", "anthropic-version": "2023-06-01" };
-    const IDEATION = "Brainstorm 5 unconventional first-principles creative architectural directions and novel product mechanics.";
-    const CODING = "Implement a standalone self-contained LRU cache module in TypeScript with unit tests.";
-    const BULK = "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures.";
-    const DEBUG = "Conduct a cross-module deadlock and race condition security audit across the distributed transaction coordinator.";
-    const userMsg = (content) => ({ role: "user", content });
-
     // =========================================================================
-    // SCENARIO 9: Non-realtime requests match a second real Magpie running the origin/main build
+    // SCENARIO 9: Given the answers the removed text rules gave, requests match a second real Magpie running the build that had them
     // =========================================================================
     if (!BASELINE_PLUGIN_DIR) {
-      report.scenarios.scenario9_non_realtime_matches_origin_main = { pass: null, skipped: "BASELINE_SRC not set" };
-      console.log("[SKIP] Scenario 9 (non-realtime vs origin/main): BASELINE_SRC not set");
+      report.scenarios.scenario9_same_answers_match_baseline = { pass: null, skipped: "BASELINE_SRC not set" };
+      console.log("[SKIP] Scenario 9 (same answers vs baseline): BASELINE_SRC not set");
     } else {
+      // The baseline decides from a request's text, and this build from a profile. So this build gets, with each request, what the
+      // baseline's own profiler says for it: what's left to differ is everything after the answer. The profiler stays in that build.
+      const { extractRequestFacts: baselineFacts, inferTaskProfile: baselineProfile } = await import(path.join(BASELINE_PLUGIN_DIR, "src", "profiler-core.js"));
+      const baselineAnswer = (body) => baselineProfile(baselineFacts(body, {}));
       const root = path.join(SANDBOX_ROOT, "baseline");
       const baseGw = 13427;
       const baseWeb = 13428;
@@ -1359,7 +1468,7 @@ async function main() {
 
       const instances = [
         { name: "worktree", gw: gwPort, web: webPort, cookie: webCookie, spec: PLUGIN_DIR },
-        { name: "origin/main", gw: baseGw, web: baseWeb, cookie: baseCookie, spec: BASELINE_PLUGIN_DIR },
+        { name: "baseline", gw: baseGw, web: baseWeb, cookie: baseCookie, spec: BASELINE_PLUGIN_DIR },
       ];
       const up = (m) => `upstream/${m}`;
       const pools = {
@@ -1384,14 +1493,17 @@ async function main() {
       };
       const TEXTS = [IDEATION, CODING, BULK, DEBUG, "Translate this short release greeting paragraph into Spanish and French.", "修复登录页的空指针崩溃并补上回归测试"];
       const CHAT = "/v1/chat/completions";
+      // `askedAbout` is the request a classifier was asked about, for a later request of the same turn
       const corpus = (salt) => {
         const out = [];
         for (const text of TEXTS) {
           const first = userMsg(`${text} [${salt}]`);
+          const asked = { messages: [first] };
           out.push({ path: CHAT, body: { model: "agentcompass/auto", messages: [first] } });
-          // Later turns of that session: a tool loop step and a short follow-up
+          // Later requests of that session: a tool loop step and a short follow-up
           out.push({
             path: CHAT,
+            askedAbout: asked,
             body: {
               model: "agentcompass/auto",
               messages: [
@@ -1401,12 +1513,7 @@ async function main() {
               ],
             },
           });
-          out.push({ path: CHAT, body: { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")] } });
-          // A new turn of a session no runtime has seen: decided from the history alone
-          out.push({
-            path: CHAT,
-            body: { model: "agentcompass/auto", messages: [userMsg(`${text} [cold ${salt}]`), { role: "assistant", content: "Done." }, userMsg(`Next, ${TEXTS[(TEXTS.indexOf(text) + 1) % TEXTS.length]}`)] },
-          });
+          out.push({ path: CHAT, askedAbout: asked, body: { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")] } });
           out.push({ path: CHAT, body: { model: "agentcompass/auto", stream: true, messages: [userMsg(`${text} [stream ${salt}]`)] } });
           out.push({
             path: "/v1/responses",
@@ -1423,9 +1530,10 @@ async function main() {
         }
         out.push({ path: CHAT, body: { model: "agentcompass:low", messages: [userMsg(`${BULK} [suffix ${salt}]`)] } });
         out.push({ path: CHAT, body: { model: "upstream/gpt-6-luna", messages: [userMsg(`${DEBUG} [direct ${salt}]`)] } });
-        out.push({ path: CHAT, body: { model: "group/compass-group", messages: [userMsg(`${DEBUG} [group ${salt}]`)] } });
         return out;
       };
+      // The baseline reads the words; this build is told the answer
+      const asSentTo = (instance, body, askedAbout = body) => (instance === instances[0] ? { ...body, profile: baselineAnswer(askedAbout) } : body);
       const applyPool = async (instance, poolOptions) => {
         const r = await fetch(`http://127.0.0.1:${instance.web}/api/plugins/options`, {
           method: "POST",
@@ -1439,7 +1547,7 @@ async function main() {
         for (const [at, req] of corpus(salt).entries()) {
           const before = upstreamCalls.length;
           const headers = req.path === "/v1/messages" ? anthropicHeaders : gwHeaders;
-          const resp = await postTo(instance.gw, req.path, req.body, headers);
+          const resp = await postTo(instance.gw, req.path, asSentTo(instance, req.body, req.askedAbout), headers);
           await resp.text();
           const sent = upstreamCalls.slice(before).map((u) => ({
             path: u.path,
@@ -1453,7 +1561,7 @@ async function main() {
         return seen;
       };
       // A new full turn of a session holds on the runtime that has the session's warm record and reroutes on one that
-      // has not, and Magpie picks the runtime from a pool: origin/main against itself flips on these requests. So they
+      // has not, and Magpie picks the runtime from a pool: the baseline against itself flips on these requests. So they
       // are sampled: the routes either build gives, which must be no more than those two.
       const NEW_TURN_SAMPLES = 8;
       const sampleNewTurn = async (instance, text, salt) => {
@@ -1462,16 +1570,22 @@ async function main() {
         const nextText = `Next, ${TEXTS[(TEXTS.indexOf(text) + 1) % TEXTS.length]}`;
         for (let n = 0; n < NEW_TURN_SAMPLES; n++) {
           const first = userMsg(`${text} [${salt} new turn ${n}]`);
-          const a = await postTo(instance.gw, CHAT, { model: "agentcompass/auto", messages: [first] }, gwHeaders);
+          const asked = { messages: [first] };
+          const a = await postTo(instance.gw, CHAT, asSentTo(instance, { model: "agentcompass/auto", messages: [first] }), gwHeaders);
           await a.text();
           const firstRoute = routedAs(upstreamCalls[upstreamCalls.length - 1]);
           for (const later of [
             [first, { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }] }, { role: "tool", tool_call_id: "call_1", content: "ok" }],
             [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")],
           ]) {
-            await (await postTo(instance.gw, CHAT, { model: "agentcompass/auto", messages: later }, gwHeaders)).text();
+            await (await postTo(instance.gw, CHAT, asSentTo(instance, { model: "agentcompass/auto", messages: later }, asked), gwHeaders)).text();
           }
-          const b = await postTo(instance.gw, CHAT, { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done." }, userMsg(nextText)] }, gwHeaders);
+          const b = await postTo(
+            instance.gw,
+            CHAT,
+            asSentTo(instance, { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done." }, userMsg(nextText)] }, { messages: [userMsg(nextText)] }),
+            gwHeaders
+          );
           await b.text();
           const nextRoute = routedAs(upstreamCalls[upstreamCalls.length - 1]);
           (nextRoute === firstRoute ? held : rerouted).add(nextRoute);
@@ -1499,7 +1613,7 @@ async function main() {
           if (a.rerouted.length > 0 && b.rerouted.length > 0) newTurnRowsThatReroute += 1;
           // The runtime's two states give two routes at most, whichever build serves them; a third is a change in routing
           const clash = new Set([...a.held, ...a.rerouted, ...b.held, ...b.rerouted]).size > 2;
-          if (clash) newTurnDiffs.push({ pool: name, text: text.slice(0, 40), worktree: a, originMain: b });
+          if (clash) newTurnDiffs.push({ pool: name, text: text.slice(0, 40), worktree: a, baseline: b });
         }
         let poolDiffs = 0;
         const poolRoutes = new Set();
@@ -1512,7 +1626,7 @@ async function main() {
           }
           if (JSON.stringify(row) !== JSON.stringify(theirs[i])) {
             poolDiffs += 1;
-            diffs.push({ pool: name, worktree: row, originMain: theirs[i] });
+            diffs.push({ pool: name, worktree: row, baseline: theirs[i] });
           }
         });
         perPool[name] = { requests: mine.length, diffs: poolDiffs, routes: poolRoutes.size };
@@ -1522,16 +1636,16 @@ async function main() {
         pool: d.pool,
         request: d.worktree.request,
         worktree: [d.worktree.status, d.worktree.sent.map((s) => `${s.model}:${s.effort}`)],
-        originMain: [d.originMain.status, d.originMain.sent.map((s) => `${s.model}:${s.effort}`)],
+        baseline: [d.baseline.status, d.baseline.sent.map((s) => `${s.model}:${s.effort}`)],
       }));
-      assert.equal(diffs.length, 0, `Non-realtime requests must reach the upstream as origin/main sends them: ${JSON.stringify(brief, null, 2)}`);
-      assert.deepEqual(newTurnDiffs, [], "A new turn must reroute to the same route as on origin/main");
+      assert.equal(diffs.length, 0, `With the same answers, requests must reach the upstream as the baseline sends them: ${JSON.stringify(brief, null, 2)}`);
+      assert.deepEqual(newTurnDiffs, [], "A new turn must reroute to the same route as on the baseline");
       assert.ok(newTurnRowsThatReroute > 0, "The new turn sampling compared nothing: no row rerouted on both builds");
       assert.ok(served / requests >= 0.9, `Most of the corpus must be served for the comparison to mean anything: ${served}/${requests}`);
       assert.ok(routes.size >= 10, `The corpus must exercise many routes: ${[...routes].join(", ")}`);
       assert.ok(routes.has("gemini-4-argon-high:high"), "Non-realtime routing still uses Argon high");
 
-      report.scenarios.scenario9_non_realtime_matches_origin_main = {
+      report.scenarios.scenario9_same_answers_match_baseline = {
         pass: true,
         requests,
         served,
@@ -1543,14 +1657,14 @@ async function main() {
           rows: newTurnRows,
           diffs: newTurnDiffs.length,
           rowsComparedOnBothBuilds: newTurnRowsThatReroute,
-          originMainRowsThatFlipOnThePool: newTurnRowsThatFlip,
+          baselineRowsThatFlipOnThePool: newTurnRowsThatFlip,
         },
       };
       report.steps.push({
-        test: "Scenario 9: non-realtime requests reach the upstream as a second real Magpie running origin/main sends them (status, model, effort, full body)",
-        ...report.scenarios.scenario9_non_realtime_matches_origin_main,
+        test: "Scenario 9: given the answers the removed text rules gave, requests reach the upstream as a second real Magpie running the build that had them sends them (status, model, effort, full body)",
+        ...report.scenarios.scenario9_same_answers_match_baseline,
       });
-      console.log(`[PASS] Scenario 9 (non-realtime vs origin/main): ${requests} requests over ${Object.keys(pools).length} pools, ${served} served, ${routes.size} distinct routes, ${diffs.length} diffs; new turns: ${newTurnRows} rows x ${NEW_TURN_SAMPLES} samples, ${newTurnDiffs.length} diffs, ${newTurnRowsThatReroute} rows rerouted on both builds (origin/main flips on ${newTurnRowsThatFlip} rows)`);
+      console.log(`[PASS] Scenario 9 (same answers vs baseline): ${requests} requests over ${Object.keys(pools).length} pools, ${served} served, ${routes.size} distinct routes, ${diffs.length} diffs; new turns: ${newTurnRows} rows x ${NEW_TURN_SAMPLES} samples, ${newTurnDiffs.length} diffs, ${newTurnRowsThatReroute} rows rerouted on both builds (the baseline flips on ${newTurnRowsThatFlip} rows)`);
       await setPluginOptions(basePluginOptions);
     }
 
@@ -1572,57 +1686,59 @@ async function main() {
         bulk: [BULK, "gemini-3.8-flash-high:high", "claude-sonnet-5-5:low"],
         debug: [DEBUG, "claude-opus-5-5:xhigh", "claude-opus-5-5:medium"],
       };
+      const rtWith = (profile) => ({ ...rt, profile });
       const routed = {};
       const flagsForwarded = [];
       for (const [name, [text, off, on]] of Object.entries(pairs)) {
-        const plain = await route(`${text} [10a off]`);
-        const live = await route(`${text} [10a on]`, rt);
+        const plain = await route(`${text} [10a off]`, { profile: PROFILE[name] });
+        const live = await route(`${text} [10a on]`, rtWith(PROFILE[name]));
         assert.equal(routedAs(plain), off, `${name} without realtime_loop`);
         assert.equal(routedAs(live), on, `${name} with realtime_loop`);
         assert.notEqual(live.model, "gemini-4-argon-high", `${name}: realtime_loop must not reach Argon high`);
-        if ("realtime_loop" in live.body) flagsForwarded.push(name);
+        if ("realtime_loop" in live.body || "profile" in live.body) flagsForwarded.push(name);
         routed[name] = { nonRealtime: routedAs(plain), realtime: routedAs(live) };
       }
-      assert.deepEqual(flagsForwarded, [], "realtime_loop is for the router; a real upstream rejects a field it does not know");
+      assert.deepEqual(flagsForwarded, [], "realtime_loop and profile are for the router; a real upstream rejects a field it does not know");
 
       // 10b. A pool of one slow bundle steps down instead of sending the listed xhigh
       await setPluginOptions({ ...basePluginOptions, candidateModels: ["upstream/claude-opus-5-5:xhigh"] });
-      const steppedPlain = await route(`${DEBUG} [10b off]`);
-      const stepped = await route(`${DEBUG} [10b on]`, rt);
+      const steppedPlain = await route(`${DEBUG} [10b off]`, { profile: PROFILE.debug });
+      const stepped = await route(`${DEBUG} [10b on]`, rtWith(PROFILE.debug));
       assert.equal(routedAs(steppedPlain), "claude-opus-5-5:xhigh");
       assert.equal(routedAs(stepped), "claude-opus-5-5:medium");
 
       // 10c. A pool of Argon high alone: excluded, so Argon is never called
       await setPluginOptions({ ...basePluginOptions, candidateModels: ["upstream/gemini-4-argon-high"] });
       const argonBefore = upstreamCalls.length;
-      const argonOnly = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${IDEATION} [10c on]`)], ...rt });
+      const argonOnly = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${IDEATION} [10c on]`)], ...rtWith(PROFILE.ideation) });
       const argonOnlyBody = await argonOnly.text();
       const argonOnlyCalls = upstreamCalls.slice(argonBefore).map((u) => u.model);
       assert.ok(!argonOnlyCalls.includes("gemini-4-argon-high"), `Argon high alone must not be called under realtime_loop: ${argonOnlyBody}`);
       await setPluginOptions(basePluginOptions);
 
       // 10d. A model named directly is not routed, and the flag still stops at the gateway
-      const direct = await postChat({ model: "upstream/gemini-4-argon-high", messages: [userMsg(`${IDEATION} [10d direct]`)], ...rt });
+      const direct = await postChat({ model: "upstream/gemini-4-argon-high", messages: [userMsg(`${IDEATION} [10d direct]`)], ...rtWith(PROFILE.bulk) });
       assert.equal(direct.status, 200);
       assert.equal(lastUp().model, "gemini-4-argon-high");
       assert.ok(!("realtime_loop" in lastUp().body));
+      assert.ok(!("profile" in lastUp().body));
 
       // 10e. Every protocol, and the plugin-wide option
-      const responses = await postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${CODING} [10e responses]` }] }], ...rt }, gwHeaders);
+      const responses = await postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${CODING} [10e responses]` }] }], ...rtWith(PROFILE.coding) }, gwHeaders);
       assert.equal(responses.status, 200);
       const onResponses = lastUp();
       assert.equal(routedAs(onResponses), "gpt-6.1-sol:medium");
       assert.equal(onResponses.path, "/v1/responses");
       assert.ok(!("realtime_loop" in onResponses.body));
 
-      const messages = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [userMsg(`${DEBUG} [10e messages]`)], ...rt }, anthropicHeaders);
+      const messages = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [userMsg(`${DEBUG} [10e messages]`)], ...rtWith(PROFILE.debug) }, anthropicHeaders);
       assert.equal(messages.status, 200);
       const onMessages = lastUp();
       // Magpie sends a /v1/messages request to this chat-only provider without an effort, realtime or not (Scenario 5)
       assert.equal(onMessages.model, "claude-opus-5-5");
       assert.ok(!("realtime_loop" in onMessages.body));
 
-      const streamed = await postChat({ model: "agentcompass/auto", stream: true, messages: [userMsg(`${CODING} [10e stream]`)], ...rt });
+      const streamed = await postChat({ model: "agentcompass/auto", stream: true, messages: [userMsg(`${CODING} [10e stream]`)], ...rtWith(PROFILE.coding) });
       assert.equal(streamed.status, 200);
       assert.ok((await streamed.text()).includes("[DONE]"));
       const onStream = lastUp();
@@ -1630,7 +1746,7 @@ async function main() {
       assert.ok(!("realtime_loop" in onStream.body));
 
       await setPluginOptions({ ...basePluginOptions, realtime_loop: true });
-      const pluginWide = await route(`${IDEATION} [10e option]`);
+      const pluginWide = await route(`${IDEATION} [10e option]`, { profile: PROFILE.ideation });
       assert.equal(routedAs(pluginWide), "gpt-6-astra:medium");
       await setPluginOptions(basePluginOptions);
 
@@ -1660,8 +1776,8 @@ async function main() {
     {
       const repeats = Math.max(1, Number(process.env.SCENARIO8_REPEATS || 20));
       const rt = { realtime_loop: true };
-      const send = async (messages, extra = rt) => {
-        const r = await postChat({ model: "agentcompass/auto", messages, ...extra });
+      const send = async (messages, extra = rt, profile = PROFILE.debug) => {
+        const r = await postChat({ model: "agentcompass/auto", messages, profile, ...extra });
         assert.equal(r.status, 200);
         return lastUp();
       };
@@ -1684,14 +1800,18 @@ async function main() {
         // Short follow-up
         const c = await send([opening, { role: "assistant", content: "Acted. Continue?" }, userMsg("继续")]);
         // A whole new turn that would route elsewhere on its own, and asks for high stakes work that would raise effort
-        const d = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)]);
-        const e = await send([
-          opening,
-          { role: "assistant", content: "Acted." },
-          userMsg(`Next, ${IDEATION}`),
-          { role: "assistant", content: "Acted again." },
-          userMsg("Now find the root cause of the deadlock across every module and prove the fix formally."),
-        ]);
+        const d = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], rt, PROFILE.ideation);
+        const e = await send(
+          [
+            opening,
+            { role: "assistant", content: "Acted." },
+            userMsg(`Next, ${IDEATION}`),
+            { role: "assistant", content: "Acted again." },
+            userMsg("Now find the root cause of the deadlock across every module and prove the fix formally."),
+          ],
+          rt,
+          { ...PROFILE.debug, reasoning_depth: 4, context_scale: 3, error_cost: 3 }
+        );
         const turns = { a, b, c, d, e };
         const moved = Object.entries(turns).filter(([, u]) => routedAs(u) !== routedAs(a));
         if (moved.length > 0) {
@@ -1708,18 +1828,18 @@ async function main() {
 
       // An explicit realtime_loop:false ends the session's realtime routing
       const opening = userMsg(`${IDEATION} [session end]`);
-      const live = await send([opening]);
-      const off = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], { realtime_loop: false });
+      const live = await send([opening], rt, PROFILE.ideation);
+      const off = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], { realtime_loop: false }, PROFILE.ideation);
       ended = { realtime: routedAs(live), afterFalse: routedAs(off) };
       assert.equal(ended.realtime, "gpt-6-astra:medium");
       assert.ok(!("realtime_loop" in off.body), "realtime_loop:false is for the router too");
 
       // Anthropic protocol, turn 1 and a new turn
       const anthOpening = userMsg(`${DEBUG} [session messages]`);
-      const anth1 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening], ...rt }, anthropicHeaders);
+      const anth1 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening], profile: PROFILE.debug, ...rt }, anthropicHeaders);
       assert.equal(anth1.status, 200);
       const anthA = lastUp();
-      const anth2 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], ...rt }, anthropicHeaders);
+      const anth2 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], profile: PROFILE.ideation, ...rt }, anthropicHeaders);
       assert.equal(anth2.status, 200);
       const anthB = lastUp();
       assert.equal(anthA.model, "claude-opus-5-5");
@@ -1762,9 +1882,9 @@ async function main() {
 
       // 12a. Argon high pinned: kept on a task it would win, and on one it would not
       await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/gemini-4-argon-high" });
-      const argonIdeation = await route(`${IDEATION} [12a]`, rt);
+      const argonIdeation = await route(`${IDEATION} [12a]`, { ...rt, profile: PROFILE.ideation });
       assert.equal(routedAs(argonIdeation), "gemini-4-argon-high:high");
-      const argonDebug = await route(`${DEBUG} [12a]`, rt);
+      const argonDebug = await route(`${DEBUG} [12a]`, { ...rt, profile: PROFILE.debug });
       assert.equal(routedAs(argonDebug), "gemini-4-argon-high:high");
       const argonLines = await awaitWarnings(before + 2);
       assert.equal(argonLines.length, before + 2, `A pinned slow model must warn in Magpie's log on each route:\n${magpieLogs.join("").slice(-2000)}`);
@@ -1772,14 +1892,14 @@ async function main() {
       assert.ok(argonLines[argonLines.length - 1].includes("below the realtime_loop floor"));
 
       // 12b. Pinned without realtime_loop: routing as if no pin existed, no warning
-      const pinnedPlain = await route(`${DEBUG} [12b]`);
+      const pinnedPlain = await route(`${DEBUG} [12b]`, { profile: PROFILE.debug });
       assert.equal(routedAs(pinnedPlain), "claude-opus-5-5:xhigh");
       await new Promise((r) => setTimeout(r, 300));
       assert.equal(warningsLogged().length, before + 2, "Without realtime_loop a pin neither routes nor warns");
 
       // 12c. A pinned slow effort is not stepped down
       await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/claude-opus-5-5", pinnedEffort: "xhigh" });
-      const opusPinned = await route(`${DEBUG} [12c]`, rt);
+      const opusPinned = await route(`${DEBUG} [12c]`, { ...rt, profile: PROFILE.debug });
       assert.equal(routedAs(opusPinned), "claude-opus-5-5:xhigh");
       const opusLines = await awaitWarnings(before + 3);
       assert.equal(opusLines.length, before + 3);
@@ -1787,7 +1907,7 @@ async function main() {
 
       // 12d. No pin: the same request is excluded and stepped down again (Scenario 10)
       await setPluginOptions(basePluginOptions);
-      const unpinned = await route(`${IDEATION} [12d]`, rt);
+      const unpinned = await route(`${IDEATION} [12d]`, { ...rt, profile: PROFILE.ideation });
       assert.equal(routedAs(unpinned), "gpt-6-astra:medium");
       assert.equal(warningsLogged().length, before + 3);
 
@@ -1806,6 +1926,168 @@ async function main() {
       });
       console.log(
         `[PASS] Scenario 12 (pinned slow model): Argon ${routedAs(argonIdeation)} / ${routedAs(argonDebug)}, opus ${routedAs(opusPinned)}, no pin ${routedAs(unpinned)}; log: ${warningsLogged()[before]}`
+      );
+    }
+
+    // =========================================================================
+    // SCENARIO 14: A caller's profile routes, and rewording the task changes nothing
+    // =========================================================================
+    {
+      const { BASE_TASK, KEYWORD_CORPUS } = await import(path.join(PLUGIN_DIR, "test", "task_text_corpus.mjs"));
+      const scorerBefore14 = scorerCalls.length;
+      // Each text its own session (the prefix), since a session holds its route; what's after the prefix is the wording
+      const senders = {
+        chat: (text, profile) => postChat({ model: "agentcompass/auto", profile, messages: [userMsg(text)] }),
+        responses: (text, profile) =>
+          postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", profile, input: [{ role: "user", content: [{ type: "input_text", text }] }] }, gwHeaders),
+        messages: (text, profile) => postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", profile, max_tokens: 1024, messages: [userMsg(text)] }, anthropicHeaders),
+        stream: (text, profile) => postChat({ model: "agentcompass/auto", profile, stream: true, messages: [userMsg(text)] }),
+      };
+      // Every wording on chat; the other protocols on enough of them to tell (a word of each sort and the shapes at the end)
+      const wordings = { chat: KEYWORD_CORPUS, responses: KEYWORD_CORPUS.filter((_, i) => i % 9 === 0), messages: KEYWORD_CORPUS.filter((_, i) => i % 9 === 3), stream: KEYWORD_CORPUS.filter((_, i) => i % 9 === 6) };
+      const perProfile = {};
+      let sent = 0;
+      for (const [name, profile] of Object.entries({ bulk: PROFILE.bulk, debug: PROFILE.debug })) {
+        perProfile[name] = {};
+        for (const [protocol, send] of Object.entries(senders)) {
+          const base = await send(`[14 ${name} ${protocol} base] ${BASE_TASK}`, profile);
+          assert.equal(base.status, 200);
+          await base.text();
+          const expected = routedAs(lastUp());
+          const moved = [];
+          for (const [i, text] of wordings[protocol].entries()) {
+            const r = await send(`[14 ${name} ${protocol} ${i}] ${text}`, profile);
+            assert.equal(r.status, 200, `${name} ${protocol}: ${String(text).slice(0, 60)}`);
+            await r.text();
+            sent += 1;
+            assert.ok(!("profile" in lastUp().body));
+            if (routedAs(lastUp()) !== expected) moved.push({ text: String(text).slice(0, 60), route: routedAs(lastUp()) });
+          }
+          assert.deepEqual(moved, [], `${name} ${protocol}: the same answer must route as ${expected} whatever the words`);
+          perProfile[name][protocol] = { route: expected, wordings: wordings[protocol].length };
+        }
+      }
+      // The answer does decide: the same text with the other answer goes elsewhere
+      const sameWordsBulk = await senders.chat("[14 control a] Please review and brainstorm this urgent refactor.", PROFILE.bulk);
+      assert.equal(sameWordsBulk.status, 200);
+      const controlBulk = routedAs(lastUp());
+      const sameWordsDebug = await senders.chat("[14 control b] Please review and brainstorm this urgent refactor.", PROFILE.debug);
+      assert.equal(sameWordsDebug.status, 200);
+      const controlDebug = routedAs(lastUp());
+      assert.notEqual(controlBulk, controlDebug, "The profile must decide the route");
+      assert.equal(controlBulk, perProfile.bulk.chat.route);
+      assert.equal(controlDebug, perProfile.debug.chat.route);
+      assert.equal(scorerCalls.length, scorerBefore14, "Mode A must not call a classifier");
+
+      report.scenarios.scenario14_caller_profile_any_wording = { pass: true, requests: sent, perProfile, control: { bulk: controlBulk, debug: controlDebug } };
+      report.steps.push({
+        test: "Scenario 14: a caller's profile routes, and rewording the task (test/task_text_corpus.mjs) changes nothing, on chat, responses, messages and streams",
+        ...report.scenarios.scenario14_caller_profile_any_wording,
+      });
+      console.log(`[PASS] Scenario 14 (caller profile, any wording): ${sent} wordings, ${JSON.stringify(perProfile)}; same words with the other answer ${controlBulk} / ${controlDebug}`);
+    }
+
+    // =========================================================================
+    // SCENARIO 15: No profile: not routed, and what the client and the log are told
+    // =========================================================================
+    {
+      const NOTE = "agentcompass";
+      const scorerBefore15 = scorerCalls.length;
+      const bodyOf = async (r) => {
+        const text = await r.text();
+        try {
+          return { text, json: JSON.parse(text) };
+        } catch {
+          return { text, json: null };
+        }
+      };
+      // The words a rule would have jumped at, on a model the plugin claims
+      const WORDS = "Urgent: brainstorm and review this deadlock, 抢票, 加急, 审查.";
+      const logged = unroutedLogged().length;
+
+      // 15a. The router's virtual name with nothing to send it to: Magpie's own answer for a model it doesn't serve
+      const virtualBefore = upstreamCalls.length;
+      const virtual = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15a]`)] });
+      const virtualBody = await bodyOf(virtual);
+      const virtualUpstreamCalls = upstreamCalls.length - virtualBefore;
+
+      // 15b. A model the client named, claimed by routeAllModels: goes on as it asked, on each protocol
+      await setPluginOptions({ ...basePluginOptions, routeAllModels: true });
+      const named = "upstream/gpt-6-luna";
+      const forwarded = {};
+      const sendNamed = {
+        chat: () => postChat({ model: named, messages: [userMsg(`${WORDS} [15b chat]`)] }),
+        responses: () => postTo(gwPort, "/v1/responses", { model: named, input: [{ role: "user", content: [{ type: "input_text", text: `${WORDS} [15b responses]` }] }] }, gwHeaders),
+        messages: () => postTo(gwPort, "/v1/messages", { model: named, max_tokens: 1024, messages: [userMsg(`${WORDS} [15b messages]`)] }, anthropicHeaders),
+        stream: () => postChat({ model: named, stream: true, messages: [userMsg(`${WORDS} [15b stream]`)] }),
+      };
+      for (const [protocol, send] of Object.entries(sendNamed)) {
+        const r = await send();
+        const { text, json } = await bodyOf(r);
+        assert.equal(r.status, 200, `${protocol}: ${text.slice(0, 300)}`);
+        const up = lastUp();
+        assert.equal(up.model, "gpt-6-luna", `${protocol}: the client's model goes on`);
+        assert.equal(up.reasoning_effort, null, `${protocol}: no effort of the router's`);
+        forwarded[protocol] = { route: routedAs(up), replyCarries: json?.[NOTE] ?? (text.includes(NOT_ROUTED) ? "in the stream text" : null) };
+      }
+
+      // 15c. The client's own effort is left alone, and the words don't raise it
+      const ownEffort = await postChat({ model: named, reasoning_effort: "low", messages: [userMsg(`${WORDS} [15c]`)] });
+      assert.equal(ownEffort.status, 200);
+      await ownEffort.text();
+      assert.equal(routedAs(lastUp()), "gpt-6-luna:low");
+
+      // 15d. A profile that doesn't validate counts as none, and it stops at the gateway all the same
+      const invalid = await postChat({ model: named, profile: { work_kind: "no_such_kind" }, messages: [userMsg(`${WORDS} [15d]`)] });
+      const invalidBody = await bodyOf(invalid);
+      assert.equal(invalid.status, 200);
+      assert.equal(routedAs(lastUp()), "gpt-6-luna:null");
+      assert.ok(!("profile" in lastUp().body));
+
+      // 15e. Not routed starts no session: the same conversation with a profile is routed as new
+      const session = userMsg(`${WORDS} [15e]`);
+      const before15e = await postChat({ model: named, messages: [session] });
+      assert.equal(before15e.status, 200);
+      await before15e.text();
+      const after15e = await postChat({ model: named, profile: PROFILE.debug, messages: [session] });
+      assert.equal(after15e.status, 200);
+      await after15e.text();
+      assert.equal(routedAs(lastUp()), "claude-opus-5-5:xhigh", "A request that wasn't routed must leave nothing a later turn would hold");
+
+      // 15f. defaultModel: the operator's own choice for a virtual name, with no effort
+      await setPluginOptions({ ...basePluginOptions, defaultModel: named });
+      const withDefault = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15f]`)] });
+      const withDefaultBody = await bodyOf(withDefault);
+      assert.equal(withDefault.status, 200, withDefaultBody.text.slice(0, 300));
+      assert.equal(routedAs(lastUp()), "gpt-6-luna:null");
+      await setPluginOptions({ ...basePluginOptions, candidateModels: [], defaultModel: named });
+      const defaultOnly = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15f only]`)] });
+      await defaultOnly.text();
+      assert.equal(defaultOnly.status, 200, "defaultModel alone is a configuration: no 400");
+      assert.equal(routedAs(lastUp()), "gpt-6-luna:null");
+      await setPluginOptions(basePluginOptions);
+
+      // 15g. What the operator sees
+      const lines = await awaitUnroutedLogged(logged + 1);
+      assert.ok(lines.length > logged, `Not routing must be said in Magpie's log:\n${magpieLogs.join("").slice(-2000)}`);
+      assert.ok(lines.some((l) => l.includes("no_task_profile")), `The log must say why: ${lines.slice(-3).join(" | ")}`);
+      assert.ok(lines.some((l) => l.includes("invalid_caller_profile")), `The log must say why: ${lines.slice(-3).join(" | ")}`);
+      assert.equal(scorerCalls.length, scorerBefore15, "Mode A must not call a classifier");
+
+      report.scenarios.scenario15_no_profile_not_routed = {
+        pass: true,
+        virtualNameWithoutDefault: { status: virtual.status, upstreamCalls: virtualUpstreamCalls, body: virtualBody.text.slice(0, 300), replyCarries: virtualBody.json?.[NOTE] ?? null },
+        namedModel: forwarded,
+        invalidProfile: invalidBody.json?.[NOTE] ?? null,
+        virtualNameWithDefault: { status: withDefault.status, replyCarries: withDefaultBody.json?.[NOTE] ?? null },
+        logLine: lines[lines.length - 1],
+      };
+      report.steps.push({
+        test: "Scenario 15: with no profile a request is not routed: forwarded as asked, no effort, no session; said in Magpie's log and in the reply where it can be",
+        ...report.scenarios.scenario15_no_profile_not_routed,
+      });
+      console.log(
+        `[PASS] Scenario 15 (no profile): virtual name alone -> HTTP ${virtual.status} (${virtualUpstreamCalls} upstream calls); reply field ${JSON.stringify(Object.fromEntries(Object.entries(forwarded).map(([k, v]) => [k, Boolean(v.replyCarries)])))}; invalid profile ${JSON.stringify(invalidBody.json?.[NOTE]?.reason ?? null)}; defaultModel -> ${withDefault.status} ${JSON.stringify(withDefaultBody.json?.[NOTE]?.notice ?? null)}; log: ${lines[lines.length - 1]}`
       );
     }
 
@@ -1986,19 +2268,20 @@ async function main() {
           const REPLY = `${" ".repeat(index * 3)} Reply with exactly: OK`;
           const realText = `${CODING}${REPLY}`;
           await setPluginOptions({ ...basePluginOptions, candidateModels: a.pool.map((m) => `upstream/${m}`) });
-          const mockPlain = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${realText}`)] });
+          const mockPlain = await postChat({ model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText}`)] });
           assert.equal(mockPlain.status, 200);
           const mockPlainRoute = routedAs(lastUp());
-          const mockLive = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${realText} `)], realtime_loop: true });
+          const mockLive = await postChat({ model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText} `)], realtime_loop: true });
           assert.equal(mockLive.status, 200);
           const mockLiveRoute = routedAs(lastUp());
           await setPluginOptions(basePluginOptions);
 
           const namedModel = `${a.name}/${a.named}`;
-          const plain = await callReal("/v1/chat/completions", { model: "agentcompass/auto", messages: [userMsg(realText)] });
-          const live = await callReal("/v1/chat/completions", { model: "agentcompass/auto", messages: [userMsg(`${realText} `)], realtime_loop: true });
+          const plain = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(realText)] });
+          const live = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText} `)], realtime_loop: true });
           const liveResponses = await callReal("/v1/responses", {
             model: "agentcompass/auto",
+            profile: PROFILE.coding,
             input: [{ role: "user", content: [{ type: "input_text", text: `${realText}  ` }] }],
             realtime_loop: true,
           });
@@ -2037,11 +2320,11 @@ async function main() {
             scored.push({
               id: c.id,
               expected: c.realtime_loop,
-              got: profile.realtime_loop === true,
+              got: profile?.realtime_loop === true,
               expectedKind: c.work_kind,
-              gotKind: profile.work_kind,
+              gotKind: profile?.work_kind,
               source: meta.source,
-              error: meta.fallbackReason ? redactSecrets(meta.fallbackReason) : null,
+              error: meta.reason ? redactSecrets(meta.reason) : null,
               ms: meta.durationMs ?? null,
             });
           }

@@ -1994,7 +1994,7 @@ test("9.2 PR #670 Review Guard: `availableModels` / `candidateModels` / `ctx.mod
   );
 
   // 3. When `model: "agentcompass/auto"` is sent WITHOUT `candidateModels` or `defaultModel`, `onRequest` calls
-  // `ctx.reject(400, "agentcompass: set candidateModels in the plugin's options")` instead of guessing from a fixed list.
+  // `ctx.reject(400, "agentcompass: a virtual model needs candidateModels or defaultModel in the plugin's options")` instead of guessing from a fixed list.
   const reqVirtual = {
     model: "agentcompass/auto",
     messages: [
@@ -2018,7 +2018,7 @@ test("9.2 PR #670 Review Guard: `availableModels` / `candidateModels` / `ctx.mod
   });
   assert.equal(unconfiguredRes, undefined);
   assert.equal(rejectedStatus, 400);
-  assert.equal(rejectedMessage, "agentcompass: set candidateModels in the plugin's options");
+  assert.equal(rejectedMessage, "agentcompass: a virtual model needs candidateModels or defaultModel in the plugin's options");
 
   // With `defaultModel` configured, `onRequest` rewrites the virtual model to `defaultModel:<effort>` and `onProvider`
   // refines within `options.modelsByProvider` using Magpie's real `{id, name, account, model}` `ctx.provider` shape!

@@ -132,7 +132,7 @@ run_in_sandbox() {
   echo "Linux Bun runtime: $BUN_BIN ($("$BUN_BIN" --version))"
 
   echo "=== [3/4] Running Unit Tests Inside Linux Sandbox ==="
-  "$BUN_BIN" test "$PLUGIN_DIR/test/router.test.mjs" "$PLUGIN_DIR/test/realtime-parity.test.mjs" "$PLUGIN_DIR/test/sign-in-copy.test.mjs"
+  "$BUN_BIN" test "$PLUGIN_DIR/test/router.test.mjs" "$PLUGIN_DIR/test/realtime-parity.test.mjs" "$PLUGIN_DIR/test/no-hardcode.test.mjs" "$PLUGIN_DIR/test/sign-in-copy.test.mjs"
 
   echo "=== [4/4] Running Live Magpie Web + Gateway Full-Chain E2E Tests Inside Linux Sandbox ==="
   "$BUN_BIN" "$PLUGIN_DIR/test/linux-sandbox-e2e.mjs"

@@ -547,7 +547,7 @@ export function onRequest(body, ctx = {}) {
 
     if (!canRewriteModel && !stateRoute && isVirtualModelName(body.model, options)) {
       if (typeof ctx?.reject === "function") {
-        return ctx.reject(400, "agentcompass: set candidateModels in the plugin's options");
+        return ctx.reject(400, "agentcompass: a virtual model needs candidateModels or defaultModel in the plugin's options");
       }
       return undefined;
     }
