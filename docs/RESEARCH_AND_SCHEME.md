@@ -161,7 +161,7 @@ $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \tex
 
 ### 4.3 `realtime_loop` 真实 Magpie 验收（Scenario 9–12）
 
-运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `29f0af9`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
+运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `f163e3f`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
 
 ```text
 BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
@@ -170,20 +170,76 @@ BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-
 0.1.2891（sha256 `ffa0785c…`）原始结果：
 
 ```text
-[PASS] Scenario 9 (non-realtime vs origin/main): 408 requests over 8 pools, 408 served, 33 distinct routes, 0 diffs; new turns: 48 rows x 8 samples, 0 diffs, 47 rows rerouted on both builds (origin/main flips on 35 rows)
+[PASS] Scenario 9 (non-realtime vs origin/main): 408 requests over 8 pools, 408 served, 33 distinct routes, 0 diffs; new turns: 48 rows x 8 samples, 0 diffs, 47 rows rerouted on both builds (origin/main flips on 36 rows)
 [PASS] Scenario 10 (realtime routing): ideation gemini-4-argon-high:high -> gpt-6-astra:medium; coding gpt-6.1-sol:high -> gpt-6.1-sol:medium; bulk gemini-3.8-flash-high:high -> claude-sonnet-5-5:low; debug claude-opus-5-5:xhigh -> claude-opus-5-5:medium; bundle claude-opus-5-5:xhigh -> claude-opus-5-5:medium; Argon-only pool -> HTTP 404, upstream calls []
-[PASS] Scenario 11 (realtime session hold): 20 sessions, 0 reroutes, turns {"a":"claude-opus-5-5:medium","b":"claude-opus-5-5:medium","c":"claude-opus-5-5:medium","d":"claude-opus-5-5:medium","e":"claude-opus-5-5:medium"}; flagless follow-ups {"claude-opus-5-5:medium":18,"claude-opus-5-5:xhigh":2}; explicit false {"realtime":"gpt-6-astra:medium","afterFalse":"gemini-4-argon-high:high"}; /v1/messages claude-opus-5-5:null -> claude-opus-5-5:null
+[PASS] Scenario 11 (realtime session hold): 20 sessions, 0 reroutes, turns {"a":"claude-opus-5-5:medium","b":"claude-opus-5-5:medium","c":"claude-opus-5-5:medium","d":"claude-opus-5-5:medium","e":"claude-opus-5-5:medium"}; flagless follow-ups {"claude-opus-5-5:medium":14,"claude-opus-5-5:xhigh":6}; explicit false {"realtime":"gpt-6-astra:medium","afterFalse":"gpt-6-astra:high"}; /v1/messages claude-opus-5-5:null -> claude-opus-5-5:null
 [PASS] Scenario 12 (pinned slow model): Argon gemini-4-argon-high:high / gemini-4-argon-high:high, opus claude-opus-5-5:xhigh, no pin gpt-6-astra:medium; log: middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection
 ```
 
-0.1.3196（sha256 `b82e24ce…`）四个场景同样通过，路由结果相同；随运行变化的只有 flagless follow-ups（medium 16 / xhigh 4）与 origin/main 翻转行数（37）。
+0.1.3196（sha256 `b82e24ce…`）四个场景同样通过，路由结果相同；随运行变化的只有 flagless follow-ups（medium 13 / xhigh 7）、explicit false 之后那一轮落在哪个运行时（hold 或重路由），以及 origin/main 翻转行数（35）。
 
 结论与边界：
 
 - **Scenario 9 的比较口径**：首轮、工具循环、短追问、冷会话新一轮、流式、`/v1/responses`、`/v1/messages`、图片输入、`agentcompass:low`、直连模型与路由组，逐请求比较状态码、模型、effort 和完整上游请求体。温会话的新一轮另行采样比较，因为这类请求 hold 还是重路由取决于接到请求的运行时是否持有该会话的记录，`origin/main` 与自身比较也会翻转；判定标准是两个构建合起来不超过这两种结果。
-- **实时标记要每轮都带**：Scenario 11 的 flagless follow-ups 只记录、不断言。客户端在后续回合不再发送 `realtime_loop` 时，未见过该会话的运行时会按非实时路由（上面 20 次中有 2 次到 `xhigh`）。Magpie 的中间件运行时之间不共享存储，因此客户端需每轮带标记，或设置插件选项 `realtime_loop: true`。
+- **实时标记要每轮都带**：Scenario 11 的 flagless follow-ups 只记录、不断言。客户端在后续回合不再发送 `realtime_loop` 时，未见过该会话的运行时会按非实时路由（上面 20 次中有 6 次到 `xhigh`，多次运行观察到 1–11 次，次数随运行变化）。Magpie 的中间件运行时之间不共享存储，因此客户端需每轮带标记，或设置插件选项 `realtime_loop: true`。
 - **`/v1/messages` 上看不到 effort**：本场景的上游只有 OpenAI 协议，Magpie 把 `/v1/messages` 转成 chat 后未携带 effort，`origin/main` 同样如此（Scenario 5），所以这条路径只验证了模型选择，没有验证降档。
 - **Argon 单独成池时**：候选全部被排除，请求不改写，虚拟模型名由 Magpie 返回 HTTP 404，上游未被调用。
+
+### 4.4 真实上游验收（Scenario 13）
+
+上游换成主机的 Codex 登录，网关、插件与路由配置不变，被测提交 `f163e3f`。
+
+```text
+REAL_CODEX_AUTH=<auth.json> BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
+```
+
+0.1.2891 原始结果：
+
+```text
+[PASS] Scenario 13 (real upstream): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 11434ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 7599ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 12/12
+```
+
+0.1.3196 原始结果：
+
+```text
+[PASS] Scenario 13 (real upstream): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 10614ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 4981ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 11/12
+```
+
+| 检查项 | 结果 |
+|---|---|
+| 真实上游收到的请求不带 `realtime_loop` | 四条请求（非实时、实时、`/v1/responses` 实时、直连点名）均 HTTP 200 且返回文本，观察插件看到的标记都是 `false`；关掉 AgentCompass 的对照请求看到 `true` |
+| 路由与 mock 一致 | 非实时都是 `gpt-6.1-sol:high`，实时都是 `gpt-6.1-sol:medium` |
+| `openai_compatible` 分类器，12 条成对难例（`codex/gpt-6-luna`） | 三次完整运行，`realtime_loop` 均为 12/12；`work_kind` 为 12/12、12/12、11/12 |
+
+0.1.3196 上唯一的不一致是 `non_realtime_fix_flash_sale_bot_en`：`work_kind` 期望 `debug_review`，返回 `general_implementation`，`realtime_loop` 判对。同一条在另两次运行中判对，所以是模型的波动。作为对照，确定性回退在同一批例子上是 `realtime_loop` 6/12、`work_kind` 7/12。
+
+边界：
+
+- **凭据只放访问令牌**：沙盒副本删掉了 `refresh_token`，也不运行 `magpie accounts import`。刷新令牌会轮换，副本一旦刷新，主机上的 Codex 就会因 `refresh_token_reused` 掉线，而 import 会直接用掉这份登录。副本放在沙盒 tmpfs 上，权限 0600，场景结束即删除并断言已删除。Scenario 13 只验证短时间内的调用，没有覆盖令牌过期后的刷新。
+- **"不带字段"的证据范围**：真实上游的入站请求抓不到。证据是 Magpie 发往 provider 之前的 `onProvider` 观察结果（`test/fixtures/route-observer`）、上游返回 200，以及插件关闭时能看到标记的对照。
+- **Anthropic 组未运行**：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 在 Process、User、Machine 三个作用域都未设置，也没有去其他配置文件里找密钥。代码里没有未经测试的 Anthropic 分支。
+- **`effort` 为空的那一行**：直连点名 `codex/gpt-6-luna` 不经路由，所以 `gpt-6-luna:null` 是预期结果。
+- **未设置 `REAL_CODEX_AUTH` 时**：Scenario 13 记为 `skipped`，其余场景照常运行。
+
+凭据残留检查（只统计命中数，不输出值）：工作区文件、`origin/main..HEAD` 的补丁和测试日志中，令牌全文、令牌前 32 字符、账户 ID 与账户邮箱的命中数均为 0。
+
+### 4.5 `gpt-5.3-codex-spark` 的目录条目
+
+AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 实现的规范名就是它自己，responsiveness 用默认值 `[0.52, "default"]`。而 `origin/main` 的 `resolveModelSpec` 因名字含 `codex` 把它解析成 `gpt-6.1-sol`（tier 3.6）。现在它有独立条目：所有数值都是不高于 `gpt-6-luna` 的保守占位，并在 `basis` 中注明；`disabled_by_default: true` 使默认候选池不变，只有候选池点名时才参与路由。其他含 `codex` 的名字仍走原有的家族回退。
+
+这是非实时路由相对 `origin/main` 唯一的有意差异。下表是 2304 个任务画像的逐条比较（`test/realtime-parity.test.mjs` 中的 `Spark: non-realtime differences…`，每条差异必须归入一种原因，否则测试失败）；不点名 Spark 的候选池差异为 0。
+
+| 候选池 | 低于任务门槛 | 被同池模型超过 | 档位不在列表内 | 没有努力曲线 |
+|---|---:|---:|---:|---:|
+| Spark 单独 | 996 | – | 171 | 99 |
+| Spark + `gpt-6-luna` | 960 | 447 | – | – |
+| Spark + `gpt-6.1-sol` | 996 | 526 | – | 14 |
+| Spark + `gemini-3.8-flash-high` + `claude-sonnet-5-5` | 89 | 4 | – | – |
+
+- **低于任务门槛**：tier 从按 `gpt-6.1-sol` 算的 3.6 降到 3.0，不再满足任务要求，改为同池其他模型或不路由。
+- **被同池模型超过**：Spark 仍合格，但能力值变低，同池模型得分更高。
+- **档位不在列表内**：`origin/main` 选了 `xhigh`/`max`，Spark 条目只列 `low`/`medium`/`high`。
+- **没有努力曲线**：条目没有 ability/burn 曲线，选出的档位随之不同。
 
 ---
 

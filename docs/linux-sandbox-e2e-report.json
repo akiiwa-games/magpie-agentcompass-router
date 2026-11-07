@@ -1,12 +1,12 @@
 {
-  "timestamp": "2026-11-06T20:20:32.917Z",
+  "timestamp": "2026-11-07T01:09:53.308Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
   "magpieVersion": "magpie 0.1.2891",
   "magpieBinarySha256": "ffa0785ccc41d093c8fdbc96351372c5f2553dc2cb67e5b0ec2b0fa8e3488c09",
-  "pluginCommit": "29f0af9",
+  "pluginCommit": "f163e3f",
   "baselineCommit": "ab8baba",
   "scenarios": {
     "scenario1_cli_lifecycle": {
@@ -31,9 +31,9 @@
       "carrierStripped": true,
       "scorerCalls": 0,
       "configuredScorerDelayMs": 1600,
-      "routedElapsedMs": 12,
-      "baselineElapsedMs": 3,
-      "overheadMs": 9,
+      "routedElapsedMs": 6,
+      "baselineElapsedMs": 1,
+      "overheadMs": 5,
       "noCandidateModelsStatus": 400
     },
     "scenario4_model_dna_differentiation": {
@@ -65,7 +65,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 309,
+      "timeoutFallbackElapsedMs": 306,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     "scenario7_mode_b_systemone_group": {
@@ -139,7 +139,7 @@
         "rows": 48,
         "diffs": 0,
         "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 35
+        "originMainRowsThatFlipOnThePool": 36
       }
     },
     "scenario10_realtime_routing": {
@@ -187,15 +187,15 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 18,
-          "claude-opus-5-5:xhigh": 2
+          "claude-opus-5-5:medium": 14,
+          "claude-opus-5-5:xhigh": 6
         },
-        "differFromTurn1": 2,
+        "differFromTurn1": 6,
         "asserted": false
       },
       "explicitFalse": {
         "realtime": "gpt-6-astra:medium",
-        "afterFalse": "gemini-4-argon-high:high"
+        "afterFalse": "gpt-6-astra:high"
       },
       "anthropic": [
         "claude-opus-5-5:null",
@@ -210,10 +210,56 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/06 20:21:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/06 20:21:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/06 20:21:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 01:10:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 01:10:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 01:10:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
+    },
+    "scenario13_real_upstream": {
+      "pass": true,
+      "upstream": "Codex sign-in, access token only (refresh token never copied)",
+      "routes": {
+        "nonRealtime": {
+          "real": "gpt-6.1-sol:high",
+          "mock": "gpt-6.1-sol:high",
+          "ms": 11434,
+          "status": 200
+        },
+        "realtime": {
+          "real": "gpt-6.1-sol:medium",
+          "mock": "gpt-6.1-sol:medium",
+          "ms": 7599,
+          "status": 200
+        },
+        "realtimeResponses": {
+          "real": "gpt-6.1-sol:medium",
+          "ms": 7875,
+          "status": 200
+        },
+        "namedDirectly": {
+          "real": "gpt-6-luna:null",
+          "ms": 2075,
+          "status": 200
+        }
+      },
+      "flagSentOn": false,
+      "controlWithPluginOff": {
+        "observerSawFlag": true,
+        "status": 200,
+        "error": null
+      },
+      "classifier": {
+        "model": "codex/gpt-6-luna",
+        "cases": 12,
+        "answered": 12,
+        "msPerCase": [
+          3228,
+          8775
+        ],
+        "realtimeLoopAgreement": "12/12",
+        "workKindAgreement": "12/12",
+        "disagreements": []
+      }
     }
   },
   "steps": [
@@ -228,8 +274,8 @@
       "test": "Scenario 3: Mode A latency/budget (`agentcompass/auto` -> middleware.js [moejs]; 1,600ms scorer configured but never called; no candidateModels -> 400)",
       "routedModel": "claude-opus-5-5",
       "routedEffort": "xhigh",
-      "routedElapsedMs": 12,
-      "overheadMs": 9,
+      "routedElapsedMs": 6,
+      "overheadMs": 5,
       "pass": true
     },
     {
@@ -252,7 +298,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 309,
+      "timeoutFallbackElapsedMs": 306,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     {
@@ -329,7 +375,7 @@
         "rows": 48,
         "diffs": 0,
         "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 35
+        "originMainRowsThatFlipOnThePool": 36
       }
     },
     {
@@ -379,15 +425,15 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 18,
-          "claude-opus-5-5:xhigh": 2
+          "claude-opus-5-5:medium": 14,
+          "claude-opus-5-5:xhigh": 6
         },
-        "differFromTurn1": 2,
+        "differFromTurn1": 6,
         "asserted": false
       },
       "explicitFalse": {
         "realtime": "gpt-6-astra:medium",
-        "afterFalse": "gemini-4-argon-high:high"
+        "afterFalse": "gpt-6-astra:high"
       },
       "anthropic": [
         "claude-opus-5-5:null",
@@ -403,11 +449,58 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/06 20:21:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/06 20:21:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/06 20:21:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 01:10:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 01:10:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 01:10:42 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
+    },
+    {
+      "test": "Scenario 13: real upstream (Codex sign-in): no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases",
+      "pass": true,
+      "upstream": "Codex sign-in, access token only (refresh token never copied)",
+      "routes": {
+        "nonRealtime": {
+          "real": "gpt-6.1-sol:high",
+          "mock": "gpt-6.1-sol:high",
+          "ms": 11434,
+          "status": 200
+        },
+        "realtime": {
+          "real": "gpt-6.1-sol:medium",
+          "mock": "gpt-6.1-sol:medium",
+          "ms": 7599,
+          "status": 200
+        },
+        "realtimeResponses": {
+          "real": "gpt-6.1-sol:medium",
+          "ms": 7875,
+          "status": 200
+        },
+        "namedDirectly": {
+          "real": "gpt-6-luna:null",
+          "ms": 2075,
+          "status": 200
+        }
+      },
+      "flagSentOn": false,
+      "controlWithPluginOff": {
+        "observerSawFlag": true,
+        "status": 200,
+        "error": null
+      },
+      "classifier": {
+        "model": "codex/gpt-6-luna",
+        "cases": 12,
+        "answered": 12,
+        "msPerCase": [
+          3228,
+          8775
+        ],
+        "realtimeLoopAgreement": "12/12",
+        "workKindAgreement": "12/12",
+        "disagreements": []
+      }
     }
   ],
-  "hostEffortReadyMs": 1249
+  "hostEffortReadyMs": 1071
 }
