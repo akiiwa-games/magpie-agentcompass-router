@@ -1078,6 +1078,33 @@ test("onProvider's route leaves out what the user disabled, though the provider'
   assert.equal(allocator.candidateOffers([sol, off(sol, "low")], sol, "low"), false);
 });
 
+test("a turn with no text still routes when the user set a pool or a pin (review 5 M1)", () => {
+  const sol = "gpt-6.1-sol";
+  const astra = "gpt-6-astra";
+  const pool = [sol, { model: sol, effort: "high", disabled: true }];
+  const image = { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] };
+  const send = (options, extra = {}) => {
+    const body = { model: "agentcompass/auto", messages: [image], ...extra };
+    const ctx = context(options, { sessionId: "i", provider: { id: "p", model: sol } });
+    const { value } = quietly(() => middleware.onRequest(body, ctx));
+    if (value?.rejected) return value;
+    quietly(() => middleware.onProvider(body, ctx));
+    return body;
+  };
+  // The first turn is an image, so the effort the user disabled must not reach the provider
+  assert.equal(send({ candidateModels: pool }).model, `${sol}:low`);
+  assert.equal(send({ candidateModels: pool, routeModelTriggers: [sol] }, { model: sol }).model, `${sol}:low`);
+  assert.equal(send({ candidateModels: pool, routeAllModels: true }, { model: sol, reasoning_effort: "high" }).model, `${sol}:low`);
+  // A pin holds without text, and an unhealthy one is refused
+  assert.equal(send({ candidateModels: [sol, astra], routeAllModels: true, pinnedModel: astra }, { model: sol }).model, `${astra}:low`);
+  assert.equal(send({ candidateModels: [sol, astra], routeAllModels: true, pinnedModel: sol, unhealthyModels: [sol] }, { model: sol }).rejected, 503);
+  assert.equal(send({ candidateModels: [sol, astra], pinnedModel: sol, unhealthyModels: [sol] }).rejected, 503);
+  // With neither a pool nor a pin there is nothing to route on
+  const bare = send({ routeAllModels: true }, { model: sol, reasoning_effort: "high" });
+  assert.equal(bare.model, sol);
+  assert.equal(bare.reasoning_effort, "high");
+});
+
 test("an effort the user disabled stays out for a row off by default, pinned too (review 4 r1)", () => {
   const sol = "gpt-6.1-sol";
   const dflt = (extra) => ({ model: sol, disabled: true, disabled_by_default: true, ...extra });

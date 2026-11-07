@@ -151,6 +151,7 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 
 ### 其他行为变化
 
+- 整个对话没有用户文字时（例如第一轮只发图片），只要有候选池或点名也照常路由，所以禁用的档位、点名和不健康拒绝都生效。以前这种请求不路由：虚拟名默认返回 404，配了 `routeModelTriggers`、Routing Group 或 `routeAllModels` 时按原模型和默认的 `high` 或客户端自带的档位发出。现在虚拟名加无文字请求按候选池正常路由，候选池里的未知模型名选不出时返回 503。既没有候选池也没有点名时不变。
 - 候选名上的 `:auto`、`:off`、`:default` 不约束档位，路由时会去掉；`-off` 不是档位后缀（`gpt-6.1-sol-off` 按 family 处理）。
 - 点名时不一样：`:default` 算一个具体档位，点名 `gpt-6.1-sol:default` 找不到对应的行，返回 503（`pin_unavailable`），和 AgentCompass 相同。
 - 任务级 `multi_task`、`task_count` 的值原样校验。`multi_task:"false"`、`task_count:0` 这类值返回 `invalid_caller_profile`。
@@ -159,3 +160,10 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 - `when` 规则排除的行会写进 `warnings` 和 `excluded`，并给出原因。
 - `onProvider` 不能拒绝请求：Magpie 在这个阶段不理会 `ctx.reject`。provider 的模型表提供不了路由结果、且表内也选不出模型时，只告警，然后照发，由上游报错和网关的转试处理。
 - 分数按 Python 的方式取整（`0.7625` → `0.762`，恰好居中时取偶数），和 AgentCompass 保持一致。
+
+### 已知限制
+
+- `useColonEffort: false` 时，`onProvider` 选中的模型不在宿主选的模型上生效：宿主只认自己选的模型，档位却用 `onProvider` 选的。如果 `modelsByProvider` 的列表里没有宿主选的模型，可能发出该模型已禁用的档位。默认的冒号写法不受影响。
+- `modelsByProvider` 在真实网关（v0.1.3196）里改不了模型，默认写法下连档位也改不了。这是宿主行为，上一条的根因也在这里。
+- `/v1/systemone`：上一轮是 `max`、`xhigh` 被禁用、`criteria` 里没有 `max` 时，回答映射成 `xhigh`。
+- 带 `account` 的禁用行只对该账户生效。`useColonEffort: false` 且 `modelsByProvider` 是裸名列表时，这一档仍可能发出。这符合上面的规则，配置时留意。

@@ -401,7 +401,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
     };
   }
 
-  if (!facts.objective) {
+  // A pool or a pin holds on a turn with no text too: an image alone doesn't get past either (contract R2, R3).
+  if (!facts.objective && !hasExplicitCandidates && Object.keys(pins).length === 0) {
     return { facts, sessionKey, record: null, decision: null };
   }
 
