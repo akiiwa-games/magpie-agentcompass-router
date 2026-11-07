@@ -1,12 +1,12 @@
 {
-  "timestamp": "2026-11-07T01:54:56.690Z",
+  "timestamp": "2026-11-07T03:22:43.511Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
   "magpieVersion": "magpie 0.1.2891",
   "magpieBinarySha256": "ffa0785ccc41d093c8fdbc96351372c5f2553dc2cb67e5b0ec2b0fa8e3488c09",
-  "pluginCommit": "c6be50c",
+  "pluginCommit": "1156694",
   "baselineCommit": "ab8baba",
   "scenarios": {
     "scenario1_cli_lifecycle": {
@@ -32,8 +32,8 @@
       "scorerCalls": 0,
       "configuredScorerDelayMs": 1600,
       "routedElapsedMs": 4,
-      "baselineElapsedMs": 1,
-      "overheadMs": 3,
+      "baselineElapsedMs": 2,
+      "overheadMs": 2,
       "noCandidateModelsStatus": 400
     },
     "scenario4_model_dna_differentiation": {
@@ -65,7 +65,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 307,
+      "timeoutFallbackElapsedMs": 306,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     "scenario7_mode_b_systemone_group": {
@@ -139,7 +139,7 @@
         "rows": 48,
         "diffs": 0,
         "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 37
+        "originMainRowsThatFlipOnThePool": 31
       }
     },
     "scenario10_realtime_routing": {
@@ -187,10 +187,10 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 15,
-          "claude-opus-5-5:xhigh": 5
+          "claude-opus-5-5:medium": 11,
+          "claude-opus-5-5:xhigh": 9
         },
-        "differFromTurn1": 5,
+        "differFromTurn1": 9,
         "asserted": false
       },
       "explicitFalse": {
@@ -210,38 +210,59 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 01:55:14 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 01:55:14 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 01:55:14 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 03:23:01 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     "scenario13_real_upstream": {
       "pass": true,
+      "isolation": {
+        "signInFilesVisible": false,
+        "hostDrivesReadable": false,
+        "hostMountsLeft": 0,
+        "cmdExe": "refused",
+        "windowsProgramOnTmpfs": "refused",
+        "pidNamespace": true
+      },
       "accounts": {
         "codex": {
           "pass": true,
-          "upstream": "codex sign-in, access token only (refresh token never copied)",
+          "upstream": "codex sign-in, only the fields test/sign-in-copy.mjs lists",
+          "signInFields": {
+            "kept": [
+              "tokens.access_token"
+            ],
+            "dropped": [
+              "auth_mode",
+              "OPENAI_API_KEY",
+              "tokens.id_token",
+              "tokens.refresh_token",
+              "tokens.account_id",
+              "last_refresh"
+            ]
+          },
           "routes": {
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 12507,
+              "ms": 9143,
               "status": 200
             },
             "realtime": {
               "real": "gpt-6.1-sol:medium",
               "mock": "gpt-6.1-sol:medium",
-              "ms": 6319,
+              "ms": 8055,
               "status": 200
             },
             "realtimeResponses": {
               "real": "gpt-6.1-sol:medium",
-              "ms": 5796,
+              "ms": 5737,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1901,
+              "ms": 1582,
               "status": 200
             }
           },
@@ -256,46 +277,60 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3337,
-              8683
+              3197,
+              7859
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
             "disagreements": [
               {
-                "id": "realtime_loop_course_polling_click_cn",
+                "id": "realtime_loop_api_orderbook_arbitrage_cn",
                 "expected": true,
                 "got": true,
-                "expectedKind": "computer_use",
-                "gotKind": "tool_execution"
+                "expectedKind": "tool_execution",
+                "gotKind": "computer_use"
               }
             ]
           }
         },
         "claude": {
           "pass": true,
-          "upstream": "claude sign-in, access token only (refresh token never copied)",
+          "upstream": "claude sign-in, only the fields test/sign-in-copy.mjs lists",
+          "signInFields": {
+            "kept": [
+              "claudeAiOauth.accessToken",
+              "claudeAiOauth.scopes"
+            ],
+            "dropped": [
+              "claudeAiOauth.refreshToken",
+              "claudeAiOauth.expiresAt",
+              "claudeAiOauth.refreshTokenExpiresAt",
+              "claudeAiOauth.subscriptionType",
+              "claudeAiOauth.subscriptionTypeSource",
+              "claudeAiOauth.rateLimitTier"
+            ]
+          },
           "routes": {
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 5357,
+              "ms": 7245,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 27135,
+              "ms": 27842,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 25695,
+              "ms": 27982,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 3053,
+              "ms": 2445,
               "status": 200
             }
           },
@@ -310,46 +345,83 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3319,
-              9170
+              2511,
+              5779
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "11/12",
+            "workKindAgreement": "9/12",
             "disagreements": [
               {
-                "id": "realtime_loop_course_polling_click_cn",
+                "id": "realtime_loop_api_orderbook_arbitrage_cn",
                 "expected": true,
                 "got": true,
-                "expectedKind": "computer_use",
-                "gotKind": "tool_execution"
+                "expectedKind": "tool_execution",
+                "gotKind": "debug_review"
+              },
+              {
+                "id": "non_realtime_write_ticket_script_cn",
+                "expected": false,
+                "got": false,
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
+              },
+              {
+                "id": "non_realtime_analyze_orderbook_latency_en",
+                "expected": false,
+                "got": false,
+                "expectedKind": "exploration_analysis",
+                "gotKind": "debug_review"
               }
             ]
           }
         },
         "grok": {
           "pass": true,
-          "upstream": "grok sign-in, access token only (refresh token never copied)",
+          "upstream": "grok sign-in, only the fields test/sign-in-copy.mjs lists",
+          "signInFields": {
+            "kept": [
+              "<account>.key"
+            ],
+            "dropped": [
+              "<account>.auth_mode",
+              "<account>.create_time",
+              "<account>.user_id",
+              "<account>.email",
+              "<account>.first_name",
+              "<account>.profile_image_asset_id",
+              "<account>.principal_type",
+              "<account>.principal_id",
+              "<account>.team_id",
+              "<account>.team_zero_data_retention",
+              "<account>.coding_data_retention_opt_out",
+              "<account>.coding_data_team",
+              "<account>.refresh_token",
+              "<account>.expires_at",
+              "<account>.oidc_issuer",
+              "<account>.oidc_client_id"
+            ]
+          },
           "routes": {
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 15889,
+              "ms": 11896,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 13859,
+              "ms": 18191,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 13990,
+              "ms": 13249,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 1159,
+              "ms": 1806,
               "status": 200
             }
           },
@@ -364,8 +436,8 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              8979,
-              21986
+              12421,
+              24997
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
@@ -380,8 +452,7 @@
             ]
           }
         }
-      },
-      "hostFilesChanged": []
+      }
     }
   },
   "steps": [
@@ -397,7 +468,7 @@
       "routedModel": "claude-opus-5-5",
       "routedEffort": "xhigh",
       "routedElapsedMs": 4,
-      "overheadMs": 3,
+      "overheadMs": 2,
       "pass": true
     },
     {
@@ -420,7 +491,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 307,
+      "timeoutFallbackElapsedMs": 306,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     {
@@ -497,7 +568,7 @@
         "rows": 48,
         "diffs": 0,
         "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 37
+        "originMainRowsThatFlipOnThePool": 31
       }
     },
     {
@@ -547,10 +618,10 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 15,
-          "claude-opus-5-5:xhigh": 5
+          "claude-opus-5-5:medium": 11,
+          "claude-opus-5-5:xhigh": 9
         },
-        "differFromTurn1": 5,
+        "differFromTurn1": 9,
         "asserted": false
       },
       "explicitFalse": {
@@ -571,39 +642,60 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 01:55:14 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 01:55:14 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 01:55:14 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 03:23:01 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     {
       "test": "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases",
       "pass": true,
+      "isolation": {
+        "signInFilesVisible": false,
+        "hostDrivesReadable": false,
+        "hostMountsLeft": 0,
+        "cmdExe": "refused",
+        "windowsProgramOnTmpfs": "refused",
+        "pidNamespace": true
+      },
       "accounts": {
         "codex": {
           "pass": true,
-          "upstream": "codex sign-in, access token only (refresh token never copied)",
+          "upstream": "codex sign-in, only the fields test/sign-in-copy.mjs lists",
+          "signInFields": {
+            "kept": [
+              "tokens.access_token"
+            ],
+            "dropped": [
+              "auth_mode",
+              "OPENAI_API_KEY",
+              "tokens.id_token",
+              "tokens.refresh_token",
+              "tokens.account_id",
+              "last_refresh"
+            ]
+          },
           "routes": {
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 12507,
+              "ms": 9143,
               "status": 200
             },
             "realtime": {
               "real": "gpt-6.1-sol:medium",
               "mock": "gpt-6.1-sol:medium",
-              "ms": 6319,
+              "ms": 8055,
               "status": 200
             },
             "realtimeResponses": {
               "real": "gpt-6.1-sol:medium",
-              "ms": 5796,
+              "ms": 5737,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1901,
+              "ms": 1582,
               "status": 200
             }
           },
@@ -618,46 +710,60 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3337,
-              8683
+              3197,
+              7859
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
             "disagreements": [
               {
-                "id": "realtime_loop_course_polling_click_cn",
+                "id": "realtime_loop_api_orderbook_arbitrage_cn",
                 "expected": true,
                 "got": true,
-                "expectedKind": "computer_use",
-                "gotKind": "tool_execution"
+                "expectedKind": "tool_execution",
+                "gotKind": "computer_use"
               }
             ]
           }
         },
         "claude": {
           "pass": true,
-          "upstream": "claude sign-in, access token only (refresh token never copied)",
+          "upstream": "claude sign-in, only the fields test/sign-in-copy.mjs lists",
+          "signInFields": {
+            "kept": [
+              "claudeAiOauth.accessToken",
+              "claudeAiOauth.scopes"
+            ],
+            "dropped": [
+              "claudeAiOauth.refreshToken",
+              "claudeAiOauth.expiresAt",
+              "claudeAiOauth.refreshTokenExpiresAt",
+              "claudeAiOauth.subscriptionType",
+              "claudeAiOauth.subscriptionTypeSource",
+              "claudeAiOauth.rateLimitTier"
+            ]
+          },
           "routes": {
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 5357,
+              "ms": 7245,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 27135,
+              "ms": 27842,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 25695,
+              "ms": 27982,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 3053,
+              "ms": 2445,
               "status": 200
             }
           },
@@ -672,46 +778,83 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3319,
-              9170
+              2511,
+              5779
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "11/12",
+            "workKindAgreement": "9/12",
             "disagreements": [
               {
-                "id": "realtime_loop_course_polling_click_cn",
+                "id": "realtime_loop_api_orderbook_arbitrage_cn",
                 "expected": true,
                 "got": true,
-                "expectedKind": "computer_use",
-                "gotKind": "tool_execution"
+                "expectedKind": "tool_execution",
+                "gotKind": "debug_review"
+              },
+              {
+                "id": "non_realtime_write_ticket_script_cn",
+                "expected": false,
+                "got": false,
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
+              },
+              {
+                "id": "non_realtime_analyze_orderbook_latency_en",
+                "expected": false,
+                "got": false,
+                "expectedKind": "exploration_analysis",
+                "gotKind": "debug_review"
               }
             ]
           }
         },
         "grok": {
           "pass": true,
-          "upstream": "grok sign-in, access token only (refresh token never copied)",
+          "upstream": "grok sign-in, only the fields test/sign-in-copy.mjs lists",
+          "signInFields": {
+            "kept": [
+              "<account>.key"
+            ],
+            "dropped": [
+              "<account>.auth_mode",
+              "<account>.create_time",
+              "<account>.user_id",
+              "<account>.email",
+              "<account>.first_name",
+              "<account>.profile_image_asset_id",
+              "<account>.principal_type",
+              "<account>.principal_id",
+              "<account>.team_id",
+              "<account>.team_zero_data_retention",
+              "<account>.coding_data_retention_opt_out",
+              "<account>.coding_data_team",
+              "<account>.refresh_token",
+              "<account>.expires_at",
+              "<account>.oidc_issuer",
+              "<account>.oidc_client_id"
+            ]
+          },
           "routes": {
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 15889,
+              "ms": 11896,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 13859,
+              "ms": 18191,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 13990,
+              "ms": 13249,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 1159,
+              "ms": 1806,
               "status": 200
             }
           },
@@ -726,8 +869,8 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              8979,
-              21986
+              12421,
+              24997
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
@@ -742,9 +885,8 @@
             ]
           }
         }
-      },
-      "hostFilesChanged": []
+      }
     }
   ],
-  "hostEffortReadyMs": 1078
+  "hostEffortReadyMs": 1077
 }
