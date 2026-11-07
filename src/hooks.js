@@ -8,6 +8,9 @@
 
 import {
   candidateOffers,
+  heldBundle,
+  heldEffortOn,
+  heldTarget,
   explicitCandidateModels,
   extractModelList,
   mergePinOptions,
@@ -149,7 +152,7 @@ export async function onRequest(body, ctx = {}) {
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
   const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
-  const cont = evaluateProviderContinuation(facts, sessionState, {
+  let cont = evaluateProviderContinuation(facts, sessionState, {
     now,
     pins,
     affinityMode: options.affinityMode || options.affinity || "cache",
@@ -173,7 +176,7 @@ export async function onRequest(body, ctx = {}) {
   // Fast path: Hold active session Provider/Model without calling the intent classifier
   if (cont.shouldHold && cont.model) {
     const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
-    const heldEffort = keepsEffort(
+    const keptEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
       facts.estimatedInputTokens,
@@ -186,68 +189,86 @@ export async function onRequest(body, ctx = {}) {
     );
     const canonical = canonicalModel(cont.model, options.catalog?.aliases);
     // A realtime session stays on the name it was routed to (`gpt-5.3-codex`, not its canonical `gpt-6.1-sol`).
-    const heldModel = heldRealtime && sessionState?.target ? sessionState.target : cont.model;
-    if (sessionKey) {
-      store.recordRequest(
-        sessionKey,
-        {
-          model: heldModel,
-          effort: heldEffort,
-          provider: cont.provider || sessionState?.provider || "",
-          workKind: sessionState?.workKind || "general_implementation",
-          difficulty: sessionState?.difficulty || "routine",
-          realtimeLoop: heldRealtime,
-          why: cont.why,
-          held: true,
-          pinnedBundle: pins.pinnedBundle,
-        },
-        facts,
-        now
-      );
-    }
-
-    const carrier = {
-      v: 1,
-      targetModel: heldModel,
-      canonicalModel: canonical,
-      targetEffort: heldEffort,
-      modelWithEffort: `${heldModel}:${heldEffort}`,
-      canRewriteModel,
-      hasExplicitCandidates,
-      workKind: sessionState?.workKind || "general_implementation",
-      difficulty: sessionState?.difficulty || "routine",
-      realtimeLoop: heldRealtime,
-      requiredAbility: null,
-      score: null,
-      components: null,
-      profile: sessionState?.profile || null,
-      pins,
-      warnings: [],
-      scorer: {
-        kind: "continuity_hold",
-        held: true,
-        why: cont.why,
-        calls: 0,
-      },
-      continuation: {
-        held: true,
-        why: cont.why,
-        sessionKey,
-        turn: facts.turn,
-        within: facts.within,
+    const heldModel =
+      heldRealtime && sessionState?.target ? sessionState.target : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
+    // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
+    const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
+    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog) : keptEffort;
+    const effortGone = heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins));
+    if (effortGone) {
+      cont = {
+        shouldHold: false,
+        why: "effort_gone",
         previousModel: cont.previousModel || cont.model,
-        previousEffort: cont.previousEffort || heldEffort,
-      },
-      topCandidates: [],
-    };
+        previousEffort: keptEffort,
+        within: Boolean(facts.within),
+        turn: facts.turn || 1,
+      };
+    }
+    if (!effortGone) {
+      if (sessionKey) {
+        store.recordRequest(
+          sessionKey,
+          {
+            model: heldModel,
+            effort: heldEffort,
+            provider: cont.provider || sessionState?.provider || "",
+            workKind: sessionState?.workKind || "general_implementation",
+            difficulty: sessionState?.difficulty || "routine",
+            realtimeLoop: heldRealtime,
+            why: cont.why,
+            held: true,
+            pinnedBundle: pins.pinnedBundle,
+          },
+          facts,
+          now
+        );
+      }
 
-    const payloadBytes = JSON.stringify(carrier).length;
-    ctx.state = ctx.state || {};
-    ctx.state.sessionKey = sessionKey;
-    ctx.state.route = carrier;
-    ctx.state.agentcompass = carrier;
-    ctx.report?.("ready", payloadBytes);
-    return undefined;
+      const carrier = {
+        v: 1,
+        targetModel: heldModel,
+        canonicalModel: canonical,
+        targetEffort: heldEffort,
+        modelWithEffort: `${heldModel}:${heldEffort}`,
+        bundle: pool ? heldBundle(pool, heldModel, heldEffort, options.catalog) : null,
+        canRewriteModel,
+        hasExplicitCandidates,
+        workKind: sessionState?.workKind || "general_implementation",
+        difficulty: sessionState?.difficulty || "routine",
+        realtimeLoop: heldRealtime,
+        requiredAbility: null,
+        score: null,
+        components: null,
+        profile: sessionState?.profile || null,
+        pins,
+        warnings: heldEffort === keptEffort ? [] : [`${heldModel}: effort ${keptEffort} is no longer offered; held at ${heldEffort}`],
+        scorer: {
+          kind: "continuity_hold",
+          held: true,
+          why: cont.why,
+          calls: 0,
+        },
+        continuation: {
+          held: true,
+          why: cont.why,
+          sessionKey,
+          turn: facts.turn,
+          within: facts.within,
+          previousModel: cont.previousModel || cont.model,
+          previousEffort: cont.previousEffort || heldEffort,
+        },
+        topCandidates: [],
+      };
+
+      const payloadBytes = JSON.stringify(carrier).length;
+      ctx.state = ctx.state || {};
+      ctx.state.sessionKey = sessionKey;
+      ctx.state.route = carrier;
+      ctx.state.agentcompass = carrier;
+      ctx.report?.("ready", payloadBytes);
+      return undefined;
+    }
   }
 
   if (!facts.objective) {
@@ -289,8 +310,8 @@ export async function onRequest(body, ctx = {}) {
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
   ];
-  if (cont.why === "provider_unhealthy" && cont.previousModel) {
-    unhealthyModels.push(cont.previousModel);
+  if (cont.why === "provider_unhealthy" && cont.failedModel) {
+    unhealthyModels.push(cont.failedModel);
   }
 
   const minContextTokens =
@@ -338,7 +359,7 @@ export async function onRequest(body, ctx = {}) {
       now,
       { ...options, ...realtimeOption }
     );
-    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept)) finalEffort = kept;
+    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept, options.catalog)) finalEffort = kept;
   }
 
   if (sessionKey) {

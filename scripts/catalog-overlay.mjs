@@ -271,5 +271,3 @@ export const POLICY_OVERLAY = {
   }
 };
 
-// Contract R2: `pi` has its own dispatch table. AgentCompass does not ship one at the pinned commit; pi runs the codex
-// models, so this is the codex table until it does. An upstream `pi` row wins.

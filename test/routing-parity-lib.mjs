@@ -49,9 +49,9 @@ export function classifyRow(fixture, row) {
   // Scores differ by a constant (AgentCompass's unknown capacity penalty, which has no quota source here), so compare inside JS.
   const pyRow = py && ranked.allCandidates.find((c) => c.eligible && c.model === py[0] && c.effort === py[1]);
   let reason = "unexplained";
-  if (js && pyRow && Math.abs(pyRow.score - js[2]) < 0.00015) reason = REASONS.tie;
-  else if (route.restrict_models && !models.some((m) => named.includes(canonicalModel(m)))) reason = REASONS.specialist;
+  if (route.restrict_models && !models.some((m) => named.includes(canonicalModel(m)))) reason = REASONS.specialist;
   else if (models.some((m) => resolveModel(m).key in MAGPIE_MODELS)) reason = REASONS.magpieRow;
   else if (realtime && py && ["none", "off", "minimal"].includes(py[1])) reason = REASONS.thinkingOff;
+  else if (js && pyRow && Math.abs(pyRow.score - js[2]) < 0.00015) reason = REASONS.tie;
   return { reason, js, py, ranked };
 }

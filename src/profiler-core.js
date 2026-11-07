@@ -875,12 +875,14 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
             ? 2.0
             : 3.5;
 
+  // What the caller states is checked as stated, by `validateProfile` below; only what it leaves out is inferred.
   const marks = multiTaskMarks(objective);
+  const statedCount = task.task_count !== undefined;
   const multiTask =
-    task.multi_task !== undefined ? Boolean(task.multi_task) : marks.length >= 2;
-  const taskCount =
-    task.task_count ||
-    (!multiTask ? "1" : marks.length <= 2 ? "2" : marks.length === 3 ? "3" : ">3");
+    task.multi_task !== undefined ? task.multi_task : statedCount ? taskCountBucket(task.task_count) !== "1" : marks.length >= 2;
+  const taskCount = statedCount
+    ? task.task_count
+    : !multiTask ? "1" : marks.length <= 2 ? "2" : marks.length === 3 ? "3" : ">3";
 
   return validateProfile({
     work_kind: kind,

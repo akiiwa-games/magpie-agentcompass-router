@@ -19,8 +19,11 @@
  */
 
 import {
-  candidateModelName,
   candidateOffers,
+  heldBundle,
+  heldEffortOn,
+  heldTarget,
+  logRouteWarnings,
   dropPinFields,
   explicitCandidateModels,
   extractModelList,
@@ -232,20 +235,6 @@ function turnChain(body, facts) {
 }
 
 /**
- * The model a hold sends the request to, as the candidate list names it: the store keeps models
- * canonical (`claude-opus-5-5`), and the bare name may resolve to another provider in Magpie than
- * the `upstream/claude-opus-5-5` the session was routed to. The name routed last (`target`) when
- * it is still a candidate, else the one candidate of that canonical model, else the model itself.
- */
-function heldTarget(model, sessionState, candidateModels, aliases) {
-  if (!Array.isArray(candidateModels) || candidateModels.length === 0) return model;
-  const names = candidateModels.map(candidateModelName);
-  if (sessionState?.target && names.includes(sessionState.target)) return sessionState.target;
-  const canonical = canonicalModel(model, aliases);
-  return names.find((m) => canonicalModel(m, aliases) === canonical) || model;
-}
-
-/**
  * The session's state before this request, decided again from the history: the request that
  * began the `prior` turn, cut out of the body (`bodyUpTo`) and routed as it was then. Magpie
  * hands each request a pooled runtime and gives middleware no storage across requests
@@ -314,7 +303,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
   const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
-  const cont = evaluateProviderContinuation(facts, sessionState, {
+  let cont = evaluateProviderContinuation(facts, sessionState, {
     now,
     pins,
     affinityMode,
@@ -337,7 +326,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
 
   if (cont.shouldHold && cont.model) {
     const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
-    const heldEffort = keepsEffort(
+    const keptEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
       facts.estimatedInputTokens,
@@ -351,8 +340,20 @@ function routeClaimed(body, ctx, env, depth = 0) {
     const target =
       heldRealtime && sessionState?.target
         ? sessionState.target
-        : heldTarget(cont.model, sessionState, candidateModels, options.catalog?.aliases);
-    return {
+        : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
+    // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
+    const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
+    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog) : keptEffort;
+    if (heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins))) {
+      cont = {
+        shouldHold: false,
+        why: "effort_gone",
+        previousModel: cont.previousModel || cont.model,
+        previousEffort: keptEffort,
+        within: Boolean(facts.within),
+        turn: facts.turn || 1,
+      };
+    } else return {
       facts,
       sessionKey,
       record: {
@@ -373,6 +374,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         canonicalModel: canonicalModel(cont.model, options.catalog?.aliases),
         targetEffort: heldEffort,
         modelWithEffort: `${target}:${heldEffort}`,
+        bundle: pool ? heldBundle(pool, target, heldEffort, options.catalog) : null,
         canRewriteModel,
         hasExplicitCandidates,
         workKind: sessionState?.workKind || "general_implementation",
@@ -380,7 +382,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         realtimeLoop: heldRealtime,
         profile: sessionState?.profile || null,
         pins,
-        warnings: [],
+        warnings: heldEffort === keptEffort ? [] : [`${target}: effort ${keptEffort} is no longer offered; held at ${heldEffort}`],
         continuation: {
           held: true,
           why: cont.why,
@@ -405,8 +407,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
   ];
-  if (cont.why === "provider_unhealthy" && cont.previousModel) {
-    unhealthyModels.push(cont.previousModel);
+  if (cont.why === "provider_unhealthy" && cont.failedModel) {
+    unhealthyModels.push(cont.failedModel);
   }
   const minContextTokens = cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
@@ -451,7 +453,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
       now,
       { ...options, ...realtimeOption }
     );
-    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept)) finalEffort = kept;
+    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept, options.catalog)) finalEffort = kept;
   }
   decision.targetEffort = finalEffort;
   decision.modelWithEffort = `${decision.targetModel}:${finalEffort}`;
@@ -522,7 +524,7 @@ export function onRequest(body, ctx = {}) {
       : null;
 
   if (!isClaimedModel && !stateRoute) {
-    return dropRealtimeFlag(body) ? body : undefined;
+    return dropRoutingFields(body) ? body : undefined;
   }
 
   try {
@@ -547,9 +549,7 @@ export function onRequest(body, ctx = {}) {
 
     const hooksBlocked = isClaimedModel && !stateRoute && ctx?.state?.routeBlocked;
     if (hooksBlocked) {
-      for (const warning of hooksBlocked.warnings || []) {
-        console.warn(`agentcompass: ${warning}`);
-      }
+      logRouteWarnings(hooksBlocked.warnings);
       const refused = rejectBlocked(body, ctx, hooksBlocked);
       if (refused) return refused.rejected;
       return dropRoutingFields(body) ? body : undefined;
@@ -561,12 +561,10 @@ export function onRequest(body, ctx = {}) {
       if (
         !hasExplicitCandidates ||
         !Array.isArray(candidateModels) ||
-        candidateOffers(candidateModels, stateRoute.targetModel, stateRoute.targetEffort || "high")
+        candidateOffers(candidateModels, stateRoute.targetModel, stateRoute.targetEffort || "high", options.catalog)
       ) {
         decision = stateRoute;
-        for (const warning of decision.warnings || []) {
-          console.warn(`agentcompass: ${warning}`);
-        }
+        logRouteWarnings(decision.warnings);
       }
 
       if (decision && decision.targetModel) {
@@ -606,9 +604,7 @@ export function onRequest(body, ctx = {}) {
       });
       decision = routed.decision;
       // Magpie's log is where a gateway operator sees that a pinned model is too slow for a live loop
-      for (const warning of decision?.warnings || []) {
-        console.warn(`agentcompass: ${warning}`);
-      }
+      logRouteWarnings(decision?.warnings);
       if (routed.record && routed.sessionKey && decision?.targetModel) {
         store.recordRequest(routed.sessionKey, routed.record, routed.facts, now);
       }
@@ -678,7 +674,7 @@ export function onProvider(body, ctx = {}) {
       isVirtualModelName(body.model, options) ||
       prevDecision.canRewriteModel === false ||
       prevDecision.hasExplicitCandidates === false ||
-      !candidateOffers(providerModels, prevDecision.targetModel, prevDecision.targetEffort || "high") ||
+      !candidateOffers(providerModels, prevDecision.targetModel, prevDecision.targetEffort || "high", options.catalog) ||
       options.routePerProvider === true;
 
     if (needProviderRoute) {
@@ -698,9 +694,7 @@ export function onProvider(body, ctx = {}) {
         realtime_loop: Boolean(prevDecision.realtimeLoop),
         ...mergePinOptions(pinOptionsOf(options), prevDecision.pins),
       });
-      for (const warning of routed.warnings || []) {
-        console.warn(`agentcompass: ${warning}`);
-      }
+      logRouteWarnings(routed.warnings);
       if (routed.ok && routed.targetModel) {
         const updated = {
           ...prevDecision,
@@ -720,6 +714,14 @@ export function onProvider(body, ctx = {}) {
         }
         applyRoutedModelAndEffort(body, updated, ctx);
         return body;
+      }
+      // Nothing usable on this provider, and what the request carries is not offered here: sending it would only come back an error.
+      if (
+        !isVirtualModelName(body.model, options) &&
+        !candidateOffers(providerModels, prevDecision.targetModel, prevDecision.targetEffort || "high", options.catalog) &&
+        typeof ctx?.reject === "function"
+      ) {
+        return ctx.reject(503, `agentcompass: provider ${prov.id || prov.name} has no route: ${(routed.warnings || []).join("; ")}`);
       }
     }
   }

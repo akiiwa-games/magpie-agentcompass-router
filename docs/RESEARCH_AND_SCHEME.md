@@ -334,21 +334,29 @@ AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 
 |---:|---:|---|---|
 | 170292 | 94.57% | 一致 | |
 | 9357 | 5.20% | 专项路由 | 候选池里没有该路由的专项模型时，Magpie 不封死路由（`specialist_available`）：网关的候选池由用户配置，不像 AgentCompass 那样来自账户。AgentCompass 排除全部候选 |
-| 220 | 0.12% | Spark | `gpt-5.3-codex-spark` 只有 Magpie 有条目（见 4.5），AgentCompass 按未测量模型评分 |
+| 244 | 0.14% | Spark | `gpt-5.3-codex-spark` 只有 Magpie 有条目（见 4.5），AgentCompass 按未测量模型评分 |
 | 167 | 0.09% | 关闭思考 | Magpie 让 `none` 损失能力值（`catalog-overlay.mjs` 的 `effort_ability`）；AgentCompass 在模型没有该档曲线时按 High 的 tier 计算，所以降到 `none` 也过得了门槛 |
-| 28 | 0.02% | 同分 | 两边分数相同，顺序不同：Magpie 按候选池顺序，AgentCompass 按账户遍历 |
+| 4 | 0.00% | 同分 | 两边分数相同，顺序不同：Magpie 按候选池顺序，AgentCompass 按账户遍历 |
 
 未解释的差异是 0 行。选中结果一致时分数仍差一个常数 0.03：AgentCompass 对没有容量观测的订阅账户加 `unknown_capacity_penalty`，Magpie 没有这个数据来源，所以不加，这不影响排序。
 
-非实时路由相对对齐之前（ab8baba）有变化，这是 R6 允许的。按裸模型名的 20 个候选池 × 全部画像比较（3520 行），1579 行不变（44.86%），其余按类说明：
+thinking-off 那 167 行是 AgentCompass 的缺陷，这里不跟。
 
-| 行数 | 分类 | 原因 |
-|---:|---|---|
-| 699 | Magpie 自有别名去掉了 | `gpt-5.4`、`gpt-5.3-codex`、`o3`、`gpt-4o` 不在 `accounts.json` 里，现在按未知或 family 评分。README 的示例候选池已换成目录里有的名字 |
-| 395 | family、未知名字 | 按 AgentCompass 的做法收缩 tier 和能力向量、不用目标模型的曲线、价格按估算的 3 美元每小时 |
-| 148 | 模型不变、档位变了 | 裸模型名展开成 `dispatch_efforts` 的行（例如 Haiku 只有 high）；曲线来自 `accounts.json` |
-| 404 | 有一侧选不出 | 包含裸名候选池里只有弱模型的情况：`accounts.json` 的 tier 和门槛低于 hard floor |
-| 295 | 换了模型 | 目录表整体更新：59 个模型条目、53 条曲线、14 条路由都和旧的手抄版本不同 |
+非实时路由相对对齐之前（ab8baba）有变化，这是 R6 允许的。按裸模型名的 20 个候选池（`test/fixtures/nonrealtime-pools.json`）× 全部 176 个画像比较（3520 行），1579 行不变（44.86%），其余按类说明。`node test/nonrealtime-change-report.mjs` 可以复现这些数字。分类只看候选池和结果，不代表唯一成因：
+
+| 行数 | 现在选不出 | 分类 | 原因 |
+|---:|---:|---|---|
+| 752 | 512 | 候选池含去掉别名的名字 | Magpie 的 57 个自有别名不在 `accounts.json` 里（全表见 `RELEASE_NOTES.md`）。其中 34 个现在按未知名字评分，20 个按 family 评分，3 个（`claude-opus-4-6` 等）按它们自己的旧条目评分。解析结果不变的另有 6 个。这些候选池现在给 warning，选不出时 503 文案带模型名 |
+| 342 | 108 | 候选池含其他 family、未知名字 | 按 AgentCompass 的做法收缩 tier 和能力向量、不用目标模型的曲线、价格按估算的 3 美元每小时 |
+| 404 | 404 | 有一侧选不出 | 全部是现在选不出：`accounts.json` 的 tier 和门槛让裸名候选池里只有弱模型（例如 `gpt-6-luna`）的情况低于 hard floor |
+| 295 | 0 | 换了模型 | 目录表整体更新：59 个模型条目、53 条曲线、14 条路由都和旧的手抄版本不同 |
+| 148 | 0 | 模型不变、档位变了 | 裸模型名展开成 `dispatch_efforts` 的行（例如 Haiku 只有 high）；曲线来自 `accounts.json` |
+
+会话保持（R2）：保持前先看当前候选池是否还提供这个档位。不提供就在可用档位内降档并加警告；没有更低档位或档位是用户点名的，就结束保持，`why` 为 `effort_gone`，重新路由。保持期间换点名走 R1 解析器，`gpt-6-astra-medium` 这类写法也生效。
+
+健康状态：`exact`、`alias` 名字的失败记在解析后的条目下；`family` 名字的失败只记在原名下，所以 `gpt-6.2-sol-preview` 一次 502 不会让 `gpt-6.1-sol` 下线，`gpt-6.1-sol` 不健康也不再排除 `gpt-6.2-sol-preview`。
+
+`onProvider` 在该 provider 的模型表提供不了路由结果、且表内也选不出模型时调用 `ctx.reject(503)`，不再把它不提供的模型发过去。网关是否会因此转试下一个 provider 取决于 Magpie 对 `reject` 的实现，这里没有验证。
 
 ## 5. 与 [AgentCompass 本体 (`akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass) 的生态协同
 

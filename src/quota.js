@@ -24,6 +24,7 @@ import {
   MODEL_ALIASES,
   canonicalModel,
   resolveModelSpec,
+  pyRound,
 } from "./catalog.js";
 
 const SQRT2 = Math.SQRT2;
@@ -70,7 +71,7 @@ export function clamp(val, low, high) {
 }
 
 export function round4(val) {
-  return Math.round(val * 10000) / 10000;
+  return pyRound(val, 4);
 }
 
 export function round3(val) {

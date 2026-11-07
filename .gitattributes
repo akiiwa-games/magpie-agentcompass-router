@@ -1,1 +1,3 @@
 *.sh text eol=lf
+# Generated from AgentCompass and compared byte for byte (`npm run catalog:check`).
+src/catalog.js text eol=lf

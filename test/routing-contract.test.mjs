@@ -378,6 +378,296 @@ test("dot_text marked unavailable takes dot off the route even with a dot row in
   assert.equal(fit({ unavailable: ["dot_text"] }), 1);
 });
 
+const turnOne = (text = "Implement the parser module and tests") => ({ model: "agentcompass/auto", messages: [{ role: "user", content: text }] });
+const followUp = (first) => ({ model: "agentcompass/auto", messages: [...first.messages, { role: "assistant", content: "ok" }, { role: "user", content: "继续" }] });
+const quietly = (fn) => {
+  const warn = console.warn;
+  const logged = [];
+  console.warn = (line) => logged.push(line);
+  try {
+    return { value: fn(), logged };
+  } finally {
+    console.warn = warn;
+  }
+};
+/** Two turns of one session through the middleware; returns what each sent and how the second was decided. */
+function twoTurns(optionsOne, optionsTwo) {
+  const store = new SessionContinuityStore();
+  const first = turnOne();
+  const ctxOne = { sessionId: "s", options: { continuityStore: store, now: NOW, ...optionsOne }, state: {} };
+  quietly(() => middleware.onRequest(first, ctxOne));
+  const second = followUp(first);
+  const rejected = [];
+  const ctxTwo = { sessionId: "s", options: { continuityStore: store, now: NOW + 1000, ...optionsTwo }, state: {}, reject: (status, message) => rejected.push([status, message]) };
+  quietly(() => middleware.onRequest(second, ctxTwo));
+  return { first: first.model, second: second.model, route: ctxTwo.state.route, rejected, store };
+}
+
+test("a pin changed during a hold takes effect however it is spelled (review M1)", () => {
+  for (const pin of ["gpt-6-astra-medium", "gpt-6-astra:medium", "openai/gpt-6-astra-medium"]) {
+    const run = twoTurns({ candidateModels: ["gpt-6-astra"], pinnedEffort: "high" }, { candidateModels: ["gpt-6-astra"], constraintModel: pin });
+    assert.equal(run.first, "gpt-6-astra:high", pin);
+    assert.equal(run.second, "gpt-6-astra:medium", pin);
+    assert.equal(run.route.continuation.held, false, pin);
+    assert.equal(run.route.continuation.why, "user_pin_override", pin);
+  }
+  // A family name never passes for the flagship the session is on...
+  const pool = ["claude-opus-5-5", "claude-opus-9"];
+  const family = twoTurns({ candidateModels: ["claude-opus-5-5"] }, { candidateModels: pool, constraintModel: "claude-opus-9" });
+  assert.equal(family.route.targetModel, "claude-opus-9");
+  assert.equal(family.route.continuation.held, false);
+  // ...with no row of that name the route says so rather than keep the old model...
+  const noRow = twoTurns({ candidateModels: ["claude-opus-5-5"] }, { candidateModels: ["claude-opus-5-5"], constraintModel: "claude-opus-9" });
+  assert.equal(noRow.rejected[0]?.[0], 503);
+  assert.match(noRow.rejected[0][1], /claude-opus-9/);
+  // ...and a session already on that name stays on it.
+  const stay = twoTurns({ candidateModels: pool, constraintModel: "claude-opus-9" }, { candidateModels: pool, constraintModel: "claude-opus-9" });
+  assert.equal(stay.route.targetModel, "claude-opus-9");
+  assert.equal(stay.route.continuation.held, true);
+});
+
+test("a hold steps down to what the pool still offers, and never sends the effort it took away (review M2)", () => {
+  const sol = "gpt-6.1-sol";
+  for (const [name, one, two, effort] of [
+    ["`model:effort`", [`${sol}:high`], [`${sol}:medium`], "medium"],
+    ["efforts[]", [{ model: sol, efforts: ["high"] }], [{ model: sol, efforts: ["low"] }], "low"],
+    ["another model in the pool", [`${sol}:high`], [`${sol}:medium`, "claude-sonnet-5-5:high"], "medium"],
+  ]) {
+    const run = twoTurns({ candidateModels: one }, { candidateModels: two });
+    assert.equal(run.first, `${sol}:high`, name);
+    assert.equal(run.second, `${sol}:${effort}`, name);
+    assert.equal(run.route.continuation.held, true, name);
+    assert.match(run.route.warnings[0], /no longer offered/, name);
+  }
+  // The dispatch table counts too: Haiku dispatches at high only, so nothing is below it and the hold breaks
+  const haiku = { id: "h", provider: "claude", account: "claude", model: "claude-haiku-5-5" };
+  const noLower = twoTurns({ candidateModels: [`${sol}:high`] }, { candidateModels: [`${sol}:xhigh`, haiku] });
+  assert.equal(noLower.route.continuation.held, false);
+  assert.equal(noLower.route.continuation.why, "effort_gone");
+  assert.notEqual(noLower.second, `${sol}:high`);
+  // Unchecking the effort is taking it away
+  const disabled = twoTurns(
+    { candidateModels: [{ id: "a", provider: "codex", account: "codex", model: sol, effort: "high" }] },
+    { candidateModels: [{ id: "a", provider: "codex", account: "codex", model: sol, effort: "high", disabled: true }, { id: "b", provider: "codex", account: "codex", model: sol, effort: "medium" }] },
+  );
+  assert.notEqual(disabled.second, `${sol}:high`);
+  // A pin names the effort, so nothing may step it: the route says what is wrong
+  const pinned = twoTurns({ candidateModels: [`${sol}:high`], pinnedEffort: "high" }, { candidateModels: [`${sol}:medium`], pinnedEffort: "high" });
+  assert.equal(pinned.route?.targetEffort === "high", false);
+  assert.equal(pinned.rejected[0]?.[0], 503);
+  assert.equal(allocator.heldEffortOn([`${sol}:medium`], sol, "high"), "medium");
+  assert.equal(allocator.heldEffortOn([`${sol}:xhigh`], sol, "high"), null);
+  assert.equal(allocator.candidateOffers([{ model: sol, effort: "high" }], sol, "low"), true, "one bundle at its scoring effort steps within dispatch");
+  assert.equal(allocator.candidateOffers(["gpt-6-astra-medium"], "gpt-6-astra-medium", "high"), false);
+});
+
+test("the hooks hold as the middleware does, on the name routed and what the pool offers (review M1, M2)", async () => {
+  const run = async (one, two, extra = {}) => {
+    const store = new SessionContinuityStore();
+    const first = turnOne();
+    await hooks.onRequest(first, { protocol: "chat", sessionId: "h", options: { candidateModels: one, continuityStore: store, now: NOW }, state: {} });
+    const ctx = { protocol: "chat", sessionId: "h", options: { candidateModels: two, continuityStore: store, now: NOW + 1000, ...extra }, state: {} };
+    await hooks.onRequest(followUp(first), ctx);
+    return ctx.state.route;
+  };
+  const stepped = await run(["gpt-6.1-sol:high"], ["gpt-6.1-sol:medium"]);
+  assert.equal(stepped.continuation.held, true);
+  assert.equal(stepped.targetEffort, "medium");
+  assert.match(stepped.warnings[0], /no longer offered/);
+  const gone = await run(["gpt-6.1-sol:high"], ["gpt-6.1-sol:xhigh", "claude-sonnet-5-5"]);
+  assert.equal(gone.continuation.held, false);
+  assert.equal(gone.continuation.why, "effort_gone");
+  assert.notEqual(gone.targetEffort, "high");
+  const pinned = await run(["gpt-6-astra"], ["gpt-6-astra"], { constraintModel: "gpt-6-astra-medium" });
+  assert.equal(pinned.continuation.why, "user_pin_override");
+  assert.equal(pinned.targetEffort, "medium");
+  const row = { id: "x", provider: "codex", account: "codex", model: "gpt-6-astra", effort: "medium", modeId: "m", draws: 2 };
+  const held = await run([row], [row]);
+  assert.equal(held.continuation.held, true);
+  assert.equal(held.bundle.modeId, "m", "review m7");
+  assert.equal(held.bundle.draws, 2, "review m7");
+});
+
+test("catalog:check reads a CRLF checkout, and .gitattributes keeps src/catalog.js LF (review M3)", async () => {
+  const sync = await import(pathToFileURL(path.join(REPO, "scripts", "sync-catalog.mjs")).href);
+  const source = fs.readFileSync(path.join(REPO, "src", "catalog.js"), "utf8").replace(/\r\n/g, "\n");
+  assert.equal(sync.currentBlock(source.replace(/\n/g, "\r\n")), sync.currentBlock(source));
+  const attr = execFileSync("git", ["-C", REPO, "check-attr", "eol", "src/catalog.js"], { encoding: "utf8" });
+  assert.match(attr, /eol: lf/);
+});
+
+test("a pool name with no row of its own says so, and a blocked route names its models (review M4)", () => {
+  const ok = selectBestRoute(PROFILE, { candidateModels: ["claude-sonnet-5-5", "gpt-5.4", "gemini-2.5-pro"] });
+  assert.equal(ok.ok, true);
+  assert.equal(ok.warnings.length, 2);
+  assert.match(ok.warnings[0], /gpt-5\.4 is not in the catalog: scored on the generic row \(tier 2\.8\); use gpt-6-astra/);
+  assert.match(ok.warnings[1], /gemini-2\.5-pro is not in the catalog: scored as an estimate of gemini-4-argon-high \(tier 3\.7\); use gemini-4-argon-high/);
+  assert.deepEqual(selectBestRoute(PROFILE, { candidateModels: ["claude-sonnet-5-5", "claude-opus-4-6"] }).warnings, []);
+
+  const rejected = [];
+  const refuse = (pool, content, extra = {}) =>
+    quietly(() =>
+      middleware.onRequest(
+        { model: "agentcompass/auto", messages: [{ role: "user", content }] },
+        { options: { candidateModels: pool, continuityStore: new SessionContinuityStore(), now: NOW, ...extra }, state: {}, reject: (s, m) => rejected.push([s, m]) },
+      ),
+    );
+  refuse(["gpt-5.4"], "Prove the correctness of this distributed consensus algorithm and redesign the architecture across all modules");
+  assert.equal(rejected[0][0], 503);
+  assert.match(rejected[0][1], /no candidate is available: gpt-5\.4@low: ability/);
+  assert.match(rejected[0][1], /candidate name gpt-5\.4 is not in the catalog/);
+  refuse(["gpt-5.4"], "hello", { constraintModel: "claude-opus-9" });
+  assert.equal(rejected[1][0], 503);
+  assert.match(rejected[1][1], /pinned model claude-opus-9 is not among the candidates/);
+
+  // The log carries a name warning once per process, a route's other warnings every time
+  const name = `gpt-5.4-${NOW}-unlisted`;
+  const once = quietly(() => {
+    allocator.logRouteWarnings([`candidate name ${name} is not in the catalog`, "slow"]);
+    allocator.logRouteWarnings([`candidate name ${name} is not in the catalog`, "slow"]);
+  });
+  assert.equal(once.logged.filter((line) => line.includes(name)).length, 1);
+  assert.equal(once.logged.filter((line) => line.endsWith("slow")).length, 2);
+
+  // The release notes list every retired name with its replacement
+  const names = Object.values(catalog.RETIRED_NAMES).flat();
+  assert.equal(names.length, 57);
+  const notes = fs.readFileSync(path.join(REPO, "docs", "RELEASE_NOTES.md"), "utf8");
+  for (const [target, retired] of Object.entries(catalog.RETIRED_NAMES)) {
+    assert.ok(catalog.DEFAULT_MODELS[target], target);
+    for (const old of retired) {
+      assert.ok(notes.includes(`\`${old}\``), old);
+      if (catalog.resolveModel(old).source === "exact") continue;
+      assert.match(catalog.catalogNameWarning(old), new RegExp(`use ${target}$`), old);
+    }
+  }
+});
+
+test("a failure of a family name stays on that name; the flagship keeps serving (review M5)", () => {
+  const store = new SessionContinuityStore();
+  const pool = ["gpt-6.2-sol-preview", "gpt-6.1-sol"];
+  const first = turnOne();
+  const ctx = { sessionId: "f", options: { candidateModels: ["gpt-6.2-sol-preview"], continuityStore: store, now: NOW }, state: {} };
+  quietly(() => middleware.onRequest(first, ctx));
+  assert.equal(ctx.state.route.targetModel, "gpt-6.2-sol-preview");
+  middleware.onResponse({ error: { message: "bad gateway" } }, { ...ctx, status: 502 });
+  assert.deepEqual(store.getUnhealthyModels(NOW), ["gpt-6.2-sol-preview"]);
+  assert.equal(store.isModelHealthy("gpt-6.1-sol", NOW), true);
+  assert.equal(store.isModelHealthy("gpt-6.2-sol-preview", NOW), false);
+
+  // The next turn leaves the failed name and lands on the flagship, in this session and in a new one
+  const next = followUp(first);
+  const ctxNext = { sessionId: "f", options: { candidateModels: pool, continuityStore: store, now: NOW + 1000 }, state: {} };
+  quietly(() => middleware.onRequest(next, ctxNext));
+  assert.equal(ctxNext.state.route.targetModel, "gpt-6.1-sol");
+  assert.equal(ctxNext.state.route.continuation.why, "provider_unhealthy");
+  const fresh = selectBestRoute(PROFILE, { candidateModels: ["gpt-6.1-sol"], unhealthyModels: store.getUnhealthyModels(NOW) });
+  assert.equal(fresh.targetModel, "gpt-6.1-sol");
+  const allocated = rankCandidates(PROFILE, { candidateModels: ["gpt-6.1-sol:high"], unhealthyModels: ["gpt-6.2-sol-preview"] });
+  assert.equal(allocated.allCandidates[0].eligible, true);
+
+  // An exact or alias name is its row: any spelling takes the row down
+  const exact = new SessionContinuityStore();
+  exact.markModelUnhealthy("gpt-6.1-sol-20261001", "http_502", NOW);
+  assert.deepEqual(exact.getUnhealthyModels(NOW), ["gpt-6.1-sol"]);
+  assert.equal(rankCandidates(PROFILE, { candidateModels: ["gpt-6.1-sol:high"], unhealthyModels: exact.getUnhealthyModels(NOW) }).allCandidates[0].eligible, false);
+});
+
+test("a pin that names a fixed-effort id makes no row of another effort (review m2)", () => {
+  const argon = { id: "a", provider: "antigravity", account: "agy", harness: "antigravity", model: "gemini-4-argon-high", effort: "high" };
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [argon], constraintModel: "gemini-4-argon-high", constraintEffort: "medium" }).blocked, true);
+  assert.equal(catalog.nameFixesEffort("gemini-4-argon-high"), true);
+  assert.equal(catalog.nameFixesEffort("gpt-6.1-sol"), false);
+  assert.equal(catalog.nameFixesEffort("qwen3.8-max"), false, "-max is a size unless the base is a row");
+  assert.equal(catalog.nameFixesEffort("gpt-6.1-sol-max"), true);
+});
+
+test("scores round as Python rounds them (review m3)", () => {
+  assert.equal(catalog.pyRound(0.7625, 3), 0.762);
+  assert.equal(allocator.round3(0.7625), 0.762);
+  assert.equal(catalog.pyRound(0.0625, 3), 0.062, "an exact tie goes to the even digit");
+  assert.equal(catalog.pyRound(0.1875, 3), 0.188, "an exact tie goes to the even digit");
+  assert.equal(catalog.pyRound(2.5, 0), 2);
+  assert.equal(catalog.pyRound(0.12345, 4), 0.1235);
+  assert.equal(catalog.pyRound(-0.7625, 3), -0.762);
+  assert.ok(Object.is(catalog.pyRound(-0.00001, 3), 0));
+});
+
+test("`:auto` and `:off` constrain nothing; `-off` is not an effort (review m4)", () => {
+  assert.deepEqual(catalog.splitEffortSuffix("gpt-6.1-sol:auto"), { name: "gpt-6.1-sol:auto", effort: null });
+  assert.equal(catalog.resolveModel("gpt-6.1-sol:auto").key, "gpt-6.1-sol");
+  assert.equal(catalog.resolveModel("gpt-6.1-sol:off").effort, null);
+  assert.equal(catalog.resolveModel("gpt-6.1-sol-off").source, "family");
+  const pool = selectBestRoute(PROFILE, { candidateModels: ["gpt-6.1-sol:auto"] });
+  assert.equal(pool.targetModel, "gpt-6.1-sol");
+  assert.doesNotMatch(pool.modelWithEffort, /auto/);
+  const pin = selectBestRoute(PROFILE, { candidateModels: ["gpt-6.1-sol"], constraintModel: "gpt-6.1-sol:auto" });
+  assert.equal(pin.ok, true);
+  assert.equal(pin.targetModel, "gpt-6.1-sol");
+});
+
+test("task-level multi_task and task_count are checked as stated (review m5)", () => {
+  for (const bad of [{ multi_task: "false" }, { task_count: 0 }, { task_count: NaN }, { task_count: "" }, { multi_task: true, task_count: "1" }, { multi_task: false, task_count: "3" }]) {
+    const decision = selectBestRoute({ objective: "Fix a bug", ...bad }, { candidateModels: ["gpt-6.1-sol"] });
+    assert.equal(decision.blocked, true, JSON.stringify(bad));
+    assert.equal(decision.error, "invalid_caller_profile", JSON.stringify(bad));
+  }
+  assert.equal(profiler.inferTaskProfile({ objective: "Fix a bug", task_count: 3 }).multi_task, true);
+  assert.equal(profiler.inferTaskProfile({ objective: "Fix a bug", multi_task: false }).task_count, "1");
+  assert.equal(profiler.inferTaskProfile({ objective: "Fix a bug", multi_task: true }).task_count, "2");
+});
+
+test("a request this plugin does not route keeps its pin fields from the upstream too (review m6)", () => {
+  const body = { model: "gpt-6-luna", pinned_model: "x", constraints: { model: "x" }, constraint_effort: "low", messages: [{ role: "user", content: "hi" }] };
+  assert.equal(middleware.onRequest(body, { options: {}, state: {} }), body);
+  for (const field of ["pinned_model", "constraints", "constraint_effort"]) assert.equal(field in body, false, field);
+});
+
+test("a held turn carries the pool's bundle, with its modeId and draws (review m7)", () => {
+  const row = { id: "x", provider: "codex", account: "codex", model: "gpt-6-astra", effort: "medium", modeId: "m", draws: 2 };
+  const run = twoTurns({ candidateModels: [row] }, { candidateModels: [row] });
+  assert.equal(run.route.continuation.held, true);
+  assert.equal(run.route.bundle.modeId, "m");
+  assert.equal(run.route.bundle.draws, 2);
+  assert.equal(run.route.bundle.effort, run.route.targetEffort);
+});
+
+test("a route its `when` rules block says why (review m8)", () => {
+  const decision = selectBestRoute(PROFILE, { candidateModels: [{ id: "w", provider: "codex", model: "gpt-6.1-sol", effort: "high", when: { max_reasoning_depth: 1 } }] });
+  assert.equal(decision.blocked, true);
+  assert.match(decision.warnings[0], /gpt-6\.1-sol@high: its when rule allows reasoning depth up to 1, the task has 2/);
+  assert.match(decision.excluded[0], /when rule/);
+});
+
+test("a provider with nothing usable refuses rather than send what it does not offer (review m9)", () => {
+  const options = (extra) => ({ candidateModels: ["gpt-6.1-sol"], continuityStore: new SessionContinuityStore(), now: NOW, ...extra });
+  const rejected = [];
+  const reject = (status, message) => {
+    rejected.push([status, message]);
+    return "refused";
+  };
+  const body = turnOne();
+  const ctx = { sessionId: "p", options: options({ pinnedModel: "gpt-6.1-sol", modelsByProvider: { other: ["claude-sonnet-5-5"] } }), state: {}, provider: { id: "other" }, reject };
+  quietly(() => middleware.onRequest(body, ctx));
+  assert.equal(quietly(() => middleware.onProvider(body, ctx)).value, "refused");
+  assert.equal(rejected[0][0], 503);
+  assert.match(rejected[0][1], /other/);
+  assert.match(rejected[0][1], /gpt-6\.1-sol/);
+  // efforts[] on the provider: only `low`, which this task's floor rules out
+  const lowOnly = { sessionId: "q", options: options({ routePerProvider: true, modelsByProvider: { p: [{ model: "gpt-6.1-sol", efforts: ["low"] }] } }), state: {}, provider: { id: "p" }, reject };
+  const hard = { model: "agentcompass/auto", messages: [{ role: "user", content: "Implement the parser module and tests" }] };
+  quietly(() => middleware.onRequest(hard, lowOnly));
+  assert.equal(quietly(() => middleware.onProvider(hard, lowOnly)).value, "refused");
+  assert.match(rejected[1][1], /provider p has no route: no candidate is available: gpt-6\.1-sol@low: ability/);
+});
+
+test("the pools of the non-realtime report are in the repo", () => {
+  const pools = JSON.parse(fs.readFileSync(path.join(REPO, "test", "fixtures", "nonrealtime-pools.json"), "utf8"));
+  assert.equal(pools.length, 20);
+  assert.ok(fs.existsSync(path.join(REPO, "test", "nonrealtime-change-report.mjs")));
+  assert.doesNotMatch(fs.readFileSync(path.join(REPO, "scripts", "catalog-overlay.mjs"), "utf8"), /`pi` has its own dispatch table/);
+});
+
 test("M-3.5 onProvider reroutes on a held turn too, and keeps the unhealthy models out", async (t) => {
   t.mock.method(console, "warn", () => {});
   const continuityStore = new SessionContinuityStore();
@@ -497,8 +787,8 @@ test("7.2 no routine effort overhead: on a routine task astra:high does not lose
 test("7.3 a bundle's `when` is checked in every mode", () => {
   const bundle = { id: "easy_only", provider: "codex", account: "codex", model: "gpt-6.1-sol", effort: "high", when: { max_reasoning_depth: 1 } };
   const fallback = { id: "any", provider: "codex", account: "codex", model: "gpt-6.1-terra", effort: "high" };
-  assert.deepEqual(rankCandidates(PROFILE, { candidateModels: [bundle, fallback] }).allCandidates.map((c) => c.id), ["any"]);
-  assert.equal(rankCandidates(ROUTINE, { candidateModels: [bundle, fallback] }).allCandidates.length, 2);
+  assert.deepEqual(rankCandidates(PROFILE, { candidateModels: [bundle, fallback] }).ranking.map((c) => c.id), ["any"]);
+  assert.equal(rankCandidates(ROUTINE, { candidateModels: [bundle, fallback] }).ranking.length, 2);
 });
 
 test("7.4 the harness factor discounts a harness's score as accounts.json says", () => {

@@ -23,7 +23,12 @@ import {
   MODEL_ALIASES,
   ROUTE_FIT_PEERS,
   SUBJECTIVE_DIMENSIONS,
+  CATALOG_NAME_WARNING,
   canonicalModel,
+  catalogNameWarning,
+  healthKey,
+  nameFixesEffort,
+  pyRound,
   resolveModel,
   resolveModelSpec,
   resolveResponsivenessModelKey,
@@ -46,11 +51,11 @@ export function clamp(val, low, high) {
 }
 
 export function round4(val) {
-  return Math.round(val * 10000) / 10000;
+  return pyRound(val, 4);
 }
 
 export function round3(val) {
-  return Math.round(val * 1000) / 1000;
+  return pyRound(val, 3);
 }
 
 export function profileDifficulty(profile, policy = DEFAULT_SCORING_POLICY) {
@@ -651,8 +656,13 @@ export function scoringEffort(bundle, info) {
 }
 
 export function bundleApplies(bundle, taskCtx = {}) {
+  return whenFailure(bundle, taskCtx) === null;
+}
+
+/** Which part of a bundle's `when` this task fails, or `null` when the bundle applies. */
+function whenFailure(bundle, taskCtx) {
   const rule = bundle?.when;
-  if (!rule || typeof rule !== "object") return true;
+  if (!rule || typeof rule !== "object") return null;
   const pinnedId =
     taskCtx?.pinned_bundle ||
     taskCtx?.pinnedBundle ||
@@ -660,12 +670,12 @@ export function bundleApplies(bundle, taskCtx = {}) {
     taskCtx?.constraintBundle ||
     taskCtx?.constraints?.bundle;
   if (pinnedId && bundle?.id && (pinnedId === bundle.id || pinnedId === bundle.source_id)) {
-    return true;
+    return null;
   }
   if ("max_reasoning_depth" in rule) {
     const depth = taskCtx?.profile?.reasoning_depth;
     if (!Number.isFinite(depth) || depth > Number(rule.max_reasoning_depth)) {
-      return false;
+      return `its when rule allows reasoning depth up to ${rule.max_reasoning_depth}, the task has ${depth}`;
     }
   }
   if ("min_difficulty" in rule) {
@@ -676,10 +686,10 @@ export function bundleApplies(bundle, taskCtx = {}) {
       DIFFICULTY_ORDER.includes(req) &&
       DIFFICULTY_ORDER.indexOf(diff) < DIFFICULTY_ORDER.indexOf(req)
     ) {
-      return false;
+      return `its when rule asks for difficulty ${req} or above, the task is ${diff}`;
     }
   }
-  return true;
+  return null;
 }
 
 export function bundleCooldownReason(bundle, launchFailures, nowMs = Date.now()) {
@@ -702,7 +712,6 @@ export function bundleCooldownReason(bundle, launchFailures, nowMs = Date.now())
 
 const KNOWN_EFFORT_SUFFIXES = [
   "none",
-  "off",
   "minimal",
   "low",
   "medium",
@@ -710,7 +719,6 @@ const KNOWN_EFFORT_SUFFIXES = [
   "xhigh",
   "max",
   "ultra",
-  "auto",
   "default",
 ];
 
@@ -1203,7 +1211,7 @@ export function resolveRealtimeEffort(
         catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
       ).key;
       if (sibKey !== selfKey) continue;
-      if (unhealthySet.has(canonicalModel(b.model || "", aliases, models)) || unhealthySet.has(b.model)) continue;
+      if (unhealthySet.has(healthKey(b.model || "", models, aliases)) || unhealthySet.has(b.model)) continue;
       if (b.disabled || b.discovery_unavailable || !bundleApplies(b, taskCtx)) continue;
       const sibBundle = { ...b, id: sibId };
       if (bundleCooldownReason(sibBundle, failuresMap, nowMs)) continue;
@@ -1461,7 +1469,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (taskCtx.needs_visual && !info.visual) {
     excluded.push("task needs visual input");
   }
-  if (taskCtx.unhealthy_models && (taskCtx.unhealthy_models.has(canonical) || taskCtx.unhealthy_models.has(rawModel))) {
+  if (taskCtx.unhealthy_models && (taskCtx.unhealthy_models.has(healthKey(rawModel, models, aliases)) || taskCtx.unhealthy_models.has(rawModel))) {
     excluded.push("model is currently marked unhealthy");
   }
   if (
@@ -1869,6 +1877,11 @@ function bareCandidateEfforts(
  * Expand one pool entry into `(model, effort)` candidates. A name with an effort in it runs at that effort only; `efforts`
  * lists what the entry offers; any other entry offers what its provider dispatches.
  */
+/** `:auto`, `:off` and `:default` say nothing about the effort; only the routed one may follow the model name upstream. */
+function withoutUnconstrainingTag(raw) {
+  return raw.replace(/:(?:auto|off|default)$/i, "");
+}
+
 function expandCandidate(entry, taskCtx, catalog, models, aliases) {
   const curvesTable = catalog.effortCurves || EFFORT_CURVES;
   const respTable = catalog.effortResponsiveness || EFFORT_RESPONSIVENESS;
@@ -1880,17 +1893,17 @@ function expandCandidate(entry, taskCtx, catalog, models, aliases) {
       : bareCandidateEfforts(obj, spec, canonical, models, aliases, dispatchTable, curvesTable, respTable);
 
   if (typeof entry === "string") {
-    const { name, effort: colonEffort } = splitEffortSuffix(entry);
+    const { name, effort: colonEffort } = splitEffortSuffix(withoutUnconstrainingTag(entry));
     const effort = colonEffort || resolveModel(name, models, aliases).effort;
     if (effort && EFFORT_ORDER.includes(effort)) {
       return [{ model: name, effort, offered_efforts: [effort], effort_fixed: true }];
     }
-    const { canonical, spec } = resolveModelSpec(entry, models, aliases);
-    return bare({ model: entry }, spec, canonical).map((eff) => ({ model: entry, effort: eff }));
+    const { canonical, spec } = resolveModelSpec(name, models, aliases);
+    return bare({ model: name }, spec, canonical).map((eff) => ({ model: name, effort: eff }));
   }
   if (!entry || typeof entry !== "object" || !entry.model) return [];
 
-  const { name: modelName, effort: colonEffort } = splitEffortSuffix(String(entry.model));
+  const { name: modelName, effort: colonEffort } = splitEffortSuffix(withoutUnconstrainingTag(String(entry.model)));
   const suffixEffort = colonEffort || resolveModel(modelName, models, aliases).effort;
   const fixedBySuffix = suffixEffort && EFFORT_ORDER.includes(suffixEffort);
   const model = fixedBySuffix ? modelName : entry.model;
@@ -1981,7 +1994,7 @@ function namedEffortRows(expanded, taskCtx, catalog, models, aliases) {
     const specOf = (r) => resolveModelSpec(r.model, models, aliases).spec;
     if (rows.some((r) => String(scoringEffort(r, specOf(r)) || "").toLowerCase() === effort)) continue;
     const carrier = rows.find(
-      (r) => (!r.disabled || r.disabled_by_default) && !r.discovery_unavailable && !r.offered_efforts?.every((e) => e !== effort) && !r.effort_fixed,
+      (r) => (!r.disabled || r.disabled_by_default) && !r.discovery_unavailable && !r.offered_efforts?.every((e) => e !== effort) && !nameFixesEffort(r.model, models, aliases) && !r.effort_fixed,
     );
     if (!carrier) continue;
     const allowed = dispatchAllowedEfforts(
@@ -2076,7 +2089,7 @@ export function rankCandidates(profileInput, options = {}) {
 
   const unhealthySet = new Set();
   for (const m of options.unhealthyModels || []) {
-    const key = canonicalModel(m, aliases, models);
+    const key = healthKey(m, models, aliases);
     if (key) unhealthySet.add(key);
     if (m) unhealthySet.add(m);
   }
@@ -2212,6 +2225,13 @@ export function rankCandidates(profileInput, options = {}) {
   applyHarnessOrder(eligible, kind, policy, routes, profile.interaction_style);
   eligible.sort((a, b) => b.score - a.score);
   const pinnedCand = eligible.find((c) => isCandidatePinned(c, c.canonicalModel, taskCtx));
+  // Rows their `when` keeps out never compete, but a blocked route still says why.
+  const outOfScope = rawExpanded
+    .filter((c) => !expanded.includes(c))
+    .map((c) => {
+      const row = evaluateCandidate(c, taskCtx, catalog);
+      return { ...row, eligible: false, excluded: [whenFailure(c, taskCtx), ...row.excluded] };
+    });
 
   return {
     task: {
@@ -2232,7 +2252,7 @@ export function rankCandidates(profileInput, options = {}) {
     },
     selected: pinnedCand || eligible[0] || null,
     ranking: eligible,
-    allCandidates: evaluated,
+    allCandidates: [...evaluated, ...outOfScope],
   };
 }
 
@@ -2363,20 +2383,111 @@ export function candidateModelName(entry) {
 }
 
 /**
- * Whether a candidate list offers this model at this effort. Used on a route decided elsewhere, so a pool entry that fixes
- * its effort (`m:high`, `{ model, effort }`, `{ model, efforts }`) holds there too.
+ * The rows a candidate list holds for this model name, with what each may run at (contract R2). Used on a route decided
+ * elsewhere: a session held from an earlier turn, or a route another provider's list has to take.
  */
-export function candidateOffers(list, model, effort) {
-  return (list || []).some((entry) => {
-    if (candidateModelName(entry) !== model) return false;
-    const raw = typeof entry === "string" ? entry : entry.model;
-    const suffix = splitEffortSuffix(raw).effort;
-    if (suffix && EFFORT_ORDER.includes(suffix)) return suffix === effort;
-    if (typeof entry === "object") {
-      if (Array.isArray(entry.efforts)) return entry.efforts.includes(effort);
+function rowsNaming(list, model, catalog) {
+  const models = catalog?.models || DEFAULT_MODELS;
+  const aliases = catalog?.aliases || MODEL_ALIASES;
+  const rows = (list || []).flatMap((entry) => expandCandidate(entry, {}, catalog || {}, models, aliases));
+  attachDisabledEfforts(rows, models, aliases);
+  return rows.filter((row) => row.model === model);
+}
+
+/** R2 for one row: dispatch table, within the row's own list, without what the user disabled. A row's own effort is what it runs. */
+function rowOffers(row, effort, catalog) {
+  if (row.disabled && !row.disabled_by_default) return false;
+  if (row.disabled_efforts?.includes(effort)) return false;
+  if (row.effort_fixed) return row.effort === effort;
+  const models = catalog?.models || DEFAULT_MODELS;
+  const aliases = catalog?.aliases || MODEL_ALIASES;
+  const allowed = dispatchAllowedEfforts(
+    row,
+    row.provider || row.account,
+    row.harness || bundleHarness(row, row.account, row.id),
+    canonicalModel(row.model, aliases, models),
+    models,
+    aliases,
+    catalog?.dispatchEfforts || DISPATCH_EFFORTS,
+    catalog?.effortCurves || EFFORT_CURVES,
+    catalog?.effortResponsiveness || EFFORT_RESPONSIVENESS,
+  );
+  if (row.offered_efforts && !row.offered_efforts.includes(effort)) return false;
+  if (effort === row.effort && !row.not_dispatchable) return true;
+  return !allowed || allowed.includes(effort);
+}
+
+/**
+ * Whether a candidate list offers this model at this effort (contract R2). A pool entry that fixes its effort (`m:high`,
+ * `m-high`) or lists them (`{ model, efforts }`) offers those only. `{ model, effort }` is one bundle at its scoring effort and
+ * may step within the dispatch table, as `allocator.py` has `own_efforts` None for it.
+ */
+export function candidateOffers(list, model, effort, catalog) {
+  return rowsNaming(list, model, catalog).some((row) => rowOffers(row, effort, catalog));
+}
+
+/**
+ * The effort a held session can stay on: its own while the pool offers it, else the highest one below that the pool does. `null`
+ * when there is none. A name the pool does not hold verbatim is not this check's to judge: membership was settled by `gone`.
+ */
+export function heldEffortOn(list, model, effort, catalog) {
+  const rows = rowsNaming(list, model, catalog);
+  if (rows.length === 0) return effort;
+  const offers = (candidate) => rows.some((row) => rowOffers(row, candidate, catalog));
+  if (offers(effort)) return effort;
+  const rank = EFFORT_ORDER.indexOf(effort);
+  for (let i = rank - 1; i >= 0; i--) {
+    if (offers(EFFORT_ORDER[i])) return EFFORT_ORDER[i];
+  }
+  return null;
+}
+
+/** The pool's row a held session runs on (`modeId`, `draws`, ...), at its held effort. */
+export function heldBundle(list, model, effort, catalog) {
+  const rows = rowsNaming(list, model, catalog);
+  const row = rows.find((r) => r.effort === effort) || rows[0];
+  return row ? { ...row, effort } : null;
+}
+
+/**
+ * The model a hold sends the request to, as the candidate list names it: the store keeps models canonical (`claude-opus-5-5`), and
+ * the bare name may resolve to another provider in Magpie than the `upstream/claude-opus-5-5` the session was routed to. The name
+ * routed last (`target`) when it is still a candidate, else the one candidate of that row, else the model itself. A family
+ * name never stands in for its flagship, or the other way round.
+ */
+export function heldTarget(model, sessionState, candidateModels, catalog) {
+  if (!Array.isArray(candidateModels) || candidateModels.length === 0) return model;
+  const names = candidateModels.map(candidateModelName);
+  if (sessionState?.target && names.includes(sessionState.target)) return sessionState.target;
+  const models = catalog?.models || DEFAULT_MODELS;
+  const aliases = catalog?.aliases || MODEL_ALIASES;
+  const key = healthKey(sessionState?.target || model, models, aliases);
+  return names.find((m) => healthKey(m, models, aliases) === key) || model;
+}
+
+/** One line of why a row is out, naming the row. */
+function excludedLine(candidate, reason) {
+  return reason.startsWith(`${candidate.model}`) ? reason : `${candidate.model}@${candidate.effort}: ${reason}`;
+}
+
+/** Pool names routed on no row of their own: without this, a retired name just stops being picked. */
+function poolNameWarnings(options, models, aliases) {
+  if (!Array.isArray(options.candidateModels)) return [];
+  const names = options.candidateModels.map((entry) => (typeof entry === "string" ? entry : entry?.model)).filter(Boolean);
+  return [...new Set(names.map((name) => catalogNameWarning(name, models, aliases)).filter(Boolean))];
+}
+
+const loggedNameWarnings = new Set();
+
+/** Log a route's warnings. A name warning is about the configuration, not this request: once per process. */
+export function logRouteWarnings(warnings) {
+  for (const warning of warnings || []) {
+    if (warning.startsWith(CATALOG_NAME_WARNING)) {
+      if (loggedNameWarnings.has(warning)) continue;
+      loggedNameWarnings.add(warning);
     }
-    return true;
-  });
+    console.warn(`agentcompass: ${warning}`);
+  }
 }
 
 /**
@@ -2386,7 +2497,7 @@ function blockedWarnings(result) {
   const { pin } = result;
   const named = pin?.bundle || pin?.model || pin?.effort;
   if (!named) {
-    const reasons = [...new Set(result.allCandidates.flatMap((c) => c.excluded))];
+    const reasons = [...new Set(result.allCandidates.flatMap((c) => c.excluded.map((reason) => excludedLine(c, reason))))];
     return [`no candidate is available${reasons.length > 0 ? `: ${reasons.join("; ")}` : ""}`];
   }
   const label = pin.bundle ? `pinned bundle ${pin.bundle}` : pin.model ? `pinned model ${pin.model}` : `pinned effort ${pin.effort}`;
@@ -2420,11 +2531,10 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     };
   }
   const top = result.selected;
-  const warnings = top
-    ? top.components?.realtime_slow_pin_warning
-      ? [top.components.realtime_slow_pin_warning]
-      : []
-    : blockedWarnings(result);
+  const warnings = [
+    ...(top ? (top.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []) : blockedWarnings(result)),
+    ...poolNameWarnings(options, options.catalog?.models || DEFAULT_MODELS, options.catalog?.aliases || MODEL_ALIASES),
+  ];
   return {
     ok: Boolean(top),
     blocked: !top,
@@ -2442,7 +2552,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     responsiveness: top?.components?.responsiveness ?? null,
     responsivenessSource: top?.components?.responsiveness_source ?? null,
     warnings,
-    excluded: result.allCandidates.flatMap((c) => c.excluded.map((reason) => (reason.startsWith(`${c.model}`) ? reason : `${c.model}@${c.effort}: ${reason}`))),
+    excluded: result.allCandidates.flatMap((c) => c.excluded.map((reason) => excludedLine(c, reason))),
     score: top ? top.score : null,
     components: top ? top.components : null,
     profile: result.task.profile,

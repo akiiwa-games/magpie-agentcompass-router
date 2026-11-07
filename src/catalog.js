@@ -1553,8 +1553,11 @@ export const EFFORT_RESPONSIVENESS = Object.fromEntries(
     .map(([model, curve]) => [model, curve.responsiveness])
 );
 
-/** Suffixes that name an effort rather than a vendor tag (`claude-opus-5-5:medium`). */
-const EFFORT_SUFFIXES = [...EFFORT_ORDER, "default", "auto"];
+/**
+ * Suffixes that name an effort rather than a vendor tag (`claude-opus-5-5:medium`), as `model_resolution.py:EFFORT_SUFFIXES`.
+ * `:auto` and `:off` are vendor tags: they constrain nothing.
+ */
+const EFFORT_SUFFIXES = ["none", "minimal", "default", "low", "medium", "high", "xhigh", "max", "ultra"];
 
 /** `{ name, effort }` of a model id with a `:effort` suffix; a `:free` tag is not an effort and stays in the name. */
 export function splitEffortSuffix(rawModel) {
@@ -1700,6 +1703,98 @@ export function resolveModel(
   return unknown();
 }
 
+/** `-effort` at the end of a launch id, as `auto_bundles.py:split_effort`: `-max` is also a size name (qwen3-max). */
+const LAUNCH_EFFORT_RE = /^(.+?)-(minimal|low|medium|high|xhigh|max)$/;
+
+/**
+ * Whether a launch id runs at one effort only (`allocator.py:has_fixed_effort`): `model:effort`, or `model-effort` even when
+ * the whole id is a catalog row (`gemini-4-argon-high`).
+ */
+export function nameFixesEffort(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
+  const { name, effort } = splitEffortSuffix(rawModel);
+  if (effort) return true;
+  const match = LAUNCH_EFFORT_RE.exec(name);
+  if (!match) return false;
+  return match[2] !== "max" || match[1] in (models || {}) || match[1] in (aliases || {});
+}
+
+/**
+ * What a failure counts against. An `exact` or `alias` name is its row. A `family` or `unknown` name is only itself: a family
+ * row is an estimate of its target, so a preview that fails says nothing about the flagship it was placed on.
+ */
+export function healthKey(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
+  if (!rawModel || typeof rawModel !== "string") return "";
+  const { key, source } = resolveModel(rawModel, models, aliases);
+  if (source === "exact" || source === "alias") return key;
+  return splitEffortSuffix(rawModel).name.split("/").pop().toLowerCase();
+}
+
+/**
+ * Names an earlier catalog aliased and `accounts.json` does not, by the row they used to mean. Only the warning and the
+ * release notes read this: routing goes by what the name resolves to now.
+ */
+export const RETIRED_NAMES = {
+  "claude-haiku-5-5": [
+    "claude-haiku-4-5", "claude-3-5-haiku", "claude-3-5-haiku-latest", "claude-3-haiku",
+  ],
+  "claude-opus-5-5": [
+    "claude-opus-4-6", "claude-opus-4-5", "claude-opus-4-1", "claude-opus-4", "claude-3-opus",
+  ],
+  "claude-sonnet-5-5": [
+    "claude-sonnet-4-6", "claude-sonnet-4-5", "claude-sonnet-4", "claude-3-7-sonnet", "claude-3-7-sonnet-latest",
+    "claude-3-5-sonnet", "claude-3-5-sonnet-latest",
+  ],
+  "deepseek-v4-pro": [
+    "deepseek-r1", "deepseek-reasoner", "deepseek-v3",
+  ],
+  "deepseek-v4.1-flash-free": [
+    "deepseek-chat", "deepseek-v4.1-io",
+  ],
+  "gemini-3.8-flash-high": [
+    "gemini-3-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.0-flash", "gemini-2.0-flash-lite",
+  ],
+  "gemini-4-argon-high": [
+    "gemini-3-pro", "gemini-2.5-pro",
+  ],
+  "gpt-6-astra": [
+    "gpt-5.5", "gpt-5.4", "gpt-5", "o3", "o1",
+  ],
+  "gpt-6-luna": [
+    "gpt-5.4-mini", "gpt-5.4-nano", "gpt-5.5-mini", "gpt-5.5-nano", "gpt-5-mini", "gpt-5-nano", "gpt-4.1-mini",
+    "gpt-4.1-nano", "gpt-4o-mini", "gpt-5.6-sol-mini",
+  ],
+  "gpt-6-pro": [
+    "gpt-5.5-pro", "gpt-5.4-pro", "o3-pro", "o1-pro",
+  ],
+  "gpt-6.1-sol": [
+    "gpt-5.3-codex", "gpt-5.2-codex", "gpt-5.1-codex", "gpt-5-codex", "gpt-4.1", "gpt-4o", "o3-mini", "o4-mini",
+  ],
+  "grok-4.7": [
+    "grok-3",
+  ],
+  "grok-4.7-build-fast": [
+    "grok-3-mini",
+  ],
+};
+
+const RETIRED_REPLACEMENT = new Map(
+  Object.entries(RETIRED_NAMES).flatMap(([target, names]) => names.map((name) => [name, target]))
+);
+
+/** Starts every `catalogNameWarning`, so a host can log each once rather than on every request. */
+export const CATALOG_NAME_WARNING = "candidate name ";
+
+/** Why a pool name is not routed on a row of its own, or `null` when it has one. */
+export function catalogNameWarning(rawModel, models = DEFAULT_MODELS, aliases = MODEL_ALIASES) {
+  const { key, source } = resolveModel(rawModel, models, aliases);
+  if (source === "exact" || source === "alias") return null;
+  const { name } = splitEffortSuffix(rawModel);
+  const { tier } = resolveModelSpec(name, models, aliases).spec;
+  const scored = source === "family" ? `scored as an estimate of ${key} (tier ${tier})` : `scored on the generic row (tier ${tier})`;
+  const replacement = RETIRED_REPLACEMENT.get(name.split("/").pop().toLowerCase());
+  return `${CATALOG_NAME_WARNING}${name} is not in the catalog: ${scored}${replacement ? `; use ${replacement}` : ""}`;
+}
+
 /** The key of `rawModel` (`resolveModel`). */
 export function canonicalModel(rawModel, aliases = MODEL_ALIASES, models = DEFAULT_MODELS) {
   if (!rawModel || typeof rawModel !== "string") return "";
@@ -1724,6 +1819,20 @@ export function resolveResponsivenessModelKey(
   return { key: source === "unknown" ? raw : key, known: source === "exact" || source === "alias", source };
 }
 
+/**
+ * `round(value, digits)` as Python does it: the double's exact value decides, and an exact tie goes to the even digit.
+ * `Math.round(x * 1000)` rounds the product instead, and 0.7625 lands on the other side of it.
+ */
+export function pyRound(value, digits) {
+  const number = Number(value);
+  const scaled = Math.abs(number) * 10 ** digits;
+  if (Math.abs(scaled - Math.floor(scaled) - 0.5) > 1e-6) return Number(number.toFixed(digits)) + 0;
+  const exact = number.toFixed(digits + 60);
+  const cut = exact.indexOf(".") + 1 + digits;
+  if (!/^50*$/.test(exact.slice(cut)) || Number(exact[cut - 1]) % 2 === 1) return Number(number.toFixed(digits)) + 0;
+  return Number(exact.slice(0, cut)) + 0;
+}
+
 const FAMILY_TIER_SHRINK = 0.3;
 const FAMILY_VECTOR_SHRINK = 0.9;
 const ESTIMATED_USD_PER_HOUR = 3.0;
@@ -1744,14 +1853,14 @@ function familySpec(row) {
   } = row;
   spec = { ...kept, score_estimated: "family", usd_per_hour: ESTIMATED_USD_PER_HOUR, usd_estimated: true };
   if (typeof spec.tier === "number") {
-    spec.tier = Math.round(Math.max(1.0, spec.tier - FAMILY_TIER_SHRINK) * 100) / 100;
+    spec.tier = pyRound(Math.max(1.0, spec.tier - FAMILY_TIER_SHRINK), 2);
   }
   for (const block of ["capabilities", "subjective"]) {
     if (spec[block] && typeof spec[block] === "object") {
       spec[block] = Object.fromEntries(
         Object.entries(spec[block]).map(([k, v]) => [
           k,
-          typeof v === "number" ? Math.round(v * FAMILY_VECTOR_SHRINK * 1000) / 1000 : v,
+          typeof v === "number" ? pyRound(v * FAMILY_VECTOR_SHRINK, 3) : v,
         ])
       );
     }

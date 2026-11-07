@@ -109,7 +109,11 @@ export function expectedBlock() {
   return renderBlock(buildTables(agentCompassJson(ACCOUNTS_PATH)), AGENTCOMPASS_COMMIT);
 }
 
-export function currentBlock(source = fs.readFileSync(CATALOG_PATH, "utf8")) {
+/** A checkout may have CRLF line ends (`core.autocrlf`); the block is compared and written with LF. */
+const withLf = (text) => text.replace(/\r\n/g, "\n");
+
+export function currentBlock(rawSource = fs.readFileSync(CATALOG_PATH, "utf8")) {
+  const source = withLf(rawSource);
   const from = source.indexOf(BEGIN);
   const to = source.indexOf(END);
   if (from < 0 || to < from) throw new Error(`${CATALOG_PATH}: no generated block`);
@@ -118,7 +122,7 @@ export function currentBlock(source = fs.readFileSync(CATALOG_PATH, "utf8")) {
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   const expected = expectedBlock();
-  const source = fs.readFileSync(CATALOG_PATH, "utf8");
+  const source = withLf(fs.readFileSync(CATALOG_PATH, "utf8"));
   const current = currentBlock(source);
   if (process.argv.includes("--check")) {
     if (current !== expected) {

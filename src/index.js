@@ -17,6 +17,7 @@
 
 import {
   explicitCandidateModels,
+  candidateOffers,
   mergePinOptions,
   pinOptionsOf,
   pinsFixEffort,
@@ -458,13 +459,9 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     ((prevKind && matchedChoice && prevKind === matchedChoice) ||
       (prevKind && prevKind === decision.workKind))
   ) {
-    effectiveEffort = ratchetEffort(prevReasoning, effectiveEffort, [
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-    ]);
+    const ratcheted = ratchetEffort(prevReasoning, effectiveEffort, ["low", "medium", "high", "xhigh", "max"]);
+    const pool = explicitCandidateModels(pluginOptions);
+    if (!pool || candidateOffers(pool, decision.targetModel, ratcheted, pluginOptions.catalog)) effectiveEffort = ratcheted;
   }
 
   if (questions.effort) {

@@ -15,7 +15,8 @@ import {
   DEFAULT_SCORING_POLICY,
   MODEL_ALIASES,
   canonicalModel,
-  splitEffortSuffix,
+  healthKey,
+  resolveModel,
   resolveModelSpec,
 } from "./catalog.js";
 import { isModelQuotaExhausted } from "./quota.js";
@@ -979,10 +980,15 @@ function pinOverridesSession(sessionState, currentModel, pins, options) {
   if (pins.pinnedBundle && pins.pinnedBundle !== sessionState.pinnedBundle) return true;
   let effort = pins.constraintEffort ? String(pins.constraintEffort).trim().toLowerCase() : null;
   if (pins.constraintModel) {
-    const named = splitEffortSuffix(String(pins.constraintModel));
-    const key = canonicalModel(named.name, options.aliases || MODEL_ALIASES, options.models || DEFAULT_MODELS);
-    if (key !== currentModel) return true;
-    effort = named.effort || effort;
+    const models = options.models || DEFAULT_MODELS;
+    const aliases = options.aliases || MODEL_ALIASES;
+    const named = resolveModel(String(pins.constraintModel), models, aliases);
+    // A family name stays itself: only a session on that very name is on it, never one on the flagship it folds to.
+    const direct = named.source === "exact" || named.source === "alias";
+    const running = direct ? currentModel : healthKey(sessionState.target || sessionState.model, models, aliases);
+    const wanted = direct ? named.key : healthKey(String(pins.constraintModel), models, aliases);
+    if (wanted !== running) return true;
+    effort = effort || named.effort;
   }
   return Boolean(effort && effort !== sessionState.effort);
 }
@@ -1052,10 +1058,11 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
       ? facts.candidateModels
       : [];
   if (candidateList.length > 0) {
-    const canonicalCandidates = candidateList.map((m) =>
-      canonicalModel(typeof m === "string" ? m : m?.model || m?.id || "", options.aliases, options.models)
+    const running = healthKey(sessionState.target || sessionState.model, options.models, options.aliases);
+    const candidateKeys = candidateList.map((m) =>
+      healthKey(typeof m === "string" ? m : m?.model || m?.id || "", options.models, options.aliases)
     );
-    if (!canonicalCandidates.includes(currentModel)) {
+    if (!candidateKeys.includes(running)) {
       return {
         shouldHold: false,
         why: "gone",
@@ -1068,21 +1075,24 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
   }
 
   // 3. Check provider/model health
+  const runningName = sessionState.target || sessionState.model;
+  const failedModel = healthKey(runningName, options.models, options.aliases);
   const unhealthySet = new Set(
-    (options.unhealthyModels || []).map((m) => canonicalModel(m, options.aliases, options.models))
+    (options.unhealthyModels || []).map((m) => healthKey(m, options.models, options.aliases))
   );
   const storeHealthy =
     options.store && typeof options.store.isModelHealthy === "function"
-      ? options.store.isModelHealthy(currentModel, now)
+      ? options.store.isModelHealthy(runningName, now)
       : true;
   if (
     sessionState.healthy === false ||
     !storeHealthy ||
-    unhealthySet.has(currentModel)
+    unhealthySet.has(failedModel)
   ) {
     return {
       shouldHold: false,
       why: "provider_unhealthy",
+      failedModel,
       previousModel: currentModel,
       previousEffort: sessionState.effort,
       within: Boolean(facts.within),
@@ -1522,11 +1532,12 @@ export class SessionContinuityStore {
     const targetModel = canonicalModel(
       ctx?.model || existing?.model || reply?.model || ""
     );
+    const ranModel = healthKey(ctx?.model || existing?.target || existing?.model || reply?.model || "");
 
     if (isError) {
-      if (targetModel) {
+      if (ranModel) {
         this.markModelUnhealthy(
-          targetModel,
+          ranModel,
           ctx?.error || reply?.error?.message || `http_${status || "error"}`,
           now
         );
@@ -1573,8 +1584,8 @@ export class SessionContinuityStore {
     );
     const totalContext = inputTokens + cacheReadTokens + cacheWriteTokens + outputTokens;
 
-    if (targetModel) {
-      this.markModelHealthy(targetModel);
+    if (ranModel) {
+      this.markModelHealthy(ranModel);
     }
 
     if (!key) return null;
@@ -1609,22 +1620,23 @@ export class SessionContinuityStore {
       row.conversation_id ||
       this.lastActiveSessionKey;
     const targetModel = canonicalModel(row.model || row.request_model || "");
+    const ranModel = healthKey(row.model || row.request_model || "");
     const isRejected =
       row.rejected === true ||
       Boolean(row.error) ||
       (Number(row.status) >= 400 && Number(row.status) < 600);
 
     if (isRejected) {
-      if (targetModel) {
+      if (ranModel) {
         this.markModelUnhealthy(
-          targetModel,
+          ranModel,
           row.error || row.reject_reason || `status_${row.status || "rejected"}`,
           now
         );
       }
       if (key && this.sessions.has(key)) {
         const existing = this.sessions.get(key);
-        if (!targetModel || existing.model === targetModel) {
+        if (!ranModel || healthKey(existing.target || existing.model) === ranModel) {
           this.set(key, { ...existing, healthy: false }, now);
         }
       }
@@ -1664,34 +1676,34 @@ export class SessionContinuityStore {
   }
 
   markModelUnhealthy(model, reason = "unhealthy", now = Date.now(), cooldownMs = UNHEALTHY_COOLDOWN_MS) {
-    const canonical = canonicalModel(model);
-    if (!canonical) return;
-    this.modelHealth.set(canonical, {
+    const key = healthKey(model);
+    if (!key) return;
+    this.modelHealth.set(key, {
       healthy: false,
       reason: String(reason || "unhealthy"),
       failedAt: now,
       until: now + cooldownMs,
     });
     for (const [k, state] of this.sessions.entries()) {
-      if (state.model === canonical) {
+      if (healthKey(state.target || state.model) === key) {
         this.sessions.set(k, { ...state, healthy: false });
       }
     }
   }
 
   markModelHealthy(model) {
-    const canonical = canonicalModel(model);
-    if (!canonical) return;
-    this.modelHealth.delete(canonical);
+    const key = healthKey(model);
+    if (!key) return;
+    this.modelHealth.delete(key);
   }
 
   isModelHealthy(model, now = Date.now()) {
-    const canonical = canonicalModel(model);
-    if (!canonical) return true;
-    const entry = this.modelHealth.get(canonical);
+    const key = healthKey(model);
+    if (!key) return true;
+    const entry = this.modelHealth.get(key);
     if (!entry) return true;
     if (entry.until && now > entry.until) {
-      this.modelHealth.delete(canonical);
+      this.modelHealth.delete(key);
       return true;
     }
     return entry.healthy !== false;

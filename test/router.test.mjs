@@ -1932,16 +1932,14 @@ test("8.15 Effort fallback branches the default policy can't reach: policy Max f
   const cheap = { ...policy, effort_burn: { ...policy.effort_burn, low: 0.2, minimal: 0.1 } };
   assert.equal(effortValue(cheap, curve, "burn", "minimal", 0.7), 0.2);
 
-  // none/off: parsed as efforts and scored from their own policy rows (below minimal), on and off a model's curve
-  const astra = abilities(["gpt-6-astra:none", "gpt-6-astra:off", "gpt-6-astra:minimal", "gpt-6-astra:low"]);
-  assert.deepEqual(Object.keys(astra).sort(), ["low", "minimal", "none", "off"]);
+  // none: parsed as an effort and scored from its own policy row (below minimal), on and off a model's curve
+  const astra = abilities(["gpt-6-astra:none", "gpt-6-astra:minimal", "gpt-6-astra:low"]);
+  assert.deepEqual(Object.keys(astra).sort(), ["low", "minimal", "none"]);
   const lowToNone = Math.min(policy.effort_ability.none - policy.effort_ability.low, -0.2);
   assert.ok(Math.abs(astra.none - (astra.low + lowToNone)) < 0.001, `none ${astra.none}, low ${astra.low}`);
-  assert.equal(astra.off, astra.none);
   assert.ok(astra.none < astra.minimal, `none ${astra.none} below minimal ${astra.minimal}`);
-  const glmNone = abilities(["glm-5.3:none", "glm-5.3:off", "glm-5.3:high"]);
+  const glmNone = abilities(["glm-5.3:none", "glm-5.3:high"]);
   assert.ok(Math.abs(glmNone.none - (glmNone.high + policy.effort_ability.none)) < 0.001);
-  assert.ok(Math.abs(glmNone.off - (glmNone.high + policy.effort_ability.off)) < 0.001);
 });
 
 test("9.1 PR #670 Review Guard: Default triggers ONLY claim `agentcompass` / `agentcompass/*` and never hijack `auto` or `group/intent`", async () => {
@@ -2959,10 +2957,9 @@ test("10.5 v0.4.1 Effort step-down rules: dispatchable efforts, encoded model ID
       { id: "claude_opus_med", provider: "claude", account: "claude", model: "claude-opus-5-5", effort: "medium", when: { max_reasoning_depth: 1 } },
     ],
   });
-  assert.equal(withInapplicableSibling.allCandidates.length, 1);
-  assert.equal(withInapplicableSibling.allCandidates[0].id, "claude_opus_high");
-  assert.equal(withInapplicableSibling.allCandidates[0].effort, "medium");
-  assert.equal(withInapplicableSibling.allCandidates[0].realtime_stepped_from, "high");
+  assert.deepEqual(withInapplicableSibling.ranking.map((c) => c.id), ["claude_opus_high"]);
+  assert.equal(withInapplicableSibling.ranking[0].effort, "medium");
+  assert.equal(withInapplicableSibling.ranking[0].realtime_stepped_from, "high");
 
   // (c) When the medium sibling is disabled, unavailable, or in launch_failures cooldown -> `claude_opus_high` does NOT defer and steps down, past a disabled effort
   const withDisabledSibling = rankCandidates(rtProfile, {
