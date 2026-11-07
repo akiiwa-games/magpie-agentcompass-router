@@ -340,6 +340,8 @@ run_isolation_and_hash_selftest() {
 }
 run_isolation_and_hash_selftest
 
+export PLUGIN_COMMIT="${PLUGIN_COMMIT:-}" BASELINE_COMMIT="${BASELINE_COMMIT:-}"
+
 if [ -n "${REAL_CODEX_AUTH:-}${REAL_CLAUDE_AUTH:-}${REAL_GROK_AUTH:-}" ]; then
   prlimit --pid $$ --core=1:1
   [ -x "$SANDBOX/bun" ] || { echo "[ABORT] Copying a real sign-in takes $SCRATCH/bun-linux-musl" >&2; exit 70; }
@@ -378,9 +380,12 @@ else
   export SCRATCH
   sh "$SANDBOX/run.sh" --in-sandbox &
 fi
-wait $!
+e2e_rc=0
+wait $! || e2e_rc=$?
 
-cp "$SANDBOX/e2e-report.json" "$REPO/docs/linux-sandbox-e2e-report.json"
+if [ -f "$SANDBOX/e2e-report.json" ]; then
+  cp "$SANDBOX/e2e-report.json" "${REPORT_OUT:-$REPO/docs/linux-sandbox-e2e-report.json}"
+fi
 
 if [ -n "$HOST_SIGN_INS" ]; then
   crashes_now=$(new_crash_dumps_count)
@@ -398,3 +403,5 @@ if [ -n "$HOST_SIGN_INS" ]; then
     exit 1
   fi
 fi
+
+exit "$e2e_rc"

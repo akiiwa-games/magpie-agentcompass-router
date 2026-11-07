@@ -488,6 +488,8 @@ async function main() {
           needs_visual: false,
           needs_gui: false,
           local_only: false,
+          multi_task: false,
+          task_count: "1",
         };
       } else if (/brainstorm|first-principles|creative|novel/i.test(userPrompt)) {
         profile = {
@@ -502,6 +504,8 @@ async function main() {
           needs_visual: false,
           needs_gui: false,
           local_only: false,
+          multi_task: false,
+          task_count: "1",
         };
       } else if (/standalone|self-contained|lru cache/i.test(userPrompt)) {
         profile = {
@@ -516,6 +520,8 @@ async function main() {
           needs_visual: false,
           needs_gui: false,
           local_only: false,
+          multi_task: false,
+          task_count: "1",
         };
       } else if (/translate|spanish|french/i.test(userPrompt)) {
         profile = {
@@ -530,6 +536,8 @@ async function main() {
           needs_visual: false,
           needs_gui: false,
           local_only: false,
+          multi_task: false,
+          task_count: "1",
         };
       } else {
         profile = {
@@ -544,6 +552,8 @@ async function main() {
           needs_visual: false,
           needs_gui: false,
           local_only: false,
+          multi_task: false,
+          task_count: "1",
         };
       }
 
@@ -834,6 +844,8 @@ async function main() {
       needs_gui: false,
       local_only: false,
       realtime_loop: false,
+      multi_task: false,
+      task_count: "1",
     });
     const PROFILE = {
       ideation: answer("direction_reasoning", "advisory", 3, 0, 2, 3, 3, 1),
@@ -994,7 +1006,7 @@ async function main() {
       assert.deepEqual(picked, {
         ideation: "gemini-4-argon-high",
         coding: "gpt-6.1-sol",
-        bulk: "gemini-3.8-flash-high",
+        bulk: "gpt-6-luna",
         debug: "claude-opus-5-5",
       });
       assert.equal(up1.reasoning_effort, "high");
@@ -1160,7 +1172,7 @@ async function main() {
       const r6e = await postChat({ model: "agentcompass/auto", profile: PROFILE.bulk, messages: [userMsg(`${BULK} [6e]`)] });
       assert.equal(r6e.status, 200);
       const up6e = lastUp();
-      assert.equal(up6e.model, "gemini-3.8-flash-high");
+      assert.equal(up6e.model, "gpt-6-luna");
       assert.equal(scorerCalls.length, calls6e, "Mode A must not touch the classifier even when it is down");
 
       // Restore
@@ -1402,7 +1414,7 @@ async function main() {
       );
       assert.equal(resp8d.status, 200);
       const up8d = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up8d.model, "gemini-3.8-flash-high", "A new session must be routed independently of another session's affinity");
+      assert.equal(up8d.model, "gpt-6-luna", "A new session must be routed independently of another session's affinity");
 
       assert.equal(scorerCalls.length, scorerBefore8, "Mode A session handling must make zero scorer calls");
 
@@ -1692,8 +1704,8 @@ async function main() {
       // 10a. The same four tasks, off and on
       const pairs = {
         ideation: [IDEATION, "gemini-4-argon-high:high", "gpt-6-astra:medium"],
-        coding: [CODING, "gpt-6.1-sol:high", "gpt-6.1-sol:medium"],
-        bulk: [BULK, "gemini-3.8-flash-high:high", "claude-sonnet-5-5:low"],
+        coding: [CODING, "gpt-6.1-sol:high", "gpt-6-sol:high"],
+        bulk: [BULK, "gpt-6-luna:high", "gpt-6-luna:high"],
         debug: [DEBUG, "claude-opus-5-5:xhigh", "claude-opus-5-5:medium"],
       };
       const rtWith = (profile) => ({ ...rt, profile });
@@ -1711,7 +1723,7 @@ async function main() {
       assert.deepEqual(flagsForwarded, [], "realtime_loop and profile are for the router; a real upstream rejects a field it does not know");
 
       // 10b. A pool of one slow bundle steps down instead of sending the listed xhigh
-      await setPluginOptions({ ...basePluginOptions, candidateModels: ["upstream/claude-opus-5-5:xhigh"] });
+      await setPluginOptions({ ...basePluginOptions, candidateModels: [{ model: "upstream/claude-opus-5-5", effort: "xhigh" }] });
       const steppedPlain = await route(`${DEBUG} [10b off]`, { profile: PROFILE.debug });
       const stepped = await route(`${DEBUG} [10b on]`, rtWith(PROFILE.debug));
       assert.equal(routedAs(steppedPlain), "claude-opus-5-5:xhigh");
@@ -1737,7 +1749,7 @@ async function main() {
       const responses = await postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${CODING} [10e responses]` }] }], ...rtWith(PROFILE.coding) }, gwHeaders);
       assert.equal(responses.status, 200);
       const onResponses = lastUp();
-      assert.equal(routedAs(onResponses), "gpt-6.1-sol:medium");
+      assert.equal(routedAs(onResponses), "gpt-6-sol:high");
       assert.equal(onResponses.path, "/v1/responses");
       assert.ok(!("realtime_loop" in onResponses.body));
 
@@ -1752,7 +1764,7 @@ async function main() {
       assert.equal(streamed.status, 200);
       assert.ok((await streamed.text()).includes("[DONE]"));
       const onStream = lastUp();
-      assert.equal(routedAs(onStream), "gpt-6.1-sol:medium");
+      assert.equal(routedAs(onStream), "gpt-6-sol:high");
       assert.ok(!("realtime_loop" in onStream.body));
 
       await setPluginOptions({ ...basePluginOptions, realtime_loop: true });
@@ -1905,11 +1917,11 @@ async function main() {
       assert.ok(argonLines[argonLines.length - 1].includes("gemini-4-argon-high"));
       assert.ok(argonLines[argonLines.length - 1].includes("below the realtime_loop floor"));
 
-      // 12b. Pinned without realtime_loop: routing as if no pin existed, no warning
+      // 12b. Pinned without realtime_loop: under Contract R3 pins are honored in every mode, with no realtime slow-model warning
       const pinnedPlain = await route(`${DEBUG} [12b]`, { profile: PROFILE.debug });
-      assert.equal(routedAs(pinnedPlain), "claude-opus-5-5:xhigh");
+      assert.equal(routedAs(pinnedPlain), "gemini-4-argon-high:high");
       await new Promise((r) => setTimeout(r, 300));
-      assert.equal(warningsLogged().length, before + 2, "Without realtime_loop a pin neither routes nor warns");
+      assert.equal(warningsLogged().length, before + 2, "Without realtime_loop a pin routes without a slow-model warning");
 
       // 12c. A pinned slow effort is not stepped down
       await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/claude-opus-5-5", pinnedEffort: "xhigh" });
@@ -2200,6 +2212,11 @@ async function main() {
       const observerDir = path.join(PLUGIN_DIR, "test", "fixtures", "route-observer");
       const realLogs = [];
       let realProc = null;
+      const accountsReport = {};
+      const accountFailures = [];
+      let realClassifierRouting = null;
+      let singleValidAccountWithInvalidPeers = null;
+      let allAccountsUnavailable503 = null;
       try {
         for (const dir of ["home", "tmp", "config", "cache", "data", "state"]) fs.mkdirSync(path.join(root, dir), { recursive: true, mode: 0o700 });
         for (const a of REAL_ACCOUNTS) {
@@ -2295,9 +2312,11 @@ async function main() {
         };
         const pairs = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "test", "fixtures", "realtime-classifier-pairs.json"), "utf8")).cases;
         const { scoreTaskLive } = await import(path.join(PLUGIN_DIR, "src", "scorer-live.js"));
+        const { onRequest: hookOnRequest } = await import(path.join(PLUGIN_DIR, "src", "hooks.js"));
+        const { onRequest: mwOnRequest, onAccount: mwOnAccount } = await import(path.join(PLUGIN_DIR, "src", "middleware.js"));
 
-        const accountsReport = {};
         for (const [index, a] of REAL_ACCOUNTS.entries()) {
+          const logStartIdx = realLogs.join("").split("\n").length;
           // The sign-in's models come in a moment after the gateway starts
           const wanted = [...a.pool, a.named].map((m) => `${a.name}/${m}`);
           let served = [];
@@ -2306,7 +2325,6 @@ async function main() {
             const listed = await (await fetch(`http://127.0.0.1:${realGw}/v1/models`, { headers: gwHeaders })).json();
             served = (listed.data || []).map((m) => m.id);
           }
-          for (const m of wanted) assert.ok(served.includes(m), `the ${a.name} sign-in must serve ${m}`);
           await realWebPost("options", { Options: optionsFor(a) });
 
           // The same requests on the mock upstream, with the same pool under its own provider name. Each account has its own
@@ -2332,25 +2350,17 @@ async function main() {
             realtime_loop: true,
           });
           const named = await callReal("/v1/chat/completions", { model: namedModel, messages: [userMsg(`Say OK.${REPLY}`)], realtime_loop: true });
-          for (const [name, call] of Object.entries({ plain, live, liveResponses, named })) {
-            assert.equal(call.status, 200, `${a.name} ${name} on the real upstream: ${call.error}`);
-            assert.ok(call.replied, `${a.name} ${name}: the real upstream must answer with text`);
-            assert.equal(call.sent?.flag, false, `${a.name} ${name}: realtime_loop must not go on to the real upstream`);
-            assert.equal(call.sent?.provider, a.name, `${a.name} ${name}: served by this sign-in`);
-          }
-          assert.equal(asRoute(plain.sent), mockPlainRoute, `${a.name} non-realtime: the real upstream's route must be the mock's`);
-          assert.equal(asRoute(live.sent), mockLiveRoute, `${a.name} realtime: the real upstream's route must be the mock's`);
-          assert.notEqual(mockPlainRoute, mockLiveRoute, `${a.name}: the pair must show realtime routing doing something`);
 
           // Control: with AgentCompass off the flag does go on, so the observer's false above means something
           await realWebPost("off", { Off: true });
           const control = await callReal("/v1/chat/completions", { model: namedModel, messages: [userMsg(`Say OK.${REPLY}`)], realtime_loop: true });
           await realWebPost("off", { Off: false });
-          assert.equal(control.sent?.flag, true, `${a.name}: with AgentCompass off the observer must see the flag`);
 
           // The classifier on a real endpoint: scoreTaskLive through this gateway, on the 12 paired hard cases
+          // (If namedModel itself failed upstream, still probe pair[0] to capture the exact classifier error without hanging 12x)
+          const pairsToRun = named.status === 200 ? pairs : pairs.slice(0, 1);
           const scored = [];
-          for (const c of pairs) {
+          for (const c of pairsToRun) {
             const { profile, meta } = await scoreTaskLive(
               { objective: c.task },
               {
@@ -2378,48 +2388,460 @@ async function main() {
           const agree = answered.filter((s) => s.got === s.expected);
           const kindAgree = answered.filter((s) => s.gotKind === s.expectedKind);
           const missed = scored.filter((s) => s.got !== s.expected || s.source !== "system_one_live");
-          assert.equal(answered.length, pairs.length, `${a.name}: every pair must be answered by the real classifier, not a fallback: ${JSON.stringify(missed)}`);
+          const acctDiagLines = realLogs
+            .join("")
+            .split("\n")
+            .slice(logStartIdx)
+            .filter((l) => /(?:^|\s)(?:claude|codex|grok|gateway):/.test(l))
+            .slice(-12)
+            .map((l) => redactSecrets(l));
 
           accountsReport[a.name] = {
-            pass: true,
+            pass: false,
             upstream: `${a.name} sign-in, only the fields test/sign-in-copy.mjs lists`,
             signInFields: a.fields,
             routes: {
-              nonRealtime: { real: asRoute(plain.sent), mock: mockPlainRoute, ms: plain.ms, status: plain.status },
-              realtime: { real: asRoute(live.sent), mock: mockLiveRoute, ms: live.ms, status: live.status },
-              realtimeResponses: { real: asRoute(liveResponses.sent), ms: liveResponses.ms, status: liveResponses.status },
-              namedDirectly: { real: asRoute(named.sent), ms: named.ms, status: named.status },
+              nonRealtime: { real: asRoute(plain.sent), mock: mockPlainRoute, ms: plain.ms, status: plain.status, ...(plain.error ? { error: plain.error } : {}) },
+              realtime: { real: asRoute(live.sent), mock: mockLiveRoute, ms: live.ms, status: live.status, ...(live.error ? { error: live.error } : {}) },
+              realtimeResponses: { real: asRoute(liveResponses.sent), ms: liveResponses.ms, status: liveResponses.status, ...(liveResponses.error ? { error: liveResponses.error } : {}) },
+              namedDirectly: { real: asRoute(named.sent), ms: named.ms, status: named.status, ...(named.error ? { error: named.error } : {}) },
             },
-            flagSentOn: false,
+            flagSentOn: Boolean(plain.sent?.flag || live.sent?.flag || liveResponses.sent?.flag || named.sent?.flag),
             controlWithPluginOff: { observerSawFlag: control.sent?.flag, status: control.status, error: control.error },
             classifier: {
               model: namedModel,
               cases: pairs.length,
               answered: answered.length,
-              msPerCase: [Math.min(...answered.map((s) => s.ms)), Math.max(...answered.map((s) => s.ms))],
+              msPerCase: answered.length > 0 ? [Math.min(...answered.map((s) => s.ms)), Math.max(...answered.map((s) => s.ms))] : null,
               realtimeLoopAgreement: `${agree.length}/${pairs.length}`,
               workKindAgreement: `${kindAgree.length}/${pairs.length}`,
               disagreements: scored
                 .filter((s) => s.got !== s.expected || s.gotKind !== s.expectedKind)
-                .map(({ id, expected, got, expectedKind, gotKind }) => ({ id, expected, got, expectedKind, gotKind })),
+                .map(({ id, expected, got, expectedKind, gotKind, source, error }) => ({ id, expected, got, expectedKind, gotKind, ...(source !== "system_one_live" ? { source, error } : {}) })),
             },
           };
-          console.log(
-            `[PASS] Scenario 13 (real upstream, ${a.name}): non-realtime ${asRoute(plain.sent)} (mock ${mockPlainRoute}) ${plain.status} in ${plain.ms}ms; realtime ${asRoute(live.sent)} (mock ${mockLiveRoute}) ${live.status} in ${live.ms}ms; /v1/responses ${asRoute(liveResponses.sent)} ${liveResponses.status}; named ${asRoute(named.sent)} ${named.status}; flag on the wire: none (plugin off control: observer ${control.sent?.flag}, HTTP ${control.status}); classifier ${namedModel}: realtime_loop ${agree.length}/${pairs.length}, work_kind ${kindAgree.length}/${pairs.length}`
-          );
+
+          try {
+            for (const m of wanted) assert.ok(served.includes(m), `the ${a.name} sign-in must serve ${m}`);
+            for (const [name, call] of Object.entries({ plain, live, liveResponses, named })) {
+              assert.equal(call.status, 200, `${a.name} ${name} on the real upstream: ${call.error}`);
+              assert.ok(call.replied, `${a.name} ${name}: the real upstream must answer with text`);
+              assert.equal(call.sent?.flag, false, `${a.name} ${name}: realtime_loop must not go on to the real upstream`);
+              assert.equal(call.sent?.provider, a.name, `${a.name} ${name}: served by this sign-in`);
+            }
+            assert.equal(asRoute(plain.sent), mockPlainRoute, `${a.name} non-realtime: the real upstream's route must be the mock's`);
+            assert.equal(asRoute(live.sent), mockLiveRoute, `${a.name} realtime: the real upstream's route must be the mock's`);
+            assert.notEqual(mockPlainRoute, mockLiveRoute, `${a.name}: the pair must show realtime routing doing something`);
+            assert.equal(control.sent?.flag, true, `${a.name}: with AgentCompass off the observer must see the flag`);
+            assert.equal(answered.length, pairs.length, `${a.name}: every pair must be answered by the real classifier, not a fallback: ${JSON.stringify(missed)}`);
+
+            accountsReport[a.name].pass = true;
+            console.log(
+              `[PASS] Scenario 13 (real upstream, ${a.name}): non-realtime ${asRoute(plain.sent)} (mock ${mockPlainRoute}) ${plain.status} in ${plain.ms}ms; realtime ${asRoute(live.sent)} (mock ${mockLiveRoute}) ${live.status} in ${live.ms}ms; /v1/responses ${asRoute(liveResponses.sent)} ${liveResponses.status}; named ${asRoute(named.sent)} ${named.status}; flag on the wire: none (plugin off control: observer ${control.sent?.flag}, HTTP ${control.status}); classifier ${namedModel}: realtime_loop ${agree.length}/${pairs.length}, work_kind ${kindAgree.length}/${pairs.length}`
+            );
+          } catch (acctErr) {
+            accountsReport[a.name].pass = false;
+            accountsReport[a.name].failure = redactSecrets(acctErr.message).slice(0, 500);
+            if (acctDiagLines.length > 0) accountsReport[a.name].gatewayDiagnostics = acctDiagLines;
+            accountFailures.push({ account: a.name, error: acctErr });
+            console.error(
+              `[FAIL] Scenario 13 (real upstream, ${a.name}): ${redactSecrets(acctErr.message).slice(0, 400)} | diag: ${acctDiagLines.join(" | ")}`
+            );
+          }
         }
 
-        report.scenarios.scenario13_real_upstream = { pass: true, isolation, accounts: accountsReport };
+        // =====================================================================
+        // Scenario 13 Extended Real-Environment Coverage:
+        // 13A. Real routing with a configured classifier (real model): text-only + screenshot+text
+        // 13B. Single available account while other accounts' credentials are invalid: warn & skip invalid, dispatch valid
+        // 13C. All accounts unavailable: HTTP 503 with account warnings
+        // =====================================================================
+        const workingAcct =
+          REAL_ACCOUNTS.find((a) => accountsReport[a.name]?.pass === true) ||
+          REAL_ACCOUNTS.find((a) => accountsReport[a.name]?.routes?.nonRealtime?.status === 200) ||
+          REAL_ACCOUNTS[0];
+        const scorerModelId = `${workingAcct.name}/${workingAcct.named}`;
+        const classifierCandidatePool = [
+          ...workingAcct.pool.map((m) => `${workingAcct.name}/${m}`),
+          ...(workingAcct.name !== "grok" ? ["grok/grok-4.7-build-fast"] : []),
+        ];
+        const realClassifierOpts = {
+          enableDecisionProvider: true,
+          decisionProviderDetails: true,
+          injectProtocolEffort: true,
+          useCache: false,
+          allowExternalScorer: true,
+          scorer: {
+            kind: "openai_compatible",
+            baseUrl: `http://127.0.0.1:${realGw}/v1`,
+            apiKey: "sk-local-agent",
+            model: scorerModelId,
+            timeoutMs: 55_000,
+          },
+          candidateModels: classifierCandidatePool,
+        };
+        await realWebPost("options", { Options: realClassifierOpts });
+
+        // 13A-1: Text-only request routed via real classifier (no caller profile)
+        const textPrompt13a = `${CODING} [13A-text] Reply with exactly: OK`;
+        const sysTextResp = await fetch(`http://127.0.0.1:${realGw}/v1/systemone`, {
+          method: "POST",
+          headers: gwHeaders,
+          body: JSON.stringify({
+            model: "agentcompass/agentcompass-systemone",
+            messages: [userMsg(textPrompt13a)],
+          }),
+          signal: AbortSignal.timeout(REAL_TIMEOUT_MS),
+        });
+        assert.equal(sysTextResp.status, 200, `13A /v1/systemone text request failed: ${sysTextResp.status}`);
+        const sysTextJson = await sysTextResp.json();
+        assert.equal(sysTextJson.agentcompass?.ok, true, `13A /v1/systemone text must route: ${JSON.stringify(sysTextJson.agentcompass)}`);
+        assert.equal(sysTextJson.agentcompass?.scorer?.source, "system_one_live", "13A text profile source must be system_one_live");
+        assert.equal(sysTextJson.agentcompass?.scorer?.model, scorerModelId, "13A text scorer model must match configured real model");
+        assert.equal(sysTextJson.agentcompass?.profile?.needs_visual, false, "13A text-only request must have needs_visual=false");
+
+        const hookTextBody = { model: "agentcompass/auto", messages: [userMsg(`${CODING} [13A-hook-text] Reply with exactly: OK`)] };
+        const hookTextCtx = { protocol: "chat", options: realClassifierOpts, state: {} };
+        await hookOnRequest(hookTextBody, hookTextCtx);
+        assert.equal(hookTextCtx.state.route?.scorer?.source, "system_one_live", "13A hookOnRequest text profile source must be system_one_live");
+        assert.equal(hookTextCtx.state.route?.profile?.needs_visual, false, "13A hookOnRequest text needs_visual must be false");
+        mwOnRequest(hookTextBody, hookTextCtx);
+        const textRoutedCall = await callReal("/v1/chat/completions", hookTextBody);
+        assert.equal(textRoutedCall.status, 200, `13A textRoutedCall on real upstream failed: ${textRoutedCall.error}`);
+        assert.ok(textRoutedCall.replied, "13A textRoutedCall must reply with text");
+
+        // 13A-2: Screenshot + text request routed via real classifier (no caller profile)
+        const TINY_PNG_DATA_URI =
+          "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+        const visionPrompt13a =
+          "Inspect this screenshot of the login dialog and fix the CSS flex alignment bug in src/Login.tsx. Reply with exactly: OK";
+        const visionMessages13a = [
+          {
+            role: "user",
+            content: [
+              { type: "text", text: visionPrompt13a },
+              { type: "image_url", image_url: { url: TINY_PNG_DATA_URI } },
+            ],
+          },
+        ];
+        const sysVisResp = await fetch(`http://127.0.0.1:${realGw}/v1/systemone`, {
+          method: "POST",
+          headers: gwHeaders,
+          body: JSON.stringify({
+            model: "agentcompass/agentcompass-systemone",
+            messages: visionMessages13a,
+          }),
+          signal: AbortSignal.timeout(REAL_TIMEOUT_MS),
+        });
+        assert.equal(sysVisResp.status, 200, `13A /v1/systemone screenshot+text request failed: ${sysVisResp.status}`);
+        const sysVisJson = await sysVisResp.json();
+        assert.equal(sysVisJson.agentcompass?.ok, true, `13A /v1/systemone screenshot+text must route: ${JSON.stringify(sysVisJson.agentcompass)}`);
+        assert.equal(sysVisJson.agentcompass?.scorer?.source, "system_one_live", "13A screenshot+text profile source must be system_one_live");
+        assert.equal(sysVisJson.agentcompass?.scorer?.model, scorerModelId, "13A screenshot+text scorer model must match configured real model");
+        assert.equal(sysVisJson.agentcompass?.profile?.needs_visual, true, "13A screenshot+text request must have needs_visual=true");
+        assert.ok(!String(sysVisJson.agentcompass?.targetModel || "").includes("grok-4.7"), "13A screenshot+text must exclude text-only grok-4.7-build-fast");
+
+        const hookVisBody = {
+          model: "agentcompass/auto",
+          messages: [
+            {
+              role: "user",
+              content: [
+                { type: "text", text: `${visionPrompt13a} [hook]` },
+                { type: "image_url", image_url: { url: TINY_PNG_DATA_URI } },
+              ],
+            },
+          ],
+        };
+        const hookVisCtx = { protocol: "chat", options: realClassifierOpts, state: {} };
+        await hookOnRequest(hookVisBody, hookVisCtx);
+        assert.equal(hookVisCtx.state.route?.scorer?.source, "system_one_live", "13A hookOnRequest screenshot+text profile source must be system_one_live");
+        assert.equal(hookVisCtx.state.route?.profile?.needs_visual, true, "13A hookOnRequest screenshot+text needs_visual must be true");
+        assert.ok(!String(hookVisCtx.state.route?.targetModel || "").includes("grok-4.7"), "13A hookOnRequest screenshot+text must exclude text-only model");
+        mwOnRequest(hookVisBody, hookVisCtx);
+        const visRoutedCall = await callReal("/v1/chat/completions", hookVisBody);
+        assert.equal(visRoutedCall.status, 200, `13A visRoutedCall on real upstream failed: ${visRoutedCall.error}`);
+        assert.ok(visRoutedCall.replied, "13A visRoutedCall must reply with text");
+
+        realClassifierRouting = {
+          pass: true,
+          classifierModel: scorerModelId,
+          candidatePool: classifierCandidatePool,
+          textRequest: {
+            profileSource: hookTextCtx.state.route.scorer.source,
+            workKind: hookTextCtx.state.route.profile.work_kind,
+            needsVisual: hookTextCtx.state.route.profile.needs_visual,
+            finalModel: hookTextCtx.state.route.modelWithEffort,
+            upstreamObserved: asRoute(textRoutedCall.sent),
+            status: textRoutedCall.status,
+            ms: textRoutedCall.ms,
+          },
+          screenshotPlusTextRequest: {
+            profileSource: hookVisCtx.state.route.scorer.source,
+            workKind: hookVisCtx.state.route.profile.work_kind,
+            needsVisual: hookVisCtx.state.route.profile.needs_visual,
+            finalModel: hookVisCtx.state.route.modelWithEffort,
+            upstreamObserved: asRoute(visRoutedCall.sent),
+            status: visRoutedCall.status,
+            ms: visRoutedCall.ms,
+          },
+        };
+        console.log(
+          `[PASS] Scenario 13A (real classifier routing via ${scorerModelId}): text -> source=${realClassifierRouting.textRequest.profileSource}, needs_visual=${realClassifierRouting.textRequest.needsVisual}, final=${realClassifierRouting.textRequest.finalModel} (upstream ${realClassifierRouting.textRequest.upstreamObserved}, HTTP ${textRoutedCall.status}); screenshot+text -> source=${realClassifierRouting.screenshotPlusTextRequest.profileSource}, needs_visual=${realClassifierRouting.screenshotPlusTextRequest.needsVisual}, final=${realClassifierRouting.screenshotPlusTextRequest.finalModel} (upstream ${realClassifierRouting.screenshotPlusTextRequest.upstreamObserved}, HTTP ${visRoutedCall.status})`
+        );
+
+        // 13B: Single available account while other accounts' credentials are invalid: warn & do not dispatch invalid accounts
+        const nowIso13 = new Date().toISOString();
+        const winLater13 = new Date(Date.now() + 4 * 3600_000).toISOString();
+        const winWeek13 = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
+        const invalidProviders13b = ["codex", "claude", "grok"].filter((p) => p !== workingAcct.name);
+        const singleValidQuotas = [
+          {
+            provider: workingAcct.name,
+            account: `${workingAcct.name}-valid`,
+            plan: workingAcct.name === "claude" ? "max20" : "pro",
+            status: "ok",
+            updated_at: nowIso13,
+            windows: [
+              { name: "five_hour", remaining: 85, resets_at: winLater13 },
+              { name: "seven_day", remaining: 90, resets_at: winWeek13 },
+            ],
+          },
+          ...invalidProviders13b.map((p, idx) => ({
+            provider: p,
+            account: `${p}-invalid`,
+            plan: idx === 0 ? "max20" : "free",
+            status: idx === 0 ? "auth_failed" : "expired",
+            http_status: idx === 0 ? 401 : 403,
+            error: idx === 0 ? "OAuth token expired (401 Unauthorized)" : "API key invalid or plan inactive",
+            updated_at: nowIso13,
+            windows: [{ name: "five_hour", remaining: 90, resets_at: winLater13 }],
+          })),
+        ];
+        const singleValidQuotasPath = path.join(root, "quotas-single-valid.json");
+        fs.writeFileSync(singleValidQuotasPath, JSON.stringify(singleValidQuotas, null, 2));
+        const multiProviderPool13 = [
+          "claude/claude-opus-5-5",
+          "claude/claude-sonnet-5-5",
+          "codex/gpt-6.1-sol",
+          "codex/gpt-6-astra",
+          "grok/grok-4.7-build-fast",
+        ];
+        const singleValidOpts = {
+          enableDecisionProvider: true,
+          decisionProviderDetails: true,
+          injectProtocolEffort: true,
+          useCache: false,
+          quotas: singleValidQuotas,
+          quotasPath: singleValidQuotasPath,
+          candidateModels: multiProviderPool13,
+        };
+        await realWebPost("options", { Options: singleValidOpts });
+
+        const logsBefore13b = realLogs.join("").split("\n").length;
+        const sysSingleResp = await fetch(`http://127.0.0.1:${realGw}/v1/systemone`, {
+          method: "POST",
+          headers: gwHeaders,
+          body: JSON.stringify({
+            model: "agentcompass/agentcompass-systemone",
+            profile: PROFILE.debug,
+            messages: [userMsg(`${DEBUG} [13B-sys]`)],
+          }),
+          signal: AbortSignal.timeout(REAL_TIMEOUT_MS),
+        });
+        assert.equal(sysSingleResp.status, 200);
+        const sysSingleJson = await sysSingleResp.json();
+        assert.equal(sysSingleJson.agentcompass?.ok, true, "13B: single valid account must still route");
+        assert.ok(
+          sysSingleJson.agentcompass?.targetModel?.startsWith(`${workingAcct.name}/`),
+          `13B: must route to the single valid account (${workingAcct.name}), got ${sysSingleJson.agentcompass?.targetModel}`
+        );
+        for (const invProv of invalidProviders13b) {
+          assert.ok(
+            sysSingleJson.agentcompass?.warnings?.some((w) => w.includes(`${invProv}/${invProv}-invalid`) && w.includes("excluded from dispatch")),
+            `13B: must warn that ${invProv}/${invProv}-invalid is excluded from dispatch: ${JSON.stringify(sysSingleJson.agentcompass?.warnings)}`
+          );
+          const acctRow = sysSingleJson.agentcompass?.accounts?.find((r) => r.key === `${invProv}/${invProv}-invalid`);
+          assert.equal(acctRow?.dispatchable, false, `13B: ${invProv}/${invProv}-invalid must have dispatchable=false`);
+          assert.deepEqual(
+            mwOnAccount({ provider: invProv, name: `${invProv}-invalid` }, { options: singleValidOpts, state: {} }),
+            { skip: true },
+            `13B: onAccount must skip invalid account ${invProv}/${invProv}-invalid`
+          );
+        }
+        assert.equal(
+          mwOnAccount({ provider: workingAcct.name, name: `${workingAcct.name}-valid` }, { options: singleValidOpts, state: {} }),
+          undefined,
+          `13B: onAccount must allow valid account ${workingAcct.name}/${workingAcct.name}-valid`
+        );
+
+        const singleValidCall = await callReal("/v1/chat/completions", {
+          model: "agentcompass/auto",
+          profile: PROFILE.debug,
+          messages: [userMsg(`${DEBUG} [13B-chat] Reply with exactly: OK`)],
+        });
+        assert.equal(singleValidCall.status, 200, `13B singleValidCall failed: ${singleValidCall.error}`);
+        assert.ok(singleValidCall.replied, "13B singleValidCall must reply");
+        assert.equal(singleValidCall.sent?.provider, workingAcct.name, "13B singleValidCall must dispatch only to the valid provider");
+        const warnLines13b = realLogs
+          .join("")
+          .split("\n")
+          .slice(logsBefore13b)
+          .filter((l) => l.includes("excluded from dispatch"))
+          .map((l) => redactSecrets(l));
+        assert.ok(warnLines13b.length >= invalidProviders13b.length, "13B: Magpie log must record excluded-from-dispatch warnings for invalid accounts");
+
+        singleValidAccountWithInvalidPeers = {
+          pass: true,
+          validAccount: `${workingAcct.name}/${workingAcct.name}-valid`,
+          invalidAccounts: invalidProviders13b.map((p) => `${p}/${p}-invalid`),
+          accounts: sysSingleJson.agentcompass.accounts,
+          warnings: sysSingleJson.agentcompass.warnings,
+          routedModel: asRoute(singleValidCall.sent),
+          dispatchedProvider: singleValidCall.sent?.provider,
+          status: singleValidCall.status,
+          logWarningsCount: warnLines13b.length,
+        };
+        console.log(
+          `[PASS] Scenario 13B (single valid account, invalid peers skipped): routed ${singleValidAccountWithInvalidPeers.routedModel} via ${singleValidAccountWithInvalidPeers.dispatchedProvider} (HTTP ${singleValidCall.status}); warnings=${JSON.stringify(singleValidAccountWithInvalidPeers.warnings)}`
+        );
+
+        // 13C: All accounts unavailable: HTTP 503 with account warnings and zero upstream dispatch
+        const allInvalidQuotas = [
+          {
+            provider: "codex",
+            account: "codex-invalid",
+            plan: "pro",
+            status: "auth_failed",
+            http_status: 401,
+            error: "OAuth token expired (401 Unauthorized)",
+            updated_at: nowIso13,
+            windows: [{ name: "five_hour", remaining: 80, resets_at: winLater13 }],
+          },
+          {
+            provider: "claude",
+            account: "claude-invalid",
+            plan: "max20",
+            status: "auth_failed",
+            http_status: 401,
+            error: "OAuth token revoked (401 Unauthorized)",
+            updated_at: nowIso13,
+            windows: [{ name: "five_hour", remaining: 80, resets_at: winLater13 }],
+          },
+          {
+            provider: "grok",
+            account: "grok-invalid",
+            plan: "free",
+            status: "expired",
+            error: "API key invalid or plan inactive",
+            updated_at: nowIso13,
+            windows: [],
+          },
+        ];
+        const allInvalidQuotasPath = path.join(root, "quotas-all-invalid.json");
+        fs.writeFileSync(allInvalidQuotasPath, JSON.stringify(allInvalidQuotas, null, 2));
+        const allInvalidOpts = {
+          enableDecisionProvider: true,
+          decisionProviderDetails: true,
+          injectProtocolEffort: true,
+          useCache: false,
+          quotas: allInvalidQuotas,
+          quotasPath: allInvalidQuotasPath,
+          candidateModels: multiProviderPool13,
+        };
+        await realWebPost("options", { Options: allInvalidOpts });
+
+        const logsBefore13c = realLogs.join("").split("\n").length;
+        const obsBefore13c = observed().length;
+        const allInvalidResp = await fetch(`http://127.0.0.1:${realGw}/v1/chat/completions`, {
+          method: "POST",
+          headers: gwHeaders,
+          body: JSON.stringify({
+            model: "agentcompass/auto",
+            profile: PROFILE.coding,
+            messages: [userMsg(`${CODING} [13C-all-invalid]`)],
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        const allInvalidBodyText = redactSecrets(await allInvalidResp.text());
+        await new Promise((r) => setTimeout(r, 300));
+        const obsCalls13c = observed().length - obsBefore13c;
+        assert.equal(allInvalidResp.status, 503, `13C: when all accounts are unavailable, gateway must return HTTP 503, got ${allInvalidResp.status}: ${allInvalidBodyText}`);
+        assert.equal(obsCalls13c, 0, "13C: when all accounts are unavailable, 0 requests may be dispatched upstream");
+        assert.ok(allInvalidBodyText.includes("agentcompass:"), `13C: 503 body must include agentcompass refusal message, got ${allInvalidBodyText}`);
+
+        const sysAllInvalidResp = await fetch(`http://127.0.0.1:${realGw}/v1/systemone`, {
+          method: "POST",
+          headers: gwHeaders,
+          body: JSON.stringify({
+            model: "agentcompass/agentcompass-systemone",
+            profile: PROFILE.coding,
+            messages: [userMsg(`${CODING} [13C-sys-all-invalid]`)],
+          }),
+          signal: AbortSignal.timeout(30_000),
+        });
+        assert.equal(sysAllInvalidResp.status, 200);
+        const sysAllInvalidJson = await sysAllInvalidResp.json();
+        assert.equal(sysAllInvalidJson.agentcompass?.blocked, true, "13C /v1/systemone must report blocked=true");
+        assert.equal(sysAllInvalidJson.agentcompass?.targetModel, null, "13C /v1/systemone targetModel must be null");
+        for (const p of ["codex", "claude", "grok"]) {
+          assert.ok(
+            sysAllInvalidJson.agentcompass?.warnings?.some((w) => w.includes(`${p}/${p}-invalid`) && w.includes("excluded from dispatch")),
+            `13C: warnings must include ${p}/${p}-invalid excluded from dispatch: ${JSON.stringify(sysAllInvalidJson.agentcompass?.warnings)}`
+          );
+          const acctRow = sysAllInvalidJson.agentcompass?.accounts?.find((r) => r.key === `${p}/${p}-invalid`);
+          assert.equal(acctRow?.dispatchable, false, `13C: ${p}/${p}-invalid must have dispatchable=false`);
+        }
+        const warnLines13c = realLogs
+          .join("")
+          .split("\n")
+          .slice(logsBefore13c)
+          .filter((l) => l.includes("excluded from dispatch"))
+          .map((l) => redactSecrets(l));
+        assert.ok(warnLines13c.length >= 3, `13C: Magpie log must include warnings for all 3 unavailable accounts, got ${warnLines13c.length}`);
+
+        allAccountsUnavailable503 = {
+          pass: true,
+          status: allInvalidResp.status,
+          body: allInvalidBodyText.slice(0, 300),
+          upstreamDispatchedCalls: obsCalls13c,
+          accounts: sysAllInvalidJson.agentcompass.accounts,
+          warnings: sysAllInvalidJson.agentcompass.warnings,
+          logWarningsCount: warnLines13c.length,
+        };
+        console.log(
+          `[PASS] Scenario 13C (all accounts unavailable -> 503): HTTP ${allInvalidResp.status}, upstreamCalls=${obsCalls13c}, warnings=${JSON.stringify(allAccountsUnavailable503.warnings)}`
+        );
+
+        report.scenarios.scenario13_real_upstream = {
+          pass: accountFailures.length === 0,
+          isolation,
+          accounts: accountsReport,
+          realClassifierRouting,
+          singleValidAccountWithInvalidPeers,
+          allAccountsUnavailable503,
+        };
         report.steps.push({
-          test: "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases",
+          test: "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases, real classifier routing (text + screenshot), single valid account vs invalid peers, all accounts unavailable 503",
           ...report.scenarios.scenario13_real_upstream,
         });
+        if (accountFailures.length > 0) {
+          throw accountFailures[0].error;
+        }
         console.log(`[PASS] Scenario 13 (real upstream): accounts ${REAL_ACCOUNTS.map((a) => a.name).join(", ")}; isolation ${JSON.stringify(isolation)}`);
       } catch (err) {
-        report.scenarios.scenario13_real_upstream = { pass: false };
+        report.scenarios.scenario13_real_upstream = {
+          pass: false,
+          isolation,
+          accounts: accountsReport,
+          ...(realClassifierRouting ? { realClassifierRouting } : {}),
+          ...(singleValidAccountWithInvalidPeers ? { singleValidAccountWithInvalidPeers } : {}),
+          ...(allAccountsUnavailable503 ? { allAccountsUnavailable503 } : {}),
+          failure: redactSecrets(err.message).slice(0, 500),
+        };
         const logLines = realLogs.join("").split("\n");
         console.error(`[Linux Sandbox] Scenario 13 observer lines: ${logLines.filter((l) => l.includes("route-observer {")).slice(-8).join(" | ")}`);
-        const diagLines = logLines.filter((l) => /(?:^|\s)(?:claude|gateway):/.test(l)).slice(-12).map((l) => redactSecrets(l));
+        const diagLines = logLines.filter((l) => /(?:^|\s)(?:claude|codex|grok|gateway):/.test(l)).slice(-12).map((l) => redactSecrets(l));
         console.error(`[Linux Sandbox] Scenario 13 claude/gateway lines: ${diagLines.join(" | ")}`);
         throw err;
       } finally {
@@ -2438,6 +2860,10 @@ async function main() {
     fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
     console.log(`\n[Linux Sandbox] FULL-CHAIN E2E RUN PASSED! Report written to ${reportPath}`);
   } catch (err) {
+    try {
+      const reportPath = path.join(SANDBOX_ROOT, "e2e-report.json");
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2));
+    } catch {}
     // what Magpie said, and the last requests it sent upstream, for the failure to be read without a rerun
     console.error(`[Linux Sandbox] magpie web log (tail):
 ${magpieLogs.join("").slice(-6000)}`);

@@ -1,13 +1,13 @@
 {
-  "timestamp": "2026-11-07T05:33:56.620Z",
+  "timestamp": "2026-11-07T19:29:52.960Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
   "magpieVersion": "magpie 0.1.2891",
   "magpieBinarySha256": "ffa0785ccc41d093c8fdbc96351372c5f2553dc2cb67e5b0ec2b0fa8e3488c09",
-  "pluginCommit": "c5d59e8",
-  "baselineCommit": "ab8baba",
+  "pluginCommit": "6834bc0",
+  "baselineCommit": "f8403c7",
   "scenarios": {
     "scenario1_cli_lifecycle": {
       "pass": true,
@@ -20,7 +20,7 @@
       "marketListingPackage": "@magpie-community/gateway-agentcompass",
       "installedOwnName": "AgentCompass",
       "storedIconFile": "file:a100c6af45032ded.svg",
-      "readmeLength": 18626,
+      "readmeLength": 31496,
       "offBypassModel": "gpt-6-luna",
       "optionsUpdated": true
     },
@@ -31,16 +31,16 @@
       "carrierStripped": true,
       "scorerCalls": 0,
       "configuredScorerDelayMs": 1600,
-      "routedElapsedMs": 5,
-      "baselineElapsedMs": 1,
-      "overheadMs": 4,
+      "routedElapsedMs": 6,
+      "baselineElapsedMs": 3,
+      "overheadMs": 3,
       "noCandidateModelsStatus": 400
     },
     "scenario4_model_dna_differentiation": {
       "pass": true,
       "divergentIdeation": "gemini-4-argon-high:high",
       "selfContainedResponses": "gpt-6.1-sol:high",
-      "routineBulkWork": "gemini-3.8-flash-high:high",
+      "routineBulkWork": "gpt-6-luna:high",
       "coupledDebugging": "claude-opus-5-5:xhigh"
     },
     "scenario5_anthropic_and_sse_streaming": {
@@ -60,13 +60,14 @@
       "sseStreamEffort": "high",
       "sseReceivedDone": true
     },
-    "scenario6_system_one_degradation": {
+    "scenario6_classifier_unavailable": {
       "pass": true,
-      "healthyScorerModeB": "gemini-4-argon-high",
-      "http500FallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 307,
-      "modeAWithScorerDown": "gemini-3.8-flash-high"
+      "healthyClassifierModeB": "gemini-4-argon-high",
+      "http500ModeB": "gpt-6-luna",
+      "timeoutModeB": "gpt-6-luna",
+      "timeoutElapsedMs": 305,
+      "noClassifierModeB": "gpt-6-luna",
+      "modeAWithClassifierDown": "gpt-6-luna"
     },
     "scenario7_mode_b_systemone_group": {
       "pass": true,
@@ -83,63 +84,71 @@
       "firstTurnRouted": "claude-opus-5-5:xhigh",
       "midTurnToolLoopRouted": "claude-opus-5-5:xhigh",
       "shortFollowupRouted": "claude-opus-5-5:xhigh",
-      "otherSessionRouted": "gemini-3.8-flash-high:high",
+      "otherSessionRouted": "gpt-6-luna:high",
+      "toolLoopWithoutProfile": {
+        "outcomes": {
+          "404 no upstream call": 11,
+          "200 claude-opus-5-5:xhigh": 9
+        },
+        "asserted": false
+      },
       "scorerCalls": 0
     },
-    "scenario9_non_realtime_matches_origin_main": {
+    "scenario9_same_answers_match_baseline": {
       "pass": true,
-      "requests": 408,
-      "served": 408,
+      "requests": 352,
+      "served": 352,
       "diffs": 0,
-      "distinctRoutes": 33,
+      "followupsRoutedAgainAsTheirFirstRequest": [],
+      "distinctRoutes": 27,
       "perPool": {
         "default": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "README pool": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 12
-        },
-        "bare strings": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "dated/-latest/-preview/-chat": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 12
-        },
-        "{model} objects": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "{id,provider,model} objects": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "bundles with effort": {
-          "requests": 51,
+          "requests": 44,
           "diffs": 0,
           "routes": 10
         },
-        "pin options, which only act on realtime routing": {
-          "requests": 51,
+        "README pool": {
+          "requests": 44,
           "diffs": 0,
           "routes": 11
+        },
+        "bare strings": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "dated/-latest/-preview/-chat": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "{model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "{id,provider,model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 8
+        },
+        "bundles with effort": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "pin options, which every mode honors (contract R3)": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 3
         }
       },
       "newTurnSampling": {
         "samplesPerRow": 8,
         "rows": 48,
         "diffs": 0,
-        "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 36
+        "rowsComparedOnBothBuilds": 40,
+        "baselineRowsThatFlipOnThePool": 31
       }
     },
     "scenario10_realtime_routing": {
@@ -151,11 +160,11 @@
         },
         "coding": {
           "nonRealtime": "gpt-6.1-sol:high",
-          "realtime": "gpt-6.1-sol:medium"
+          "realtime": "gpt-6-sol:high"
         },
         "bulk": {
-          "nonRealtime": "gemini-3.8-flash-high:high",
-          "realtime": "claude-sonnet-5-5:low"
+          "nonRealtime": "gpt-6-luna:high",
+          "realtime": "gpt-6-luna:high"
         },
         "debug": {
           "nonRealtime": "claude-opus-5-5:xhigh",
@@ -164,13 +173,13 @@
       },
       "slowBundleStepsDown": "claude-opus-5-5:xhigh -> claude-opus-5-5:medium",
       "argonOnlyPool": {
-        "status": 404,
+        "status": 503,
         "upstreamCalls": [],
-        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"}}\n"
+        "body": "{\"error\":{\"code\":null,\"message\":\"agentcompass: no_route: no candidate can serve this request\",\"param\":null,\"type\":\"api_error\"}}\n"
       },
-      "responses": "gpt-6.1-sol:medium",
+      "responses": "gpt-6-sol:high",
       "messages": "claude-opus-5-5:null",
-      "stream": "gpt-6.1-sol:medium",
+      "stream": "gpt-6-sol:high",
       "pluginWideOption": "gpt-6-astra:medium",
       "flagForwardedUpstream": false
     },
@@ -187,15 +196,22 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 17,
-          "claude-opus-5-5:xhigh": 3
+          "claude-opus-5-5:medium": 16,
+          "claude-opus-5-5:xhigh": 4
         },
-        "differFromTurn1": 3,
+        "differFromTurn1": 4,
         "asserted": false
+      },
+      "newTurnWithAnotherAnswer": {
+        "routes": {
+          "claude-opus-5-5:medium": 16,
+          "gpt-6-astra:medium": 4
+        },
+        "holdsOnlyOnARuntimeThatSawTheSession": true
       },
       "explicitFalse": {
         "realtime": "gpt-6-astra:medium",
-        "afterFalse": "gemini-4-argon-high:high"
+        "afterFalse": "gpt-6-astra:high"
       },
       "anthropic": [
         "claude-opus-5-5:null",
@@ -206,14 +222,128 @@
       "pass": true,
       "pinnedArgonIdeation": "gemini-4-argon-high:high",
       "pinnedArgonDebug": "gemini-4-argon-high:high",
-      "pinWithoutRealtime": "claude-opus-5-5:xhigh",
+      "pinWithoutRealtime": "gemini-4-argon-high:high",
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 05:34:17 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 19:30:18 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 19:30:18 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 19:30:18 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
+    },
+    "scenario14_caller_profile_any_wording": {
+      "pass": true,
+      "requests": 902,
+      "perProfile": {
+        "bulk": {
+          "chat": {
+            "route": "gpt-6-luna:high",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "gpt-6-luna:high",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "gpt-6-luna:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "gpt-6-luna:high",
+            "wordings": 37
+          }
+        },
+        "debug": {
+          "chat": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "claude-opus-5-5:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 37
+          }
+        }
+      },
+      "control": {
+        "bulk": "gpt-6-luna:high",
+        "debug": "claude-opus-5-5:xhigh"
+      }
+    },
+    "scenario15_no_profile_not_routed": {
+      "pass": true,
+      "virtualNameWithoutDefault": {
+        "status": 404,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "namedModel": {
+        "chat": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "responses": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "messages": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "stream": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": null
+        }
+      },
+      "invalidProfile": {
+        "routed": false,
+        "notice": "未路由：分类不可用",
+        "reason": "invalid_caller_profile: task.profile.work_kind must be one of general_implementation, frontend_implementation, debug_review, bounded_bulk_work, "
+      },
+      "virtualNameWithDefault": {
+        "status": 200,
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "virtualNameNoDecisionProvider": {
+        "status": 502,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: getaddrinfo ENOTFOUND agentcompass.local\",\"param\":null,\"type\":\"api_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "asserted": false
+      },
+      "virtualNameNoTextDefaultInstall": {
+        "status": 200,
+        "upstreamCalls": 1,
+        "route": "gpt-6-luna:high"
+      },
+      "logLine": "2026/11/07 19:30:22 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: 未路由：分类不可用 (no_task_profile)"
     },
     "scenario13_real_upstream": {
       "pass": true,
@@ -252,23 +382,23 @@
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 8314,
+              "ms": 7294,
               "status": 200
             },
             "realtime": {
-              "real": "gpt-6.1-sol:medium",
-              "mock": "gpt-6.1-sol:medium",
-              "ms": 7164,
+              "real": "gpt-6-sol:high",
+              "mock": "gpt-6-sol:high",
+              "ms": 34223,
               "status": 200
             },
             "realtimeResponses": {
-              "real": "gpt-6.1-sol:medium",
-              "ms": 10629,
+              "real": "gpt-6-sol:high",
+              "ms": 25932,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1714,
+              "ms": 1740,
               "status": 200
             }
           },
@@ -283,18 +413,18 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3229,
-              12693
+              3202,
+              6457
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
             "disagreements": [
               {
-                "id": "non_realtime_fix_flash_sale_bot_en",
+                "id": "non_realtime_write_ticket_script_cn",
                 "expected": false,
                 "got": false,
-                "expectedKind": "debug_review",
-                "gotKind": "general_implementation"
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
               }
             ]
           }
@@ -320,23 +450,23 @@
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 7546,
+              "ms": 16326,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 30518,
+              "ms": 30992,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 26661,
+              "ms": 26019,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 2514,
+              "ms": 2718,
               "status": 200
             }
           },
@@ -351,12 +481,19 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              2726,
-              5994
+              2767,
+              7118
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "11/12",
+            "workKindAgreement": "10/12",
             "disagreements": [
+              {
+                "id": "non_realtime_write_ticket_script_cn",
+                "expected": false,
+                "got": false,
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
+              },
               {
                 "id": "non_realtime_analyze_orderbook_latency_en",
                 "expected": false,
@@ -397,23 +534,23 @@
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 33948,
+              "ms": 27347,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 15508,
+              "ms": 16683,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 13993,
+              "ms": 15033,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 2435,
+              "ms": 8894,
               "status": 200
             }
           },
@@ -428,8 +565,8 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              10057,
-              25323
+              10501,
+              21155
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
@@ -444,6 +581,157 @@
             ]
           }
         }
+      },
+      "realClassifierRouting": {
+        "pass": true,
+        "classifierModel": "codex/gpt-6-luna",
+        "candidatePool": [
+          "codex/gpt-6.1-sol",
+          "codex/gpt-6-astra",
+          "codex/gpt-6.1-terra",
+          "codex/gpt-6-sol",
+          "codex/gpt-6-luna",
+          "grok/grok-4.7-build-fast"
+        ],
+        "textRequest": {
+          "profileSource": "system_one_live",
+          "workKind": "self_contained_code",
+          "needsVisual": false,
+          "finalModel": "codex/gpt-6.1-sol:high",
+          "upstreamObserved": "gpt-6.1-sol:high",
+          "status": 200,
+          "ms": 7979
+        },
+        "screenshotPlusTextRequest": {
+          "profileSource": "system_one_live",
+          "workKind": "frontend_implementation",
+          "needsVisual": true,
+          "finalModel": "codex/gpt-6-astra:high",
+          "upstreamObserved": "gpt-6-astra:high",
+          "status": 200,
+          "ms": 8095
+        }
+      },
+      "singleValidAccountWithInvalidPeers": {
+        "pass": true,
+        "validAccount": "codex/codex-valid",
+        "invalidAccounts": [
+          "claude/claude-invalid",
+          "grok/grok-invalid"
+        ],
+        "accounts": [
+          {
+            "key": "codex/codex-valid",
+            "provider": "codex",
+            "account": "codex-valid",
+            "plan": "pro",
+            "plan_known": true,
+            "status": "ready",
+            "state": "ready",
+            "reason": null,
+            "last_success_at": "2026-11-07T19:40:44.268Z",
+            "dispatchable": true,
+            "warnings": []
+          },
+          {
+            "key": "claude/claude-invalid",
+            "provider": "claude",
+            "account": "claude-invalid",
+            "plan": "max20",
+            "plan_known": true,
+            "status": "auth_failed",
+            "state": "auth_failed",
+            "reason": "sign-in rejected (HTTP 401)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)"
+            ]
+          },
+          {
+            "key": "grok/grok-invalid",
+            "provider": "grok",
+            "account": "grok-invalid",
+            "plan": "free",
+            "plan_known": true,
+            "status": "plan_inactive",
+            "state": "plan_inactive",
+            "reason": "subscription is not active (free)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+            ]
+          }
+        ],
+        "warnings": [
+          "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)",
+          "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+        ],
+        "routedModel": "gpt-6-astra:high",
+        "dispatchedProvider": "codex",
+        "status": 200,
+        "logWarningsCount": 3
+      },
+      "allAccountsUnavailable503": {
+        "pass": true,
+        "status": 503,
+        "body": "{\"error\":{\"code\":null,\"message\":\"agentcompass: no_route: no candidate can serve this request\",\"param\":null,\"type\":\"api_error\"}}\n",
+        "upstreamDispatchedCalls": 0,
+        "accounts": [
+          {
+            "key": "codex/codex-invalid",
+            "provider": "codex",
+            "account": "codex-invalid",
+            "plan": "pro",
+            "plan_known": true,
+            "status": "auth_failed",
+            "state": "auth_failed",
+            "reason": "sign-in rejected (HTTP 401)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "codex/codex-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)"
+            ]
+          },
+          {
+            "key": "claude/claude-invalid",
+            "provider": "claude",
+            "account": "claude-invalid",
+            "plan": "max20",
+            "plan_known": true,
+            "status": "auth_failed",
+            "state": "auth_failed",
+            "reason": "sign-in rejected (HTTP 401)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)"
+            ]
+          },
+          {
+            "key": "grok/grok-invalid",
+            "provider": "grok",
+            "account": "grok-invalid",
+            "plan": "free",
+            "plan_known": true,
+            "status": "plan_inactive",
+            "state": "plan_inactive",
+            "reason": "subscription is not active (free)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+            ]
+          }
+        ],
+        "warnings": [
+          "no candidate is available: claude/claude-opus-5-5@low: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@medium: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@high: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@xhigh: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@max: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@low: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@medium: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@high: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@xhigh: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@max: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@low: ability 2.86 below the hard floor 3.10; codex/gpt-6.1-sol@low: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@medium: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@high: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@xhigh: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@max: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@low: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@medium: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@high: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@xhigh: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@max: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); grok/grok-4.7-build-fast@high: grok/grok-invalid: plan_inactive: subscription is not active (free)",
+          "codex/codex-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)",
+          "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)",
+          "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+        ],
+        "logWarningsCount": 6
       }
     }
   },
@@ -451,16 +739,16 @@
     {
       "test": "Scenario 2 — Plugin Market (`registry.json`), README Page, Icon Storage, Off/On Toggle & Options API",
       "storedIcon": "file:a100c6af45032ded.svg",
-      "readmeLength": 18626,
+      "readmeLength": 31496,
       "offBypassModel": "gpt-6-luna",
       "pass": true
     },
     {
-      "test": "Scenario 3: Mode A latency/budget (`agentcompass/auto` -> middleware.js [moejs]; 1,600ms scorer configured but never called; no candidateModels -> 400)",
+      "test": "Scenario 3: Mode A latency/budget (`agentcompass/auto` with a profile -> middleware.js [moejs]; 1,600ms classifier configured but never called; no candidateModels or defaultModel -> 400)",
       "routedModel": "claude-opus-5-5",
       "routedEffort": "xhigh",
-      "routedElapsedMs": 5,
-      "overheadMs": 4,
+      "routedElapsedMs": 6,
+      "overheadMs": 3,
       "pass": true
     },
     {
@@ -468,7 +756,7 @@
       "pass": true,
       "divergentIdeation": "gemini-4-argon-high:high",
       "selfContainedResponses": "gpt-6.1-sol:high",
-      "routineBulkWork": "gemini-3.8-flash-high:high",
+      "routineBulkWork": "gpt-6-luna:high",
       "coupledDebugging": "claude-opus-5-5:xhigh"
     },
     {
@@ -478,13 +766,14 @@
       "pass": true
     },
     {
-      "test": "Scenario 6: Degradation when System One is unavailable or slow (Mode B scorer HTTP 500 / timeout -> local heuristic; Mode A unaffected)",
+      "test": "Scenario 6: the classifier unavailable or slow (Mode B HTTP 500 / timeout / none configured -> not routed, the group's fallback; Mode A unaffected)",
       "pass": true,
-      "healthyScorerModeB": "gemini-4-argon-high",
-      "http500FallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 307,
-      "modeAWithScorerDown": "gemini-3.8-flash-high"
+      "healthyClassifierModeB": "gemini-4-argon-high",
+      "http500ModeB": "gpt-6-luna",
+      "timeoutModeB": "gpt-6-luna",
+      "timeoutElapsedMs": 305,
+      "noClassifierModeB": "gpt-6-luna",
+      "modeAWithClassifierDown": "gpt-6-luna"
     },
     {
       "test": "Scenario 7: Mode B (`group/compass-group` via `/v1/systemone` Decision Provider) — Rules, `none of these` Fallback & `effort=auto`",
@@ -503,64 +792,72 @@
       "firstTurnRouted": "claude-opus-5-5:xhigh",
       "midTurnToolLoopRouted": "claude-opus-5-5:xhigh",
       "shortFollowupRouted": "claude-opus-5-5:xhigh",
-      "otherSessionRouted": "gemini-3.8-flash-high:high",
+      "otherSessionRouted": "gpt-6-luna:high",
+      "toolLoopWithoutProfile": {
+        "outcomes": {
+          "404 no upstream call": 11,
+          "200 claude-opus-5-5:xhigh": 9
+        },
+        "asserted": false
+      },
       "scorerCalls": 0
     },
     {
-      "test": "Scenario 9: non-realtime requests reach the upstream as a second real Magpie running origin/main sends them (status, model, effort, full body)",
+      "test": "Scenario 9: given the answers the removed text rules gave, requests reach the upstream as a second real Magpie running the build that had them sends them (status, model, effort, full body)",
       "pass": true,
-      "requests": 408,
-      "served": 408,
+      "requests": 352,
+      "served": 352,
       "diffs": 0,
-      "distinctRoutes": 33,
+      "followupsRoutedAgainAsTheirFirstRequest": [],
+      "distinctRoutes": 27,
       "perPool": {
         "default": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "README pool": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 12
-        },
-        "bare strings": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "dated/-latest/-preview/-chat": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 12
-        },
-        "{model} objects": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "{id,provider,model} objects": {
-          "requests": 51,
-          "diffs": 0,
-          "routes": 11
-        },
-        "bundles with effort": {
-          "requests": 51,
+          "requests": 44,
           "diffs": 0,
           "routes": 10
         },
-        "pin options, which only act on realtime routing": {
-          "requests": 51,
+        "README pool": {
+          "requests": 44,
           "diffs": 0,
           "routes": 11
+        },
+        "bare strings": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "dated/-latest/-preview/-chat": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "{model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "{id,provider,model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 8
+        },
+        "bundles with effort": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "pin options, which every mode honors (contract R3)": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 3
         }
       },
       "newTurnSampling": {
         "samplesPerRow": 8,
         "rows": 48,
         "diffs": 0,
-        "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 36
+        "rowsComparedOnBothBuilds": 40,
+        "baselineRowsThatFlipOnThePool": 31
       }
     },
     {
@@ -573,11 +870,11 @@
         },
         "coding": {
           "nonRealtime": "gpt-6.1-sol:high",
-          "realtime": "gpt-6.1-sol:medium"
+          "realtime": "gpt-6-sol:high"
         },
         "bulk": {
-          "nonRealtime": "gemini-3.8-flash-high:high",
-          "realtime": "claude-sonnet-5-5:low"
+          "nonRealtime": "gpt-6-luna:high",
+          "realtime": "gpt-6-luna:high"
         },
         "debug": {
           "nonRealtime": "claude-opus-5-5:xhigh",
@@ -586,13 +883,13 @@
       },
       "slowBundleStepsDown": "claude-opus-5-5:xhigh -> claude-opus-5-5:medium",
       "argonOnlyPool": {
-        "status": 404,
+        "status": 503,
         "upstreamCalls": [],
-        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"}}\n"
+        "body": "{\"error\":{\"code\":null,\"message\":\"agentcompass: no_route: no candidate can serve this request\",\"param\":null,\"type\":\"api_error\"}}\n"
       },
-      "responses": "gpt-6.1-sol:medium",
+      "responses": "gpt-6-sol:high",
       "messages": "claude-opus-5-5:null",
-      "stream": "gpt-6.1-sol:medium",
+      "stream": "gpt-6-sol:high",
       "pluginWideOption": "gpt-6-astra:medium",
       "flagForwardedUpstream": false
     },
@@ -610,15 +907,22 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 17,
-          "claude-opus-5-5:xhigh": 3
+          "claude-opus-5-5:medium": 16,
+          "claude-opus-5-5:xhigh": 4
         },
-        "differFromTurn1": 3,
+        "differFromTurn1": 4,
         "asserted": false
+      },
+      "newTurnWithAnotherAnswer": {
+        "routes": {
+          "claude-opus-5-5:medium": 16,
+          "gpt-6-astra:medium": 4
+        },
+        "holdsOnlyOnARuntimeThatSawTheSession": true
       },
       "explicitFalse": {
         "realtime": "gpt-6-astra:medium",
-        "afterFalse": "gemini-4-argon-high:high"
+        "afterFalse": "gpt-6-astra:high"
       },
       "anthropic": [
         "claude-opus-5-5:null",
@@ -630,17 +934,133 @@
       "pass": true,
       "pinnedArgonIdeation": "gemini-4-argon-high:high",
       "pinnedArgonDebug": "gemini-4-argon-high:high",
-      "pinWithoutRealtime": "claude-opus-5-5:xhigh",
+      "pinWithoutRealtime": "gemini-4-argon-high:high",
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 05:34:17 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 19:30:18 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 19:30:18 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 19:30:18 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     {
-      "test": "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases",
+      "test": "Scenario 14: a caller's profile routes, and rewording the task (test/task_text_corpus.mjs) changes nothing, on chat, responses, messages and streams",
+      "pass": true,
+      "requests": 902,
+      "perProfile": {
+        "bulk": {
+          "chat": {
+            "route": "gpt-6-luna:high",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "gpt-6-luna:high",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "gpt-6-luna:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "gpt-6-luna:high",
+            "wordings": 37
+          }
+        },
+        "debug": {
+          "chat": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "claude-opus-5-5:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 37
+          }
+        }
+      },
+      "control": {
+        "bulk": "gpt-6-luna:high",
+        "debug": "claude-opus-5-5:xhigh"
+      }
+    },
+    {
+      "test": "Scenario 15: with no profile a request is not routed: forwarded as asked, no effort, no session; said in Magpie's log and in the reply where it can be",
+      "pass": true,
+      "virtualNameWithoutDefault": {
+        "status": 404,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "namedModel": {
+        "chat": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "responses": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "messages": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "stream": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": null
+        }
+      },
+      "invalidProfile": {
+        "routed": false,
+        "notice": "未路由：分类不可用",
+        "reason": "invalid_caller_profile: task.profile.work_kind must be one of general_implementation, frontend_implementation, debug_review, bounded_bulk_work, "
+      },
+      "virtualNameWithDefault": {
+        "status": 200,
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "virtualNameNoDecisionProvider": {
+        "status": 502,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: getaddrinfo ENOTFOUND agentcompass.local\",\"param\":null,\"type\":\"api_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "asserted": false
+      },
+      "virtualNameNoTextDefaultInstall": {
+        "status": 200,
+        "upstreamCalls": 1,
+        "route": "gpt-6-luna:high"
+      },
+      "logLine": "2026/11/07 19:30:22 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: 未路由：分类不可用 (no_task_profile)"
+    },
+    {
+      "test": "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases, real classifier routing (text + screenshot), single valid account vs invalid peers, all accounts unavailable 503",
       "pass": true,
       "isolation": {
         "signInFilesVisible": false,
@@ -677,23 +1097,23 @@
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 8314,
+              "ms": 7294,
               "status": 200
             },
             "realtime": {
-              "real": "gpt-6.1-sol:medium",
-              "mock": "gpt-6.1-sol:medium",
-              "ms": 7164,
+              "real": "gpt-6-sol:high",
+              "mock": "gpt-6-sol:high",
+              "ms": 34223,
               "status": 200
             },
             "realtimeResponses": {
-              "real": "gpt-6.1-sol:medium",
-              "ms": 10629,
+              "real": "gpt-6-sol:high",
+              "ms": 25932,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1714,
+              "ms": 1740,
               "status": 200
             }
           },
@@ -708,18 +1128,18 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3229,
-              12693
+              3202,
+              6457
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
             "disagreements": [
               {
-                "id": "non_realtime_fix_flash_sale_bot_en",
+                "id": "non_realtime_write_ticket_script_cn",
                 "expected": false,
                 "got": false,
-                "expectedKind": "debug_review",
-                "gotKind": "general_implementation"
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
               }
             ]
           }
@@ -745,23 +1165,23 @@
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 7546,
+              "ms": 16326,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 30518,
+              "ms": 30992,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 26661,
+              "ms": 26019,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 2514,
+              "ms": 2718,
               "status": 200
             }
           },
@@ -776,12 +1196,19 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              2726,
-              5994
+              2767,
+              7118
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "11/12",
+            "workKindAgreement": "10/12",
             "disagreements": [
+              {
+                "id": "non_realtime_write_ticket_script_cn",
+                "expected": false,
+                "got": false,
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
+              },
               {
                 "id": "non_realtime_analyze_orderbook_latency_en",
                 "expected": false,
@@ -822,23 +1249,23 @@
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 33948,
+              "ms": 27347,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 15508,
+              "ms": 16683,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 13993,
+              "ms": 15033,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 2435,
+              "ms": 8894,
               "status": 200
             }
           },
@@ -853,8 +1280,8 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              10057,
-              25323
+              10501,
+              21155
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
@@ -869,8 +1296,159 @@
             ]
           }
         }
+      },
+      "realClassifierRouting": {
+        "pass": true,
+        "classifierModel": "codex/gpt-6-luna",
+        "candidatePool": [
+          "codex/gpt-6.1-sol",
+          "codex/gpt-6-astra",
+          "codex/gpt-6.1-terra",
+          "codex/gpt-6-sol",
+          "codex/gpt-6-luna",
+          "grok/grok-4.7-build-fast"
+        ],
+        "textRequest": {
+          "profileSource": "system_one_live",
+          "workKind": "self_contained_code",
+          "needsVisual": false,
+          "finalModel": "codex/gpt-6.1-sol:high",
+          "upstreamObserved": "gpt-6.1-sol:high",
+          "status": 200,
+          "ms": 7979
+        },
+        "screenshotPlusTextRequest": {
+          "profileSource": "system_one_live",
+          "workKind": "frontend_implementation",
+          "needsVisual": true,
+          "finalModel": "codex/gpt-6-astra:high",
+          "upstreamObserved": "gpt-6-astra:high",
+          "status": 200,
+          "ms": 8095
+        }
+      },
+      "singleValidAccountWithInvalidPeers": {
+        "pass": true,
+        "validAccount": "codex/codex-valid",
+        "invalidAccounts": [
+          "claude/claude-invalid",
+          "grok/grok-invalid"
+        ],
+        "accounts": [
+          {
+            "key": "codex/codex-valid",
+            "provider": "codex",
+            "account": "codex-valid",
+            "plan": "pro",
+            "plan_known": true,
+            "status": "ready",
+            "state": "ready",
+            "reason": null,
+            "last_success_at": "2026-11-07T19:40:44.268Z",
+            "dispatchable": true,
+            "warnings": []
+          },
+          {
+            "key": "claude/claude-invalid",
+            "provider": "claude",
+            "account": "claude-invalid",
+            "plan": "max20",
+            "plan_known": true,
+            "status": "auth_failed",
+            "state": "auth_failed",
+            "reason": "sign-in rejected (HTTP 401)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)"
+            ]
+          },
+          {
+            "key": "grok/grok-invalid",
+            "provider": "grok",
+            "account": "grok-invalid",
+            "plan": "free",
+            "plan_known": true,
+            "status": "plan_inactive",
+            "state": "plan_inactive",
+            "reason": "subscription is not active (free)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+            ]
+          }
+        ],
+        "warnings": [
+          "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)",
+          "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+        ],
+        "routedModel": "gpt-6-astra:high",
+        "dispatchedProvider": "codex",
+        "status": 200,
+        "logWarningsCount": 3
+      },
+      "allAccountsUnavailable503": {
+        "pass": true,
+        "status": 503,
+        "body": "{\"error\":{\"code\":null,\"message\":\"agentcompass: no_route: no candidate can serve this request\",\"param\":null,\"type\":\"api_error\"}}\n",
+        "upstreamDispatchedCalls": 0,
+        "accounts": [
+          {
+            "key": "codex/codex-invalid",
+            "provider": "codex",
+            "account": "codex-invalid",
+            "plan": "pro",
+            "plan_known": true,
+            "status": "auth_failed",
+            "state": "auth_failed",
+            "reason": "sign-in rejected (HTTP 401)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "codex/codex-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)"
+            ]
+          },
+          {
+            "key": "claude/claude-invalid",
+            "provider": "claude",
+            "account": "claude-invalid",
+            "plan": "max20",
+            "plan_known": true,
+            "status": "auth_failed",
+            "state": "auth_failed",
+            "reason": "sign-in rejected (HTTP 401)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)"
+            ]
+          },
+          {
+            "key": "grok/grok-invalid",
+            "provider": "grok",
+            "account": "grok-invalid",
+            "plan": "free",
+            "plan_known": true,
+            "status": "plan_inactive",
+            "state": "plan_inactive",
+            "reason": "subscription is not active (free)",
+            "last_success_at": null,
+            "dispatchable": false,
+            "warnings": [
+              "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+            ]
+          }
+        ],
+        "warnings": [
+          "no candidate is available: claude/claude-opus-5-5@low: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@medium: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@high: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@xhigh: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-opus-5-5@max: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@low: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@medium: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@high: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@xhigh: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); claude/claude-sonnet-5-5@max: claude/claude-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@low: ability 2.86 below the hard floor 3.10; codex/gpt-6.1-sol@low: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@medium: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@high: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@xhigh: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6.1-sol@max: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@low: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@medium: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@high: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@xhigh: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); codex/gpt-6-astra@max: codex/codex-invalid: auth_failed: sign-in rejected (HTTP 401); grok/grok-4.7-build-fast@high: grok/grok-invalid: plan_inactive: subscription is not active (free)",
+          "codex/codex-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)",
+          "claude/claude-invalid: auth_failed, excluded from dispatch: sign-in rejected (HTTP 401) (never read successfully)",
+          "grok/grok-invalid: plan_inactive, excluded from dispatch: subscription is not active (free) (never read successfully)"
+        ],
+        "logWarningsCount": 6
       }
     }
   ],
-  "hostEffortReadyMs": 1087
+  "hostEffortReadyMs": 1082
 }
