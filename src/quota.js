@@ -66,43 +66,52 @@ export const DEFAULT_WINDOW_CAPACITY_USD = {
 };
 
 /**
- * Per-plan API-equivalent USD capacity (`weekly` = long window, `short` = 5h window).
- * Weekly figures are AgentCompass's plan templates (Codex plus 67 / prolite 175 / pro 325,
- * Claude pro 156 / max5 1400 / max20 2380, Antigravity pro 31 / ultra 625). Where the template
- * has no 5h figure, `short` is derived at the template ratio (Claude 376:2380, Codex/Antigravity 1:5).
+ * Per-plan API-equivalent USD capacity (`weekly` = long window, `short` = 5h window), taken from
+ * AgentCompass's `references/plan-templates.json` (the authority; keep in step with it).
+ * A plan without a `short` entry has no 5h window (Codex pro100 / pro); a 5h window reported for it is sized
+ * as the plan's weekly figure, never as a separate smaller budget.
  * Plans are matched exactly (`PLAN_ALIASES`), never by substring.
  */
-const ANTIGRAVITY_ULTRA = DEFAULT_WINDOW_CAPACITY_USD.antigravity;
-const scaleTable = (table, k) =>
-  Object.fromEntries(Object.entries(table).map(([name, usd]) => [name, Math.round(usd * k * 100) / 100]));
+const ANTIGRAVITY_ULTRA20 = DEFAULT_WINDOW_CAPACITY_USD.antigravity;
+const antigravityTier = (gWeekly, g5h, pWeekly, p5h) => ({
+  "gemini-weekly": gWeekly,
+  "gemini-5h": g5h,
+  "3p-weekly": pWeekly,
+  "3p-5h": p5h,
+  weekly: gWeekly,
+  short: g5h,
+});
 
 export const PLAN_CAPACITY_USD = {
   codex: {
-    plus: { weekly: 67, short: 13.4 },
-    prolite: { weekly: 175, short: 35 },
-    pro: { weekly: 325, short: 65 },
+    plus: { weekly: 67, short: 10 },
+    pro100: { weekly: 175 },
+    pro: { weekly: 325 },
   },
   claude: {
-    pro: { weekly: 156, short: 24.6 },
-    max5: { weekly: 1400, short: 221 },
+    pro: { weekly: 156, short: 18 },
+    max5: { weekly: 1400, short: 94, weekly_fable: 700 },
     max20: { weekly: 2380, short: 376, weekly_fable: 1190 },
   },
   antigravity: {
-    pro: scaleTable(ANTIGRAVITY_ULTRA, 31 / 625),
-    ultra: ANTIGRAVITY_ULTRA,
+    pro: antigravityTier(31, 9.1, 4.4, 0.9),
+    ultra5: antigravityTier(156, 45.5, 22, 4.4),
+    ultra20: ANTIGRAVITY_ULTRA20,
   },
 };
 
 const PLAN_ALIASES = {
   codex: {
     plus: "plus",
+    team: "plus",
     pro: "pro",
-    prolite: "prolite",
-    pro_lite: "prolite",
-    pro100: "prolite",
+    pro100: "pro100",
+    prolite: "pro100",
+    pro_lite: "pro100",
   },
   claude: {
     pro: "pro",
+    max: "max5",
     max5: "max5",
     max_5x: "max5",
     max5x: "max5",
@@ -113,8 +122,14 @@ const PLAN_ALIASES = {
   antigravity: {
     pro: "pro",
     google_ai_pro: "pro",
-    ultra: "ultra",
-    google_ai_ultra: "ultra",
+    ultra: "ultra20",
+    google_ai_ultra: "ultra20",
+    ultra20: "ultra20",
+    ultra_20x: "ultra20",
+    ultra20x: "ultra20",
+    ultra5: "ultra5",
+    ultra_5x: "ultra5",
+    ultra5x: "ultra5",
   },
 };
 
@@ -158,8 +173,10 @@ const STATUS_PLAN_INACTIVE = new Set([
 const STATUS_AUTH_FAILED = new Set(["auth_failed", "unauthorized", "forbidden"]);
 const STATUS_USAGE_FAILING = new Set(["error", "failed", "usage_failing", "no_data"]);
 
-/** A usage reading older than this (or failing for this long) takes the account out of dispatch. */
+/** No successful reading for this long takes the account out of dispatch. */
 export const DEFAULT_USAGE_MAX_AGE_HOURS = 6;
+/** An error warns at once; with no error, a reading older than this counts as failing (still dispatchable). */
+export const DEFAULT_USAGE_FRESH_HOURS = 2;
 
 const plansProviders = Object.keys(PLAN_CAPACITY_USD);
 
@@ -192,9 +209,11 @@ function conservativePlanTable(provider) {
   const plans = Object.values(PLAN_CAPACITY_USD[provider] || {});
   if (plans.length === 0) return null;
   const out = {};
-  for (const name of Object.keys(plans[0])) {
-    // Only windows every plan prices; plan-specific ones (`weekly_fable`) fall back to the weekly size.
-    if (plans.every((t) => typeof t[name] === "number")) out[name] = Math.min(...plans.map((t) => t[name]));
+  for (const name of new Set(plans.flatMap((t) => Object.keys(t)))) {
+    const vals = plans.map((t) => t[name]).filter((v) => typeof v === "number");
+    // `short` is the smallest 5h window any plan has; other plan-specific windows (`weekly_fable`) are left
+    // out so they fall back to the weekly size.
+    if (name === "short" || vals.length === plans.length) out[name] = Math.min(...vals);
   }
   return out;
 }
@@ -483,7 +502,7 @@ export function resolveWindowCapacityUsd(
     return table[wid];
   }
   if (windowHours < 24) {
-    return Number(table?.short ?? DEFAULT_WINDOW_CAPACITY_USD.default.short);
+    return Number(table?.short ?? (planTable ? planTable.weekly : DEFAULT_WINDOW_CAPACITY_USD.default.short));
   }
   if (windowHours <= 170) {
     return Number(table?.weekly ?? DEFAULT_WINDOW_CAPACITY_USD.default.weekly);
@@ -670,7 +689,7 @@ function fmtHours(ms) {
  * why, when it last read successfully, and whether it is out of dispatch. Reads structured fields only
  * (`status`, `error`, HTTP codes, timestamps); never message text.
  */
-function classifyAccount(item, entry, plan, nowMs, maxAgeMs) {
+function classifyAccount(item, entry, plan, nowMs, maxAgeMs, freshMs) {
   const warnings = [];
   const status = String(item.status ?? item.quota?.status ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   const errorValue = item.error ?? item.quota?.error ?? null;
@@ -728,8 +747,8 @@ function classifyAccount(item, entry, plan, nowMs, maxAgeMs) {
     lastSuccessMs = readAt;
   }
 
-  // A reading that is simply old counts as failing, even when no error was reported.
-  if (state === ACCOUNT_STATES.READY && !failing && lastSuccessMs !== null && nowMs - lastSuccessMs > maxAgeMs) {
+  // No error but no fresh reading either: failing once the reading is older than the freshness limit (2h).
+  if (state === ACCOUNT_STATES.READY && !failing && lastSuccessMs !== null && nowMs - lastSuccessMs > freshMs) {
     failing = true;
     reason = `usage reading failing: no successful reading for ${fmtHours(nowMs - lastSuccessMs)}`;
   }
@@ -757,20 +776,29 @@ function classifyAccount(item, entry, plan, nowMs, maxAgeMs) {
         : `${entry.key}: ${state}: ${reason} (${lastTxt}); excluded after ${fmtHours(maxAgeMs)} without a successful reading`
     );
   }
-  return { state, reason, lastSuccessMs, excluded, warnings };
+  // Where the failure began: an explicit `failing_since`, else the last success (readings stopped after it).
+  const failingSinceMs =
+    state === ACCOUNT_STATES.USAGE_FAILING
+      ? firstTimeMs(item.failing_since, item.failingSince, item.quota?.failing_since) ?? lastSuccessMs
+      : null;
+  return { state, reason, lastSuccessMs, excluded, warnings, failingSinceMs };
 }
 
 function planInfoOf(item, provider, key) {
-  const rawPlan =
+  const online =
     item.plan ?? item.quota?.plan ?? item.plan_type ?? item.planType ?? item.plan_label ?? item.quota?.plan_type ?? null;
+  const claim = item.plan_claim ?? item.planClaim ?? null;
+  // The online plan wins; the credential claim is only a fallback when there is no online plan.
+  const rawPlan = normalizePlan(provider, online).raw !== null ? online : claim;
   const plan = normalizePlan(provider, rawPlan);
   const warnings = [];
-  const claim = item.plan_claim ?? item.planClaim;
-  if (claim) {
+  let conflict = null;
+  if (claim && normalizePlan(provider, online).raw !== null) {
     const claimed = normalizePlan(provider, claim);
     if (claimed.key !== plan.key || claimed.inactive !== plan.inactive) {
+      conflict = { online: String(online), credential: String(claim) };
       warnings.push(
-        `${key}: plan sources disagree (online "${rawPlan ?? "none"}" vs credential claim "${claim}"); using the online value`
+        `${key}: plan sources disagree (online "${online}" vs credential claim "${claim}"); using the online value`
       );
     }
   }
@@ -779,15 +807,15 @@ function planInfoOf(item, provider, key) {
       `${key}: plan ${plan.raw ? `"${plan.raw}" is not recognized` : "was not reported"}; capacity is sized as the smallest known ${provider} plan`
     );
   }
-  return { plan, warnings };
+  return { plan, warnings, conflict };
 }
 
 /** Build one canonical account record from a raw quota item (shared by every snapshot format). */
 function buildAccountEntry(
   item,
-  { key, provider, account, rawWindows, kind, unlimited, balance, stale, nowMs, policy, maxAgeMs }
+  { key, provider, account, rawWindows, kind, unlimited, balance, stale, nowMs, policy, maxAgeMs, freshMs }
 ) {
-  const { plan, warnings: planWarnings } = planInfoOf(item, provider, key);
+  const { plan, warnings: planWarnings, conflict } = planInfoOf(item, provider, key);
   const planKey = plansProviders.includes(provider) ? plan.key : undefined;
   // Rates measured under another plan must not be carried over (a tier change reads as a demand jump).
   const ratePlan = item.rate_plan ?? item.ratePlan;
@@ -807,13 +835,16 @@ function buildAccountEntry(
     plan: plan.raw,
     planKey: plan.key,
     planKnown: plan.known,
+    planConflict: conflict,
+    maxAgeHours: maxAgeMs / 3600000,
     windows,
   };
-  const cls = classifyAccount(item, entry, plan, nowMs, maxAgeMs);
+  const cls = classifyAccount(item, entry, plan, nowMs, maxAgeMs, freshMs);
   entry.state = cls.state;
   entry.reason = cls.reason;
   entry.lastSuccessAt = cls.lastSuccessMs === null ? null : new Date(cls.lastSuccessMs).toISOString();
   entry.excluded = cls.excluded;
+  entry.failingSince = cls.failingSinceMs === null ? null : new Date(cls.failingSinceMs).toISOString();
   entry.warnings = [...(cls.state === ACCOUNT_STATES.PLAN_INACTIVE ? [] : planWarnings), ...cls.warnings];
   return entry;
 }
@@ -826,7 +857,8 @@ function buildAccountEntry(
  *       state, reason, lastSuccessAt, excluded, warnings }]`
  * `state` is the account status shared by dispatch and the account list (see `ACCOUNT_STATES`).
  * `opts.usageMaxAgeHours` (else `policy.usage_max_age_hours`, else a top-level `usage_max_age_hours`
- * in the snapshot, else 6) is how long an account may go without a successful reading.
+ * in the snapshot, else 6) is how long an account may go without a successful reading before it is excluded;
+ * `usageFreshHours` / `usage_fresh_hours` (default 2) is when a reading with no error starts counting as failing.
  */
 export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY, opts = {}) {
   if (!rawQuotas || typeof rawQuotas !== "object") return [];
@@ -836,6 +868,11 @@ export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = D
       .map(Number)
       .find((n) => Number.isFinite(n) && n > 0) ?? DEFAULT_USAGE_MAX_AGE_HOURS;
   const maxAgeMs = maxAgeHours * 3600000;
+  const freshHours =
+    [opts?.usageFreshHours, policy?.usage_fresh_hours, rawQuotas.usage_fresh_hours, rawQuotas.usageFreshHours]
+      .map(Number)
+      .find((n) => Number.isFinite(n) && n > 0) ?? DEFAULT_USAGE_FRESH_HOURS;
+  const freshMs = Math.min(freshHours, maxAgeHours) * 3600000;
   const entries = [];
 
   // Format A: Array from `/v1/magpie/quotas`
@@ -867,6 +904,7 @@ export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = D
           nowMs,
           policy,
           maxAgeMs,
+          freshMs,
         })
       );
     }
@@ -875,7 +913,7 @@ export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = D
 
   // Format B: AgentCompass `usage.json` (`{ accounts: { claude: { status, windows: [...] } } }`)
   if (rawQuotas.accounts && typeof rawQuotas.accounts === "object" && !Array.isArray(rawQuotas.accounts)) {
-    return normalizeQuotaSnapshot(rawQuotas.accounts, nowMs, policy, { usageMaxAgeHours: maxAgeHours, ...opts });
+    return normalizeQuotaSnapshot(rawQuotas.accounts, nowMs, policy, { usageMaxAgeHours: maxAgeHours, usageFreshHours: freshHours, ...opts });
   }
 
   // Format C: Magpie `quotas.json` object (`{ "claude/user@example.com": { quota: { windows: [...] } } }`)
@@ -936,6 +974,7 @@ export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = D
         nowMs,
         policy,
         maxAgeMs,
+        freshMs,
       })
     );
   }
@@ -958,9 +997,15 @@ export function listQuotaAccounts(rawQuotas, nowMs = Date.now(), policy = DEFAUL
     account: e.account,
     plan: e.plan,
     plan_known: e.planKnown,
+    // `status` is AgentCompass's field name; `state` is the same value.
+    status: e.state,
     state: e.state,
     reason: e.reason,
     last_success_at: e.lastSuccessAt,
+    ...(e.state === ACCOUNT_STATES.USAGE_FAILING
+      ? { failing_since: e.failingSince, exclude_after_hours: e.maxAgeHours, usage_excluded: e.excluded }
+      : {}),
+    ...(e.planConflict ? { plan_conflict: e.planConflict } : {}),
     dispatchable: !e.excluded,
     warnings: e.warnings,
   }));
