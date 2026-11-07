@@ -993,6 +993,13 @@ function pinOverridesSession(sessionState, currentModel, pins, options) {
   return Boolean(effort && effort !== sessionState.effort);
 }
 
+/** The row a pin names when it has one of its own. A family name stays itself (`healthKey`). */
+function pinnedRowKey(pins, options) {
+  if (!pins?.constraintModel) return null;
+  const named = resolveModel(String(pins.constraintModel), options.models || DEFAULT_MODELS, options.aliases || MODEL_ALIASES);
+  return named.source === "exact" || named.source === "alias" ? named.key : null;
+}
+
 export function evaluateProviderContinuation(facts = {}, sessionState = null, options = {}) {
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const affinityMode = String(options.affinityMode || "cache").toLowerCase();
@@ -1080,19 +1087,21 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
   const unhealthySet = new Set(
     (options.unhealthyModels || []).map((m) => healthKey(m, options.models, options.aliases))
   );
-  const storeHealthy =
-    options.store && typeof options.store.isModelHealthy === "function"
-      ? options.store.isModelHealthy(runningName, now)
-      : true;
+  const healthyInStore = (name) =>
+    options.store && typeof options.store.isModelHealthy === "function" ? options.store.isModelHealthy(name, now) : true;
+  // The pin matches family rows too, and a session on one of those is no way round its own row being down (contract R3).
+  const pinnedKey = pinnedRowKey(options.pins, options);
+  const pinnedDown = Boolean(pinnedKey) && (unhealthySet.has(pinnedKey) || !healthyInStore(pinnedKey));
   if (
+    pinnedDown ||
     sessionState.healthy === false ||
-    !storeHealthy ||
+    !healthyInStore(runningName) ||
     unhealthySet.has(failedModel)
   ) {
     return {
       shouldHold: false,
       why: "provider_unhealthy",
-      failedModel,
+      failedModel: pinnedDown ? pinnedKey : failedModel,
       previousModel: currentModel,
       previousEffort: sessionState.effort,
       within: Boolean(facts.within),

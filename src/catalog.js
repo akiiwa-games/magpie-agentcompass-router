@@ -1781,6 +1781,19 @@ const RETIRED_REPLACEMENT = new Map(
   Object.entries(RETIRED_NAMES).flatMap(([target, names]) => names.map((name) => [name, target]))
 );
 
+const MAX_NAME_IN_TEXT = 128;
+
+/** Control characters as text, so a name can start no line of its own in a log. */
+export function escapeControls(text) {
+  return String(text).replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`);
+}
+
+/** A model name fit to put in a log or an error: under `routeAllModels` and in a pin, the request wrote it. */
+export function safeName(name) {
+  const text = String(name);
+  return escapeControls(text.length > MAX_NAME_IN_TEXT ? `${text.slice(0, MAX_NAME_IN_TEXT)}...` : text);
+}
+
 /** Starts every `catalogNameWarning`, so a host can log each once rather than on every request. */
 export const CATALOG_NAME_WARNING = "candidate name ";
 
@@ -1792,7 +1805,7 @@ export function catalogNameWarning(rawModel, models = DEFAULT_MODELS, aliases = 
   const { tier } = resolveModelSpec(name, models, aliases).spec;
   const scored = source === "family" ? `scored as an estimate of ${key} (tier ${tier})` : `scored on the generic row (tier ${tier})`;
   const replacement = RETIRED_REPLACEMENT.get(name.split("/").pop().toLowerCase());
-  return `${CATALOG_NAME_WARNING}${name} is not in the catalog: ${scored}${replacement ? `; use ${replacement}` : ""}`;
+  return `${CATALOG_NAME_WARNING}${safeName(name)} is not in the catalog: ${scored}${replacement ? `; use ${replacement}` : ""}`;
 }
 
 /** The key of `rawModel` (`resolveModel`). */

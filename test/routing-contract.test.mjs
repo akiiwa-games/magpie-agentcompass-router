@@ -430,7 +430,7 @@ test("a hold steps down to what the pool still offers, and never sends the effor
   const sol = "gpt-6.1-sol";
   for (const [name, one, two, effort] of [
     ["`model:effort`", [`${sol}:high`], [`${sol}:medium`], "medium"],
-    ["efforts[]", [{ model: sol, efforts: ["high"] }], [{ model: sol, efforts: ["low"] }], "low"],
+    ["efforts[]", [{ model: sol, efforts: ["high"] }], [{ model: sol, efforts: ["medium"] }], "medium"],
     ["another model in the pool", [`${sol}:high`], [`${sol}:medium`, "claude-sonnet-5-5:high"], "medium"],
   ]) {
     const run = twoTurns({ candidateModels: one }, { candidateModels: two });
@@ -496,7 +496,7 @@ test("catalog:check reads a CRLF checkout, and .gitattributes keeps src/catalog.
   assert.match(attr, /eol: lf/);
 });
 
-test("a pool name with no row of its own says so, and a blocked route names its models (review M4)", () => {
+test("a pool name with no row of its own says so, in the route and in the log (review M4)", () => {
   const ok = selectBestRoute(PROFILE, { candidateModels: ["claude-sonnet-5-5", "gpt-5.4", "gemini-2.5-pro"] });
   assert.equal(ok.ok, true);
   assert.equal(ok.warnings.length, 2);
@@ -512,15 +512,14 @@ test("a pool name with no row of its own says so, and a blocked route names its 
         { options: { candidateModels: pool, continuityStore: new SessionContinuityStore(), now: NOW, ...extra }, state: {}, reject: (s, m) => rejected.push([s, m]) },
       ),
     );
-  refuse(["gpt-5.4"], "Prove the correctness of this distributed consensus algorithm and redesign the architecture across all modules");
-  assert.equal(rejected[0][0], 503);
-  assert.match(rejected[0][1], /no candidate is available: gpt-5\.4@low: ability/);
-  assert.match(rejected[0][1], /candidate name gpt-5\.4 is not in the catalog/);
+  const { logged } = refuse(["gpt-5.4"], "Prove the correctness of this distributed consensus algorithm and redesign the architecture across all modules");
+  assert.deepEqual(rejected[0], [503, "agentcompass: no_route: no candidate can serve this request"]);
+  assert.match(logged.join("\n"), /no candidate is available: gpt-5\.4@low: ability/);
+  assert.match(logged.join("\n"), /candidate name gpt-5\.4 is not in the catalog/);
   refuse(["gpt-5.4"], "hello", { constraintModel: "claude-opus-9" });
-  assert.equal(rejected[1][0], 503);
-  assert.match(rejected[1][1], /pinned model claude-opus-9 is not among the candidates/);
+  assert.deepEqual(rejected[1], [503, "agentcompass: pin_not_in_pool: pinned model claude-opus-9 is not among the candidates"]);
 
-  // The log carries a name warning once per process, a route's other warnings every time
+  // The log carries a name warning once per runtime, a route's other warnings every time
   const name = `gpt-5.4-${NOW}-unlisted`;
   const once = quietly(() => {
     allocator.logRouteWarnings([`candidate name ${name} is not in the catalog`, "slow"]);
@@ -639,26 +638,175 @@ test("a route its `when` rules block says why (review m8)", () => {
   assert.match(decision.excluded[0], /when rule/);
 });
 
-test("a provider with nothing usable refuses rather than send what it does not offer (review m9)", () => {
-  const options = (extra) => ({ candidateModels: ["gpt-6.1-sol"], continuityStore: new SessionContinuityStore(), now: NOW, ...extra });
+test("onProvider cannot turn a request away: nothing usable on this provider warns, and the request goes as routed (review 2 M2)", () => {
   const rejected = [];
-  const reject = (status, message) => {
-    rejected.push([status, message]);
-    return "refused";
-  };
   const body = turnOne();
-  const ctx = { sessionId: "p", options: options({ pinnedModel: "gpt-6.1-sol", modelsByProvider: { other: ["claude-sonnet-5-5"] } }), state: {}, provider: { id: "other" }, reject };
+  const ctx = {
+    sessionId: "p",
+    options: { candidateModels: ["gpt-6.1-sol"], continuityStore: new SessionContinuityStore(), now: NOW, pinnedModel: "gpt-6.1-sol", modelsByProvider: { other: ["claude-sonnet-5-5"] } },
+    state: {},
+    provider: { id: "other" },
+    reject: (status, message) => rejected.push([status, message]),
+  };
   quietly(() => middleware.onRequest(body, ctx));
-  assert.equal(quietly(() => middleware.onProvider(body, ctx)).value, "refused");
-  assert.equal(rejected[0][0], 503);
-  assert.match(rejected[0][1], /other/);
-  assert.match(rejected[0][1], /gpt-6\.1-sol/);
-  // efforts[] on the provider: only `low`, which this task's floor rules out
-  const lowOnly = { sessionId: "q", options: options({ routePerProvider: true, modelsByProvider: { p: [{ model: "gpt-6.1-sol", efforts: ["low"] }] } }), state: {}, provider: { id: "p" }, reject };
-  const hard = { model: "agentcompass/auto", messages: [{ role: "user", content: "Implement the parser module and tests" }] };
-  quietly(() => middleware.onRequest(hard, lowOnly));
-  assert.equal(quietly(() => middleware.onProvider(hard, lowOnly)).value, "refused");
-  assert.match(rejected[1][1], /provider p has no route: no candidate is available: gpt-6\.1-sol@low: ability/);
+  const sent = body.model;
+  const { value, logged } = quietly(() => middleware.onProvider(body, ctx));
+  assert.equal(value, undefined);
+  assert.equal(body.model, sent);
+  assert.deepEqual(rejected, []);
+  assert.match(logged.join("\n"), /pinned model gpt-6\.1-sol is not among the candidates/);
+});
+
+test("a pinned model that is down is refused, with no family row standing in for it (review 2 M1)", async () => {
+  const flagship = "claude-opus-5-5";
+  const pool = [flagship, "claude-opus-9"];
+  const options = { candidateModels: pool, unhealthyModels: [flagship] };
+
+  for (const pin of [flagship, `${flagship}:low`, `${flagship}-20261001`, `openai/${flagship}`]) {
+    const decision = selectBestRoute(PROFILE, { ...options, constraintModel: pin });
+    assert.equal(decision.blocked, true, pin);
+    assert.match(decision.warnings[0], /is unavailable: model is currently marked unhealthy/, pin);
+  }
+
+  const rejected = [];
+  const body = turnOne();
+  quietly(() => middleware.onRequest(body, { options: { ...options, constraintModel: flagship, continuityStore: new SessionContinuityStore(), now: NOW }, state: {}, reject: (s, m) => rejected.push([s, m]) }));
+  assert.deepEqual(rejected, [[503, `agentcompass: model_unhealthy: pinned model ${flagship} is marked unhealthy`]]);
+  assert.equal(body.model, "agentcompass/auto");
+
+  // The hooks hand the same refusal to the middleware
+  const hooked = { protocol: "chat", options: { ...options, constraintModel: flagship, continuityStore: new SessionContinuityStore(), now: NOW }, state: {}, reject: (s, m) => [s, m] };
+  await hooks.onRequest(turnOne(), hooked);
+  assert.deepEqual(quietly(() => middleware.onRequest(turnOne(), hooked)).value, [503, `agentcompass: model_unhealthy: pinned model ${flagship} is marked unhealthy`]);
+
+  // A session the pin put on the family row does not hold through it
+  const held = twoTurns({ candidateModels: pool, constraintModel: flagship }, { ...options, constraintModel: flagship });
+  assert.match(held.first, /^claude-opus-9:/);
+  assert.equal(held.rejected[0]?.[0], 503);
+  assert.match(held.rejected[0][1], /^agentcompass: model_unhealthy: /);
+
+  // With no pin the family row serves (review M5), and a pin on the family name itself is that name's to answer
+  assert.equal(selectBestRoute(PROFILE, options).targetModel, "claude-opus-9");
+  assert.equal(selectBestRoute(PROFILE, { ...options, constraintModel: "claude-opus-9" }).targetModel, "claude-opus-9");
+  const familyDown = selectBestRoute(PROFILE, { candidateModels: pool, unhealthyModels: ["claude-opus-9"], constraintModel: "claude-opus-9" });
+  assert.equal(familyDown.blocked, true);
+});
+
+test("a pinned effort off a bare name's table holds like any other, with no extra classifier call (review 2 r1)", async () => {
+  const model = "grok-4.7";
+  const pin = { candidateModels: [model], constraintModel: `${model}:medium` };
+  assert.equal(allocator.candidateOffers([model], model, "medium"), false);
+  assert.equal(allocator.candidateOffers([model], model, "medium", undefined, { constraintModel: `${model}:medium` }), true);
+  // A pool entry that fixes another effort is still not offering it (review M2)
+  assert.equal(allocator.candidateOffers([`${model}:high`], model, "medium", undefined, { constraintModel: `${model}:medium` }), false);
+
+  const run = twoTurns(pin, pin);
+  assert.equal(run.second, `${model}:medium`);
+  assert.equal(run.route.continuation.held, true);
+
+  let calls = 0;
+  const fetch = async () => {
+    calls++;
+    const content = JSON.stringify({ ...PROFILE, multi_task: false, task_count: "1" });
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content } }] }) };
+  };
+  const store = new SessionContinuityStore();
+  let history = turnOne();
+  for (let turn = 0; turn < 3; turn++) {
+    const body = { ...history };
+    const ctx = {
+      protocol: "chat",
+      sessionId: "r1",
+      options: { ...pin, continuityStore: store, now: NOW + turn, allowExternalScorer: true, scorerType: "openai_compatible", scorerBaseUrl: "http://127.0.0.1:9/v1", scorerApiKey: "fake", scorerModel: "fake", useCache: false, fetch },
+      state: {},
+      reject: (status, message) => assert.fail(`${status} ${message}`),
+    };
+    await hooks.onRequest(body, ctx);
+    quietly(() => middleware.onRequest(body, ctx));
+    assert.equal(body.model, `${model}:medium`);
+    if (turn > 0) assert.equal(ctx.state.route.continuation.held, true);
+    history = followUp(history);
+  }
+  assert.equal(calls, 1);
+});
+
+test("a hold steps down no lower than a new route would go (review 2 r2)", async () => {
+  const sol = "gpt-6.1-sol";
+  // This task's floor is above gpt-6.1-sol at low: a new route refuses it, so the hold does too
+  const fresh = selectBestRoute(profiler.inferTaskProfile({ objective: "Implement the parser module and tests" }), { candidateModels: [`${sol}:low`] });
+  assert.equal(fresh.blocked, true);
+  const middlewareRun = twoTurns({ candidateModels: [`${sol}:high`] }, { candidateModels: [`${sol}:low`] });
+  assert.equal(middlewareRun.first, `${sol}:high`);
+  assert.equal(middlewareRun.second, followUp(turnOne()).model);
+  assert.equal(middlewareRun.rejected[0]?.[0], 503);
+
+  const store = new SessionContinuityStore();
+  const first = turnOne();
+  await hooks.onRequest(first, { protocol: "chat", sessionId: "h2", options: { candidateModels: [`${sol}:high`], continuityStore: store, now: NOW }, state: {} });
+  const ctx = { protocol: "chat", sessionId: "h2", options: { candidateModels: [`${sol}:low`], continuityStore: store, now: NOW + 1000 }, state: {} };
+  await hooks.onRequest(followUp(first), ctx);
+  assert.equal(ctx.state.route, undefined);
+  assert.equal(ctx.state.routeBlocked.error, "no_route");
+
+  const easy = { work_kind: "tool_execution", difficulty: "routine" };
+  assert.equal(allocator.heldEffortOn([`${sol}:low`], sol, "high", undefined, { profile: PROFILE }), null);
+  assert.equal(allocator.heldEffortOn([`${sol}:medium`], sol, "high", undefined, { profile: PROFILE }), "medium");
+  assert.equal(allocator.heldEffortOn([`${sol}:low`], sol, "high", undefined, { profile: easy }), "low");
+  assert.equal(allocator.heldEffortOn([`${sol}:low`], sol, "high"), "low", "with no task to judge, what the pool offers");
+});
+
+test("the name-warning log is bounded, and names stay on one line and short (review 2 r3, r4)", () => {
+  const warning = (i) => `candidate name lru-${NOW}-${i} is not in the catalog`;
+  const count = (fn) => quietly(fn).logged.length;
+  assert.equal(count(() => allocator.logRouteWarnings([warning("a")])), 1);
+  for (let i = 0; i < 1023; i++) quietly(() => allocator.logRouteWarnings([warning(i)]));
+  assert.equal(count(() => allocator.logRouteWarnings([warning("a")])), 0, "seen, and now the most recent");
+  quietly(() => allocator.logRouteWarnings([warning("new")]));
+  assert.equal(count(() => allocator.logRouteWarnings([warning(0)])), 1, "the least recently seen went first");
+  for (let i = 1; i <= 1024; i++) quietly(() => allocator.logRouteWarnings([warning(`more-${i}`)]));
+  assert.equal(count(() => allocator.logRouteWarnings([warning("a")])), 1, "at 1024 names a new one pushes the oldest out");
+
+  assert.equal(catalog.safeName("a\nb\u2028c"), "a\\u000ab\\u2028c");
+  assert.equal(catalog.safeName("x".repeat(2000)).length, 131);
+  assert.equal(catalog.safeName("gpt-6.1-sol"), "gpt-6.1-sol");
+
+  const forged = "zz\n2026/11/07 00:00:00 FAKE LOG LINE";
+  const rejected = [];
+  const body = { ...turnOne(), pinned_model: forged };
+  const { logged } = quietly(() =>
+    middleware.onRequest(body, { options: { candidateModels: [forged, "y".repeat(5000)], continuityStore: new SessionContinuityStore(), now: NOW }, state: {}, reject: (s, m) => rejected.push([s, m]) }),
+  );
+  assert.ok(logged.length > 0);
+  for (const line of logged) {
+    assert.doesNotMatch(line, /[\r\n]/);
+    assert.ok(line.length < 16500, String(line.length));
+  }
+  assert.doesNotMatch(logged.join(""), /y{129}/);
+  assert.doesNotMatch(String(rejected[0]?.[1]), /[\r\n]/);
+  assert.equal(rejected[0]?.[0], 503);
+
+  const longReason = quietly(() => allocator.logRouteWarnings([`${"z".repeat(4000)} of\nnote`])).logged[0];
+  assert.doesNotMatch(longReason, /z{129}|\n/);
+});
+
+test("a refusal tells the client what it pinned and a code; the pool and quotas stay in the log (review 2 r5)", () => {
+  const refusal = (pool, extra) => selectBestRoute(PROFILE, { candidateModels: pool, ...extra }).refusal;
+  assert.equal(refusal(["gpt-6-luna"], { unhealthyModels: ["gpt-6-luna"] }), "no_route: no candidate can serve this request");
+  assert.equal(refusal(["gpt-6-luna", "gpt-6-astra"], { constraintModel: "gpt-6.1-sol" }), "pin_not_in_pool: pinned model gpt-6.1-sol is not among the candidates");
+  assert.equal(refusal(["gpt-6.1-sol"], { constraintModel: "gpt-6.1-sol", unhealthyModels: ["gpt-6.1-sol"] }), "model_unhealthy: pinned model gpt-6.1-sol is marked unhealthy");
+  assert.equal(refusal(["gpt-6.1-sol:high"], { constraintModel: "gpt-6.1-sol:low" }), "pin_unavailable: pinned model gpt-6.1-sol:low cannot serve this request");
+  assert.equal(refusal(["gpt-6.1-sol"]), null);
+  assert.equal(selectBestRoute({ objective: "Fix a bug", multi_task: "false" }, { candidateModels: ["gpt-6.1-sol"] }).refusal, "invalid_caller_profile: the task profile is invalid");
+  // The detail is still in the decision, for the local log
+  assert.match(selectBestRoute(PROFILE, { candidateModels: ["gpt-6-luna"], unhealthyModels: ["gpt-6-luna"] }).warnings[0], /gpt-6-luna@\w+: model is currently marked unhealthy/);
+  assert.equal(allocator.blockedRefusal({ error: "classifier_invalid_output" }), "classifier_invalid_output: this request could not be routed");
+});
+
+test("`:default` constrains nothing on a candidate; a pin that says it names an effort no row has (review 2 r6)", () => {
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: ["gpt-6.1-sol:default"] }).targetModel, "gpt-6.1-sol");
+  const pinned = selectBestRoute(PROFILE, { candidateModels: ["gpt-6.1-sol"], constraintModel: "gpt-6.1-sol:default" });
+  assert.equal(pinned.blocked, true);
+  assert.equal(pinned.refusal, "pin_unavailable: pinned model gpt-6.1-sol:default cannot serve this request");
 });
 
 test("the pools of the non-realtime report are in the repo", () => {

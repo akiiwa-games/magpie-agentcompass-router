@@ -19,6 +19,7 @@
  */
 
 import {
+  blockedRefusal,
   candidateOffers,
   heldBundle,
   heldEffortOn,
@@ -343,7 +344,11 @@ function routeClaimed(body, ctx, env, depth = 0) {
         : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
     // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
     const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
-    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog) : keptEffort;
+    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog, {
+      pins,
+      profile: sessionState?.profile || { work_kind: sessionState?.workKind || "general_implementation", difficulty: sessionState?.difficulty || "routine" },
+      realtimeLoop: heldRealtime,
+    }) : keptEffort;
     if (heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins))) {
       cont = {
         shouldHold: false,
@@ -501,10 +506,9 @@ function rejectBlocked(body, ctx, blocked) {
   const options = ctx?.options || {};
   const pinned = Object.keys(mergePinOptions(pinOptionsOf(options), body, body.task)).length > 0;
   if (!pinned && !isVirtualModelName(body.model, options)) return null;
-  const reason = (blocked.warnings || []).join("; ") || blocked.error || "no route";
   ctx.state = ctx.state || {};
   ctx.state.routeBlocked = blocked;
-  return typeof ctx?.reject === "function" ? { rejected: ctx.reject(503, `agentcompass: ${reason}`) } : null;
+  return typeof ctx?.reject === "function" ? { rejected: ctx.reject(503, `agentcompass: ${blockedRefusal(blocked)}`) } : null;
 }
 
 export function onRequest(body, ctx = {}) {
@@ -561,7 +565,7 @@ export function onRequest(body, ctx = {}) {
       if (
         !hasExplicitCandidates ||
         !Array.isArray(candidateModels) ||
-        candidateOffers(candidateModels, stateRoute.targetModel, stateRoute.targetEffort || "high", options.catalog)
+        candidateOffers(candidateModels, stateRoute.targetModel, stateRoute.targetEffort || "high", options.catalog, stateRoute.pins)
       ) {
         decision = stateRoute;
         logRouteWarnings(decision.warnings);
@@ -609,7 +613,7 @@ export function onRequest(body, ctx = {}) {
         store.recordRequest(routed.sessionKey, routed.record, routed.facts, now);
       }
       if (decision?.blocked) {
-        const refused = rejectBlocked(body, ctx, { error: decision.error || "no_route", warnings: decision.warnings });
+        const refused = rejectBlocked(body, ctx, { error: decision.error || "no_route", warnings: decision.warnings, refusal: decision.refusal });
         if (refused) return refused.rejected;
       }
     }
@@ -650,6 +654,7 @@ export function onRequest(body, ctx = {}) {
  * Magpie passes `ctx.provider = { id, name, account, model }`.
  * Supports optional per-provider model lists via `options.modelsByProvider[provider.id]`
  * or fallback to `ctx.provider.model` if `body.model` is still a virtual model name.
+ * `ctx.reject` turns nothing away here: with nothing usable on this provider, the request goes as routed, with a warning.
  */
 export function onProvider(body, ctx = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -714,14 +719,6 @@ export function onProvider(body, ctx = {}) {
         }
         applyRoutedModelAndEffort(body, updated, ctx);
         return body;
-      }
-      // Nothing usable on this provider, and what the request carries is not offered here: sending it would only come back an error.
-      if (
-        !isVirtualModelName(body.model, options) &&
-        !candidateOffers(providerModels, prevDecision.targetModel, prevDecision.targetEffort || "high", options.catalog) &&
-        typeof ctx?.reject === "function"
-      ) {
-        return ctx.reject(503, `agentcompass: provider ${prov.id || prov.name} has no route: ${(routed.warnings || []).join("; ")}`);
       }
     }
   }

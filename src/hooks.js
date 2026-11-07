@@ -111,10 +111,10 @@ export function shouldRouteRequest(model, options = {}) {
 }
 
 /** Nothing may route this request: the middleware rejects it rather than deciding again. */
-function blockRoute(ctx, sessionKey, error, warnings) {
+function blockRoute(ctx, sessionKey, error, warnings, refusal) {
   ctx.state = ctx.state || {};
   ctx.state.sessionKey = sessionKey;
-  ctx.state.routeBlocked = { error, warnings };
+  ctx.state.routeBlocked = { error, warnings, refusal };
   ctx.report?.("empty");
 }
 
@@ -193,7 +193,11 @@ export async function onRequest(body, ctx = {}) {
       heldRealtime && sessionState?.target ? sessionState.target : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
     // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
     const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
-    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog) : keptEffort;
+    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog, {
+      pins,
+      profile: sessionState?.profile || { work_kind: sessionState?.workKind || "general_implementation", difficulty: sessionState?.difficulty || "routine" },
+      realtimeLoop: heldRealtime,
+    }) : keptEffort;
     const effortGone = heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins));
     if (effortGone) {
       cont = {
@@ -337,7 +341,7 @@ export async function onRequest(body, ctx = {}) {
   });
 
   if (!decision.ok || !decision.targetModel) {
-    blockRoute(ctx, sessionKey, decision.error || "no_route", decision.warnings);
+    blockRoute(ctx, sessionKey, decision.error || "no_route", decision.warnings, decision.refusal);
     return undefined;
   }
 

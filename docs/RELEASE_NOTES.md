@@ -12,9 +12,20 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 
 现在的提示：
 
-- 路由结果的 `warnings` 里每次都带 `candidate name <名字> is not in the catalog: ...; use <替代名>`，日志里同一个名字每个进程只打一次。
-- 选不出模型时返回 503，文案带模型名和原因，例如 `no candidate is available: gpt-5.4@low: ability 2.26 below the coupled floor 3.60; ...`，后面跟上面那条名字提示。
-- 点名的模型不在候选池里时也是 503：`pinned model <名字> is not among the candidates`。
+- 路由结果的 `warnings` 里每次都带 `candidate name <名字> is not in the catalog: ...; use <替代名>`。日志里同一条提示每个运行时只打一次。Magpie 会同时开多个运行时，所以多打几次是正常的。去重最多记 1024 条，超过后最久没出现的那条会被挤掉，之后再出现时会再打一次。
+- 选不出模型时返回 503。客户端只看到原因码、点名的模型名和一句说明，看不到候选池和配额。明细只写本地日志，例如 `no candidate is available: gpt-5.4@low: ability 2.26 below the coupled floor 3.60; ...`。
+- 日志和 503 里的模型名会转义控制字符，超过 128 个字符的部分截断，单行日志最多 16384 个字符。
+
+| 503 原因码 | 文案（前缀 `agentcompass: `） | 什么时候出现 |
+|---|---|---|
+| `no_route` | `no_route: no candidate can serve this request` | 没有点名，候选池里选不出模型 |
+| `pin_not_in_pool` | `pin_not_in_pool: pinned model <名字> is not among the candidates` | 点名的模型不在候选池里 |
+| `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型不健康 |
+| `pin_unavailable` | `pin_unavailable: pinned model <名字> cannot serve this request` | 点名的模型因其他原因不可用，例如档位不提供、能力不够 |
+| `invalid_caller_profile` | `invalid_caller_profile: the task profile is invalid` | 调用方给的任务画像不合法 |
+| 其他错误码 | `<错误码>: this request could not be routed` | 其他阻断，例如 `classifier_invalid_output` |
+
+点名也可以是 `pinned bundle <名字>` 或 `pinned effort <档位>`，原因码相同。
 
 下面第 3 组仍是目录里的条目，只是能力低，所以不给提示，分数按目录计算。
 
@@ -96,20 +107,24 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 
 ### 会话保持
 
-- 保持前先看当前候选池是否还提供这个档位（`model:effort`、`efforts[]`、provider 表都算）。不提供时降到可用的最高档并加警告；没有更低的档位，或者用户点名了档位，就结束保持，`why` 为 `effort_gone`，重新路由。
+- 保持前先看当前候选池是否还提供这个档位（`model:effort`、`efforts[]`、provider 表都算）。不提供时，降到候选池提供、且新路由也能接受的最高档，并加警告。新路由能否接受看能力下限和实时响应下限。没有这样的档位，或者用户点名了档位，就结束保持，`why` 为 `effort_gone`，重新路由。
+- 上面的降档只在会话状态跨候选池保留时发生，例如通过 `continuityStore` 选项共享存储。在真实的 Magpie 宿主里改配置会重载运行时、清空存储，会话按新候选池从历史重放，所以结果和新路由相同：能选就按新路由选，选不出就返回 503，不会有"已降档"的警告。
+- 点名了裸模型名表外的档位（例如候选池 `grok-4.7`、点名 `grok-4.7:medium`）时，新路由接受这个档位，保持也接受，不会每轮重新路由。
 - 保持期间换点名立即生效，`gpt-6-astra-medium`、`gpt-6-astra:medium`、`claude-opus-9` 这些写法都按解析后的结果比较。
 
 ### 模型健康状态
 
 - 名字有自己的条目或别名时，失败记在解析后的条目下，任何写法都会让这一行下线。
-- family 名字的失败只记在原名下。`gpt-6.2-sol-preview` 一次 502 不再让 `gpt-6.1-sol` 下线；反过来，`gpt-6.1-sol` 不健康时也不再排除 `gpt-6.2-sol-preview`。
+- family 名字的失败只记在原名下。`gpt-6.2-sol-preview` 一次 502 不再让 `gpt-6.1-sol` 下线；反过来，不点名时，`gpt-6.1-sol` 不健康也不再排除 `gpt-6.2-sol-preview`。代价是上游整体故障时，返回 503 之前多几次失败请求，上限是池里的名字数。
+- 点名的模型有自己的条目或别名且不健康时，它匹配到的所有行都排除，包括 family 行，返回 503（`model_unhealthy`）。已经停在 family 行上的会话也不再保持。点名 family 名字本身时，只看这个名字的健康状态。
 
 ### 其他行为变化
 
-- `:auto`、`:off`、`:default` 不约束档位，路由时会去掉；`-off` 不是档位后缀（`gpt-6.1-sol-off` 按 family 处理）。
+- 候选名上的 `:auto`、`:off`、`:default` 不约束档位，路由时会去掉；`-off` 不是档位后缀（`gpt-6.1-sol-off` 按 family 处理）。
+- 点名时不一样：`:default` 算一个具体档位，点名 `gpt-6.1-sol:default` 找不到对应的行，返回 503（`pin_unavailable`），和 AgentCompass 相同。
 - 任务级 `multi_task`、`task_count` 的值原样校验。`multi_task:"false"`、`task_count:0` 这类值返回 `invalid_caller_profile`。
 - 不归本插件路由的请求也会去掉点名字段，不传给上游。
 - 保持的轮次带上候选池里那一行的 `modeId`、`draws`。
 - `when` 规则排除的行会写进 `warnings` 和 `excluded`，并给出原因。
-- provider 的模型表提供不了路由结果，且在这张表内也选不出模型时，`onProvider` 调用 `ctx.reject(503)`，文案带 provider 和原因。Magpie 是否会因此转试下一个 provider，取决于网关对 `reject` 的实现，这里没有验证。
+- `onProvider` 不能拒绝请求：Magpie 在这个阶段不理会 `ctx.reject`。provider 的模型表提供不了路由结果、且表内也选不出模型时，只告警，然后照发，由上游报错和网关的转试处理。
 - 分数按 Python 的方式取整（`0.7625` → `0.762`，恰好居中时取偶数），和 AgentCompass 保持一致。

@@ -26,14 +26,18 @@ import {
   CATALOG_NAME_WARNING,
   canonicalModel,
   catalogNameWarning,
+  escapeControls,
   healthKey,
   nameFixesEffort,
   pyRound,
   resolveModel,
   resolveModelSpec,
   resolveResponsivenessModelKey,
+  safeName,
   splitEffortSuffix,
 } from "./catalog.js";
+
+const MARKED_UNHEALTHY = "model is currently marked unhealthy";
 import { inferTaskProfile, validateProfile } from "./profiler-core.js";
 import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
 
@@ -1469,8 +1473,11 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (taskCtx.needs_visual && !info.visual) {
     excluded.push("task needs visual input");
   }
-  if (taskCtx.unhealthy_models && (taskCtx.unhealthy_models.has(healthKey(rawModel, models, aliases)) || taskCtx.unhealthy_models.has(rawModel))) {
-    excluded.push("model is currently marked unhealthy");
+  if (
+    (taskCtx.unhealthy_models && (taskCtx.unhealthy_models.has(healthKey(rawModel, models, aliases)) || taskCtx.unhealthy_models.has(rawModel))) ||
+    (taskCtx.pinned_row_down && pinScope(candidate, canonical, taskCtx))
+  ) {
+    excluded.push(MARKED_UNHEALTHY);
   }
   if (
     taskCtx.min_context_tokens &&
@@ -2171,7 +2178,10 @@ export function rankCandidates(profileInput, options = {}) {
   // Build candidate list from user-configured pool or default catalog. `disabled_by_default` keeps a model out of the
   // automatic pool, not away from a user who names it.
   const pinned = pinnedModelOf(taskCtx);
-  const pinnedKey = pinned ? canonicalModel(splitPinModelAndEffort(String(pinned).trim()).modelPart, aliases, models) : null;
+  const pinnedName = pinned ? resolveModel(splitPinModelAndEffort(String(pinned).trim()).modelPart, models, aliases) : null;
+  const pinnedKey = pinnedName?.key ?? null;
+  // A pin on a name with a row of its own also matches family rows of it; with that row down, those do not stand in (contract R3).
+  taskCtx.pinned_row_down = (pinnedName?.source === "exact" || pinnedName?.source === "alias") && unhealthySet.has(pinnedName.key);
   const candidateModels =
     Array.isArray(options.candidateModels) && options.candidateModels.length > 0
       ? options.candidateModels
@@ -2386,10 +2396,12 @@ export function candidateModelName(entry) {
  * The rows a candidate list holds for this model name, with what each may run at (contract R2). Used on a route decided
  * elsewhere: a session held from an earlier turn, or a route another provider's list has to take.
  */
-function rowsNaming(list, model, catalog) {
+function rowsNaming(list, model, catalog, pins) {
   const models = catalog?.models || DEFAULT_MODELS;
   const aliases = catalog?.aliases || MODEL_ALIASES;
-  const rows = (list || []).flatMap((entry) => expandCandidate(entry, {}, catalog || {}, models, aliases));
+  // A bare entry of the pinned model runs at the effort the pin names, table or not: as a new route expands it.
+  const pinned = { constraint_model: pins?.constraintModel, constraint_effort: pins?.constraintEffort };
+  const rows = (list || []).flatMap((entry) => expandCandidate(entry, pinned, catalog || {}, models, aliases));
   attachDisabledEfforts(rows, models, aliases);
   return rows.filter((row) => row.model === model);
 }
@@ -2422,22 +2434,25 @@ function rowOffers(row, effort, catalog) {
  * `m-high`) or lists them (`{ model, efforts }`) offers those only. `{ model, effort }` is one bundle at its scoring effort and
  * may step within the dispatch table, as `allocator.py` has `own_efforts` None for it.
  */
-export function candidateOffers(list, model, effort, catalog) {
-  return rowsNaming(list, model, catalog).some((row) => rowOffers(row, effort, catalog));
+export function candidateOffers(list, model, effort, catalog, pins) {
+  return rowsNaming(list, model, catalog, pins).some((row) => rowOffers(row, effort, catalog));
 }
 
 /**
- * The effort a held session can stay on: its own while the pool offers it, else the highest one below that the pool does. `null`
- * when there is none. A name the pool does not hold verbatim is not this check's to judge: membership was settled by `gone`.
+ * The effort a held session can stay on: its own while the pool offers it, else the highest one below that the pool does and
+ * a new route for this `profile` would take (contract R2). `null` when there is none. A name the pool does not hold verbatim is
+ * not this check's to judge: membership was settled by `gone`.
  */
-export function heldEffortOn(list, model, effort, catalog) {
-  const rows = rowsNaming(list, model, catalog);
+export function heldEffortOn(list, model, effort, catalog, { pins, profile, realtimeLoop } = {}) {
+  const rows = rowsNaming(list, model, catalog, pins);
   if (rows.length === 0) return effort;
   const offers = (candidate) => rows.some((row) => rowOffers(row, candidate, catalog));
   if (offers(effort)) return effort;
+  const ranked = profile ? rankCandidates(profile, { candidateModels: list, catalog, realtime_loop: Boolean(realtimeLoop) }).ranking : null;
+  const passes = (candidate) => !ranked || ranked.some((row) => row.model === model && row.effort === candidate);
   const rank = EFFORT_ORDER.indexOf(effort);
   for (let i = rank - 1; i >= 0; i--) {
-    if (offers(EFFORT_ORDER[i])) return EFFORT_ORDER[i];
+    if (offers(EFFORT_ORDER[i]) && passes(EFFORT_ORDER[i])) return EFFORT_ORDER[i];
   }
   return null;
 }
@@ -2477,16 +2492,30 @@ function poolNameWarnings(options, models, aliases) {
   return [...new Set(names.map((name) => catalogNameWarning(name, models, aliases)).filter(Boolean))];
 }
 
+const MAX_LOGGED_NAME_WARNINGS = 1024;
+const MAX_LOG_LINE = 16384;
 const loggedNameWarnings = new Set();
 
-/** Log a route's warnings. A name warning is about the configuration, not this request: once per process. */
+/** Whether this name warning is new here. The least recently seen goes first: under `routeAllModels` a client can write names. */
+function firstNameWarning(warning) {
+  const seen = loggedNameWarnings.delete(warning);
+  loggedNameWarnings.add(warning);
+  if (loggedNameWarnings.size > MAX_LOGGED_NAME_WARNINGS) loggedNameWarnings.delete(loggedNameWarnings.values().next().value);
+  return !seen;
+}
+
+/** One line whatever the model names in it hold: a reason can quote a row's name as the request wrote it. */
+function logLine(warning) {
+  return escapeControls(warning)
+    .replace(/\S{129,}/g, (long) => `${long.slice(0, 128)}...`)
+    .slice(0, MAX_LOG_LINE);
+}
+
+/** Log a route's warnings. A name warning is about the configuration, not this request: once per runtime. */
 export function logRouteWarnings(warnings) {
   for (const warning of warnings || []) {
-    if (warning.startsWith(CATALOG_NAME_WARNING)) {
-      if (loggedNameWarnings.has(warning)) continue;
-      loggedNameWarnings.add(warning);
-    }
-    console.warn(`agentcompass: ${warning}`);
+    if (warning.startsWith(CATALOG_NAME_WARNING) && !firstNameWarning(warning)) continue;
+    console.warn(`agentcompass: ${logLine(warning)}`);
   }
 }
 
@@ -2494,18 +2523,42 @@ export function logRouteWarnings(warnings) {
  * Why a pinned choice came back blocked (`warnings` of the decision).
  */
 function blockedWarnings(result) {
-  const { pin } = result;
-  const named = pin?.bundle || pin?.model || pin?.effort;
-  if (!named) {
+  const label = pinLabel(result.pin);
+  if (!label) {
     const reasons = [...new Set(result.allCandidates.flatMap((c) => c.excluded.map((reason) => excludedLine(c, reason))))];
     return [`no candidate is available${reasons.length > 0 ? `: ${reasons.join("; ")}` : ""}`];
   }
-  const label = pin.bundle ? `pinned bundle ${pin.bundle}` : pin.model ? `pinned model ${pin.model}` : `pinned effort ${pin.effort}`;
-  const notTheOne = (reason) => reason === "explicit model constraint" || reason === "explicit bundle constraint";
-  const matching = result.allCandidates.filter((c) => !c.excluded.some(notTheOne));
+  const matching = rowsThePinNames(result);
   if (matching.length === 0) return [`${label} is not among the candidates`];
   const reasons = [...new Set(matching.flatMap((c) => c.excluded))];
   return [`${label} is unavailable: ${reasons.join("; ")}`];
+}
+
+/** How a blocked route refers to what was pinned, or `null` with no pin. */
+function pinLabel(pin) {
+  if (pin?.bundle) return `pinned bundle ${safeName(pin.bundle)}`;
+  if (pin?.model) return `pinned model ${safeName(pin.model)}`;
+  return pin?.effort ? `pinned effort ${safeName(pin.effort)}` : null;
+}
+
+function rowsThePinNames(result) {
+  const notTheOne = (reason) => reason === "explicit model constraint" || reason === "explicit bundle constraint";
+  return result.allCandidates.filter((c) => !c.excluded.some(notTheOne));
+}
+
+/** What a client hears when a route is refused: what it pinned, a code, one sentence. The pool and its quotas stay in the local log. */
+function refusalOf(result) {
+  const label = pinLabel(result.pin);
+  if (!label) return "no_route: no candidate can serve this request";
+  const matching = rowsThePinNames(result);
+  if (matching.length === 0) return `pin_not_in_pool: ${label} is not among the candidates`;
+  if (matching.some((c) => c.excluded.includes(MARKED_UNHEALTHY))) return `model_unhealthy: ${label} is marked unhealthy`;
+  return `pin_unavailable: ${label} cannot serve this request`;
+}
+
+/** The refusal of a block with no decision behind it: its code and one sentence. */
+export function blockedRefusal(blocked) {
+  return blocked.refusal || `${blocked.error || "no_route"}: this request could not be routed`;
 }
 
 /**
@@ -2521,6 +2574,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
       ok: false,
       blocked: true,
       error: "invalid_caller_profile",
+      refusal: "invalid_caller_profile: the task profile is invalid",
       targetModel: null,
       canonicalModel: null,
       targetEffort: "high",
@@ -2538,6 +2592,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
   return {
     ok: Boolean(top),
     blocked: !top,
+    refusal: top ? null : refusalOf(result),
     targetModel: top ? top.model : null,
     canonicalModel: top ? top.canonicalModel : null,
     targetEffort: top ? top.effort : "high",
