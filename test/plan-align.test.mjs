@@ -23,9 +23,9 @@ test("Codex: plus 5h = 10; pro100 (alias prolite) and pro have no 5h window of t
   assert.equal(cap("codex", "pro100"), 175);
   assert.equal(cap("codex", "prolite"), 175);
   assert.equal(cap("codex", "pro"), 325);
-  // A 5h window reported for a plan without one is sized as its weekly figure, not as a derived 35 / 65.
-  assert.equal(cap("codex", "prolite", "five_hour"), 175);
-  assert.equal(cap("codex", "pro", "five_hour"), 325);
+  // A 5h window reported for a plan without one is observation-only (null capacity), not sized as weekly.
+  assert.equal(cap("codex", "prolite", "five_hour"), null);
+  assert.equal(cap("codex", "pro", "five_hour"), null);
 });
 
 test("Claude: 5h pro 18 / max5 94 / max20 376; max5 weekly_fable 700; bare max is max5", () => {

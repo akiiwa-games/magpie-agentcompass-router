@@ -23,6 +23,7 @@ import {
   coldAfterMs,
   computeSessionKey,
   defaultContinuityStore,
+  effectiveRealtimeLoop,
   evaluateProviderContinuation,
   firstWords,
   isCompactionText,
@@ -33,6 +34,7 @@ import {
   stripAgentNoise,
   userSaidFromText,
 } from "./continuity.js";
+import { extractRequestFacts } from "./profiler-core.js";
 import {
   computeWindowCost,
   demandForecast,
@@ -267,6 +269,19 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   }
 
   // Case 2: Magpie Routing Group per-turn decision (`state.message` / `state.turn` + `questions.intent` / `level` / `effort`)
+  const now = Number.isFinite(pluginOptions.now) ? Number(pluginOptions.now) : Date.now();
+  const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions, now);
+  const hasStateTurn =
+    typeof state.message === "string" ||
+    typeof state.turn === "string" ||
+    typeof state.task?.objective === "string";
+  const chatFacts =
+    !hasStateTurn &&
+    bodyObj &&
+    (Array.isArray(bodyObj.messages) || Array.isArray(bodyObj.input) || typeof bodyObj.prompt === "string")
+      ? extractRequestFacts(bodyObj, { options: pluginOptions })
+      : null;
+
   const turnText =
     typeof state.message === "string"
       ? state.message
@@ -274,14 +289,14 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
         ? state.turn
         : typeof state.task?.objective === "string"
           ? state.task.objective
-          : JSON.stringify(state);
+          : chatFacts?.turnText || chatFacts?.objective || JSON.stringify(state);
 
   const prevUser =
     typeof state.previous_user_message === "string"
       ? state.previous_user_message
       : typeof state.previous_user === "string"
         ? state.previous_user
-        : "";
+        : chatFacts?.previousUser || "";
   const prevKind =
     typeof state.previous_message_kind === "string" ? state.previous_message_kind.trim() : "";
   const prevReasoning =
@@ -299,15 +314,137 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
           ? rawTaskObj.realtime_loop
           : rawTaskObj.needs && typeof rawTaskObj.needs === "object" && typeof rawTaskObj.needs.realtime_loop === "boolean"
             ? rawTaskObj.needs.realtime_loop
-            : undefined;
+            : chatFacts?.realtime_loop;
+
+  const store = pluginOptions.continuityStore || defaultContinuityStore;
+  const candidateModels = pluginOptions.candidateModels || pluginOptions.allowedModels;
+  const chatSessionKey = chatFacts ? chatFacts.sessionKey || computeSessionKey(bodyObj, { options: pluginOptions }) : "";
+  const chatSessionState = chatSessionKey ? store.get(chatSessionKey, now) : null;
+  const chatCont =
+    chatFacts && chatSessionKey
+      ? evaluateProviderContinuation(chatFacts, chatSessionState, {
+          now,
+          affinityMode: pluginOptions.affinityMode || pluginOptions.affinity || "cache",
+          availableModels: candidateModels,
+          unhealthyModels: pluginOptions.unhealthyModels,
+          quotas: liveQuotas,
+          policy: pluginOptions.catalog?.policy,
+          store,
+          coldAfterMs: pluginOptions.coldAfterMs,
+          cacheTtl: pluginOptions.cacheTtl,
+          models: pluginOptions.catalog?.models,
+          aliases: pluginOptions.catalog?.aliases,
+          realtime_loop: explicitStateRt,
+        })
+      : null;
+
+  if (chatCont && chatCont.shouldHold && chatCont.model) {
+    const realtimeLoop = effectiveRealtimeLoop(chatFacts, chatSessionState, pluginOptions);
+    const heldRealtime = chatSessionState?.realtimeLoop === true && realtimeLoop !== false;
+    const heldEffort = keepsEffort(
+      chatSessionState,
+      chatCont.effort || chatSessionState?.effort || "high",
+      chatFacts.estimatedInputTokens,
+      now,
+      {
+        ...pluginOptions,
+        ...(realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop }),
+        isShortFollowup: chatFacts.isShortFollowup,
+      }
+    );
+    const heldModel = heldRealtime && chatSessionState?.target ? chatSessionState.target : chatCont.model;
+    store.recordRequest(
+      chatSessionKey,
+      {
+        model: heldModel,
+        effort: heldEffort,
+        provider: chatCont.provider || chatSessionState?.provider || "",
+        workKind: chatSessionState?.workKind || "general_implementation",
+        difficulty: chatSessionState?.difficulty || "routine",
+        realtimeLoop: heldRealtime,
+        why: chatCont.why,
+        held: true,
+      },
+      chatFacts,
+      now
+    );
+    const heldAccounts = liveQuotas ? listQuotaAccounts(liveQuotas, now, pluginOptions.catalog?.policy) : undefined;
+    const heldWarnings = liveQuotas ? quotaAccountWarnings(liveQuotas, now, pluginOptions.catalog?.policy) : [];
+    const answers = {};
+    const syntheticDecision = {
+      workKind: chatSessionState?.workKind || "general_implementation",
+      difficulty: chatSessionState?.difficulty || "routine",
+      targetModel: heldModel,
+      targetEffort: heldEffort,
+    };
+    if (questions.intent?.criteria) {
+      answers.intent = matchMagpieIntentChoice(questions.intent.criteria, syntheticDecision);
+    }
+    if (questions.level?.criteria) {
+      answers.level = matchMagpieIntentChoice(questions.level.criteria, syntheticDecision);
+    }
+    if (questions.effort) {
+      answers.effort = buildEffortAnswer(heldEffort, 0.94);
+    }
+    return {
+      model,
+      answers,
+      agentcompass: {
+        ok: true,
+        targetModel: heldModel,
+        targetEffort: heldEffort,
+        ...(heldWarnings.length ? { warnings: heldWarnings } : {}),
+        ...(heldAccounts ? { accounts: heldAccounts } : {}),
+        workKind: syntheticDecision.workKind,
+        difficulty: syntheticDecision.difficulty,
+        continuation: {
+          held: true,
+          why: chatCont.why,
+          sessionKey: chatSessionKey,
+          previousModel: chatCont.previousModel || heldModel,
+          previousEffort: chatCont.previousEffort || heldEffort,
+        },
+        scorer: {
+          kind: "continuity_hold",
+          held: true,
+          why: chatCont.why,
+          calls: 0,
+        },
+      },
+      usage: {
+        input_tokens: Math.max(8, Math.ceil(turnText.length / 4)),
+        output_tokens: 16,
+      },
+    };
+  }
 
   // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)
   // when Magpie's `decide.go` passes `previous_message_kind` / `previous_message_reasoning`.
+  const followupQuotaCheck =
+    !explicitStateRt &&
+    (prevKind || prevReasoning) &&
+    isShortFollowupMessage(turnText) &&
+    !isCompactionText(turnText) &&
+    liveQuotas
+      ? selectBestRoute(
+          { objective: turnText },
+          {
+            objective: turnText,
+            candidateModels,
+            catalog: pluginOptions.catalog,
+            quotas: healthOnlyQuotas(liveQuotas, now, pluginOptions.catalog?.policy),
+            meteredOk: pluginOptions.meteredOk,
+            now,
+          }
+        )
+      : null;
+
   if (
     !explicitStateRt &&
     (prevKind || prevReasoning) &&
     isShortFollowupMessage(turnText) &&
-    !isCompactionText(turnText)
+    !isCompactionText(turnText) &&
+    (!followupQuotaCheck || followupQuotaCheck.ok)
   ) {
     const heldEffort = ratchetEffort(prevReasoning || "high", "medium", [
       "low",
@@ -347,12 +484,18 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       };
     }
 
+    const heldAccounts = liveQuotas ? listQuotaAccounts(liveQuotas, now, pluginOptions.catalog?.policy) : undefined;
+    const heldWarnings = liveQuotas ? quotaAccountWarnings(liveQuotas, now, pluginOptions.catalog?.policy) : [];
+
     return {
       model,
       answers,
       agentcompass: {
-        targetModel: null,
+        ok: true,
+        targetModel: followupQuotaCheck?.targetModel || null,
         targetEffort: heldEffort,
+        ...(heldWarnings.length ? { warnings: heldWarnings } : {}),
+        ...(heldAccounts ? { accounts: heldAccounts } : {}),
         workKind: prevKind || "general_implementation",
         difficulty: syntheticDecision.difficulty,
         continuation: {
@@ -378,7 +521,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   const taskFacts = {
     objective: turnText,
     previousUser: prevUser,
-    hasVisualInput: Boolean(state.has_visual_input),
+    hasVisualInput: Boolean(state.has_visual_input || chatFacts?.hasVisualInput),
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   };
 
@@ -401,13 +544,13 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   });
 
-  const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions);
   let decision = selectBestRoute(profile, {
     objective: turnText,
-    candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
+    candidateModels,
     catalog: pluginOptions.catalog,
     quotas: liveQuotas,
     meteredOk: pluginOptions.meteredOk,
+    now,
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
     ...pinOptionsOf(pluginOptions),
   });
@@ -415,12 +558,31 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     // Exhausted windows are ignored here, but expired / failing / signed-out accounts stay excluded.
     decision = selectBestRoute(profile, {
       objective: turnText,
-      candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
+      candidateModels,
       catalog: pluginOptions.catalog,
-      quotas: healthOnlyQuotas(liveQuotas, Date.now(), pluginOptions.catalog?.policy),
+      quotas: healthOnlyQuotas(liveQuotas, now, pluginOptions.catalog?.policy),
+      meteredOk: pluginOptions.meteredOk,
+      now,
       ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
       ...pinOptionsOf(pluginOptions),
     });
+  }
+
+  if (chatSessionKey && decision.ok && decision.targetModel) {
+    store.recordRequest(
+      chatSessionKey,
+      {
+        model: decision.targetModel,
+        effort: decision.targetEffort || "high",
+        workKind: decision.workKind,
+        difficulty: decision.difficulty,
+        realtimeLoop: Boolean(decision.realtimeLoop),
+        why: chatCont?.why || "first",
+        held: false,
+      },
+      chatFacts,
+      now
+    );
   }
 
   const answers = {};
@@ -488,6 +650,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     model,
     answers,
     agentcompass: {
+      ok: Boolean(decision.ok && decision.targetModel),
       targetModel: decision.targetModel,
       targetEffort: effectiveEffort,
       selectedAccount: decision.selectedAccount || null,
@@ -500,9 +663,10 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       realtimeLoop: Boolean(decision.realtimeLoop),
       continuation: {
         held: false,
-        why: prevKind ? "reclassified" : "first",
+        why: chatCont?.why || (prevKind ? "reclassified" : "first"),
         previousKind: prevKind || null,
         previousEffort: prevReasoning || null,
+        ...(chatCont?.previousModel ? { previousModel: chatCont.previousModel } : {}),
       },
       profile,
       scorer: meta,

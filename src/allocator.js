@@ -30,7 +30,7 @@ import {
   resolveResponsivenessModelKey,
 } from "./catalog.js";
 import { inferTaskProfile, validateProfile } from "./profiler-core.js";
-import { evaluateModelQuota, listQuotaAccounts, normalizeQuotaSnapshot } from "./quota.js";
+import { evaluateModelQuota, listQuotaAccounts, normalizeQuotaSnapshot, providerMatchesModel } from "./quota.js";
 
 export const EFFORT_SCALED_CAPABILITIES = [
   "reasoning",
@@ -1832,10 +1832,25 @@ export function rankCandidates(profileInput, options = {}) {
     : null;
 
   // Build candidate list from user-configured pool or default catalog
+  const hasRealQuotaAccounts = Boolean(
+    normalizedQuotas &&
+      Array.isArray(normalizedQuotas._normalized) &&
+      normalizedQuotas._normalized.some((e) => !e.poolLevel)
+  );
   const candidateModels =
     Array.isArray(options.candidateModels) && options.candidateModels.length > 0
       ? options.candidateModels
-      : Object.keys(models).filter((m) => m !== "deepseek-v4.1-flash-free" && !models[m]?.disabled_by_default);
+      : Object.keys(models).filter(
+          (m) =>
+            m !== "deepseek-v4.1-flash-free" &&
+            !models[m]?.disabled_by_default &&
+            (!hasRealQuotaAccounts ||
+              normalizedQuotas._normalized.some(
+                (e) =>
+                  !e.poolLevel &&
+                  (providerMatchesModel(e.provider, m, aliases) || providerMatchesModel(e.key, m, aliases))
+              ))
+        );
 
   const candidateCanonicals = new Set();
   for (const entry of candidateModels) {

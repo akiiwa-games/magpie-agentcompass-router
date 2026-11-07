@@ -4,15 +4,24 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  SessionContinuityStore,
   evaluateModelQuota,
   formatQuotaAccountList,
+  handleSystemOneRequest,
   healthOnlyQuotas,
   listQuotaAccounts,
   normalizeQuotaSnapshot,
+  orderSeatsByQuotaEconomics,
   selectBestRoute,
 } from "../src/index.js";
-import { handleSystemOneRequest } from "../src/index.js";
-import { ACCOUNT_STATES, DEFAULT_USAGE_MAX_AGE_HOURS } from "../src/quota.js";
+import { onRequest as hookOnRequest } from "../src/hooks.js";
+import {
+  onAccount as mwOnAccount,
+  onProvider as mwOnProvider,
+  onRequest as mwOnRequest,
+  strategies,
+} from "../src/middleware.js";
+import { ACCOUNT_STATES, DEFAULT_USAGE_MAX_AGE_HOURS, normalizePlan } from "../src/quota.js";
 
 const T0 = 1_700_000_000_000;
 const HOUR = 3600 * 1000;
@@ -288,4 +297,242 @@ test("Q3 the decision provider response lists accounts and warnings", async () =
   assert.deepEqual(ac.accounts.map((a) => [a.key, a.state]), [["claude/dead", "plan_inactive"], ["codex/ok", "ready"]]);
   assert.ok(ac.warnings.some((w) => w.startsWith("claude/dead: plan_inactive")));
   assert.equal(ac.selectedAccount === "claude/dead", false);
+});
+
+test("M1: orderSeatsByQuotaEconomics ranks excluded seats behind exhausted healthy seats, and usage_failing behind ready", () => {
+  const seats = [
+    {
+      key: "claude/expired",
+      account: "expired",
+      state: "plan_inactive",
+      excluded: true,
+      status: "expired",
+      plan: "free",
+      known: true,
+      used: 5,
+      soon: [T0 + HOUR],
+    },
+    {
+      key: "claude/exhausted",
+      account: "exhausted",
+      state: "ready",
+      excluded: false,
+      status: "ok",
+      plan: "max20",
+      known: true,
+      used: 100,
+      resting: true,
+      soon: [T0 + HOUR],
+    },
+  ];
+  const orderIdx = orderSeatsByQuotaEconomics("claude", seats, { now: T0 });
+  assert.deepEqual(orderIdx, [1, 0]);
+  assert.equal(seats[orderIdx[0]].key, "claude/exhausted");
+
+  const nativeSeats = [
+    { key: "claude/dead", account: "dead", known: true, learns: 1, used: 5, soon: [T0 + 24 * HOUR], pace: 0, weight: 1, resting: false, tokens: 0 },
+    { key: "claude/exhausted", account: "exhausted", known: true, learns: 1, used: 100, soon: [T0 + 24 * HOUR], pace: 0, weight: 1, resting: true, tokens: 0 },
+  ];
+  const stratIdx = strategies.agentcompass("claude", nativeSeats, {
+    now: T0,
+    quotas: [
+      { provider: "claude", account: "dead", plan: "free", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 95 })] },
+      { provider: "claude", account: "exhausted", plan: "max20", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 0 })] },
+    ],
+  });
+  assert.deepEqual(stratIdx, [1, 0]);
+
+  const failingVsReady = [
+    { key: "claude/failing", account: "failing", state: "usage_failing", excluded: false, known: true, used: 10, soon: [T0 + 12 * HOUR] },
+    { key: "claude/ready", account: "ready", state: "ready", excluded: false, known: true, used: 40, soon: [T0 + 100 * HOUR] },
+  ];
+  assert.deepEqual(orderSeatsByQuotaEconomics("claude", failingVsReady, { now: T0 }), [1, 0]);
+});
+
+test("M2: hooks, middleware, and session continuation preserve warnings/accounts and block dispatch when accounts are excluded", async () => {
+  const allInactiveQuotas = [
+    { provider: "claude", account: "acc1", plan: "free", updated_at: iso(T0 - 60_000), windows: [win()] },
+    { provider: "codex", account: "acc2", status: "auth_failed", updated_at: iso(T0 - 60_000), windows: [win()] },
+  ];
+  const body = { model: "agentcompass", messages: [{ role: "user", content: "Write a parser" }] };
+  const ctx = {
+    options: { quotas: allInactiveQuotas, candidateModels: ["claude-opus-4-6", "gpt-5.4"], now: T0 },
+    state: {},
+  };
+  await hookOnRequest(body, ctx);
+  assert.equal(ctx.state.route.ok, false);
+  assert.equal(ctx.state.route.targetModel, null);
+  assert.equal(ctx.state.route.accounts.length, 2);
+  assert.ok(ctx.state.route.warnings.some((w) => w.includes("claude/acc1: plan_inactive")));
+
+  mwOnRequest(body, ctx);
+  assert.equal(body.model, "agentcompass");
+  assert.equal(ctx.state.route.ok, false);
+
+  mwOnProvider(body, {
+    provider: { id: "claude", name: "claude", model: "claude-opus-4-6" },
+    options: ctx.options,
+    state: ctx.state,
+  });
+  assert.equal(body.model, "agentcompass", "onProvider must not rewrite model when all accounts are excluded");
+  assert.deepEqual(mwOnAccount({ provider: "claude", name: "acc1" }, ctx), { skip: true });
+
+  // Session continuation hold preserves warnings & accounts and breaks hold if account becomes plan_inactive
+  const store = new SessionContinuityStore();
+  let activeQuotas = [
+    { provider: "claude", account: "acc1", plan: "max20", error: "upstream timeout", last_success_at: iso(T0 - 60_000), windows: [win()] },
+  ];
+  const holdCtx1 = {
+    options: { continuityStore: store, quotas: activeQuotas, candidateModels: ["claude-opus-4-6"], now: T0 },
+    state: {},
+  };
+  await hookOnRequest({ model: "agentcompass", session_id: "s-hold", messages: [{ role: "user", content: "Implement feature A" }] }, holdCtx1);
+  assert.equal(holdCtx1.state.route.targetModel, "claude-opus-4-6");
+
+  const holdCtx2 = {
+    options: { continuityStore: store, quotas: activeQuotas, candidateModels: ["claude-opus-4-6"], now: T0 + 1000 },
+    state: {},
+  };
+  await hookOnRequest(
+    {
+      model: "agentcompass",
+      session_id: "s-hold",
+      messages: [
+        { role: "user", content: "Implement feature A" },
+        { role: "assistant", content: "Part 1 done" },
+        { role: "user", content: "继续" },
+      ],
+    },
+    holdCtx2
+  );
+  assert.equal(holdCtx2.state.route.continuation.held, true);
+  assert.ok(holdCtx2.state.route.warnings?.some((w) => w.includes("claude/acc1: usage_failing")));
+  assert.equal(holdCtx2.state.route.accounts?.length, 1);
+
+  const sysFollowupInvalid = await handleSystemOneRequest(
+    {
+      model: "agentcompass-systemone",
+      state: {
+        turn: "继续",
+        previous_message_kind: "general_implementation",
+        previous_message_reasoning: "high",
+        quotas: [{ provider: "claude", account: "acc1", plan: "free", status: "expired", updated_at: iso(T0 - 60_000), windows: [win()] }],
+      },
+    },
+    { candidateModels: ["claude-opus-4-6"], now: T0 }
+  );
+  assert.equal(sysFollowupInvalid.agentcompass.continuation.held, false);
+  assert.equal(sysFollowupInvalid.agentcompass.targetModel, null);
+  assert.ok(sysFollowupInvalid.agentcompass.warnings.some((w) => w.includes("claude/acc1: plan_inactive")));
+});
+
+test("M3b: healthOnlyQuotas preserves meteredOk and exhausted balance ($0) checks", async () => {
+  const snapBalance = [
+    { provider: "claude", account: "sub-exhausted", plan: "pro", updated_at: iso(T0 - 60_000), windows: [win({ remaining: 0, used: 100 })] },
+    { provider: "codex", account: "zero-balance", kind: "balance", balance: { amount: 0, currency: "USD" }, updated_at: iso(T0 - 60_000) },
+  ];
+  const res = await handleSystemOneRequest(
+    { model: "agentcompass", messages: [{ role: "user", content: "Hello" }] },
+    { quotas: snapBalance, meteredOk: false, candidateModels: ["claude-sonnet-4-6", "gpt-5.4"], now: T0 }
+  );
+  assert.equal(res.agentcompass.targetModel, "claude-sonnet-4-6");
+  assert.equal(res.agentcompass.selectedAccount, "claude/sub-exhausted");
+  assert.equal(res.agentcompass.quota.kind, "subscription");
+
+  const bothBlocked = [
+    { provider: "claude", account: "dead", plan: "free", status: "expired", updated_at: iso(T0 - 60_000), windows: [win()] },
+    { provider: "codex", account: "zero-balance", kind: "balance", balance: { amount: 0, currency: "USD" }, updated_at: iso(T0 - 60_000) },
+  ];
+  const resBlocked = await handleSystemOneRequest(
+    { model: "agentcompass", messages: [{ role: "user", content: "Hello" }] },
+    { quotas: bothBlocked, meteredOk: false, candidateModels: ["claude-sonnet-4-6", "gpt-5.4"], now: T0 }
+  );
+  assert.equal(resBlocked.agentcompass.targetModel, null);
+});
+
+test("M4: normalizePlan vendor-word stripping, HTTP 402 / INACTIVE_ERROR_CODES as plan_inactive, and failed poll timestamp discipline", () => {
+  for (const [prov, label] of [
+    ["antigravity", "Google AI Free"],
+    ["codex", "ChatGPT Free"],
+    ["claude", "Claude Free"],
+    ["antigravity", "Antigravity Free Tier"],
+  ]) {
+    const p = normalizePlan(prov, label);
+    assert.equal(p.inactive, true, `${prov}/${label} must be inactive`);
+  }
+
+  const rows = listQuotaAccounts(
+    [
+      { provider: "claude", account: "http402", plan: "pro", error: { status: 402, code: "payment_required" }, last_success_at: iso(T0 - 60_000), windows: [win()] },
+      { provider: "claude", account: "http403_sub_exp", plan: "pro", error: { status: 403, code: "subscription_expired" }, last_success_at: iso(T0 - 60_000), windows: [win()] },
+      { provider: "claude", account: "poll_reset", plan: "pro", error: "timeout", failing_since: iso(T0 - 10 * HOUR), fetched_at: iso(T0 - 60_000), windows: [win()] },
+      { provider: "claude", account: "failing_3h", plan: "pro", error: "timeout", failing_since: iso(T0 - 3 * HOUR), windows: [] },
+    ],
+    T0
+  );
+  assert.equal(rows[0].state, "plan_inactive");
+  assert.equal(rows[0].dispatchable, false);
+  assert.equal(rows[1].state, "plan_inactive");
+  assert.equal(rows[1].dispatchable, false);
+  assert.equal(rows[2].state, "usage_failing");
+  assert.equal(rows[2].last_success_at, null, "failed poll fetched_at must not overwrite last_success_at");
+  assert.equal(rows[2].dispatchable, false, "10h failing_since must exclude account");
+  assert.equal(rows[3].state, "usage_failing");
+  assert.equal(rows[3].dispatchable, true, "3h failing_since without last_success_at is still within 6h grace");
+});
+
+test("M5: Codex pro and pro100 treat five_hour as observation-only (block only at <= 0%, no 10% floor, no opportunity cost)", () => {
+  const m5a = evaluateModelQuota(
+    "gpt-5.4",
+    "high",
+    { hours: 0.5 },
+    {
+      "codex/pro-acct": {
+        plan: "pro",
+        windows: [
+          { name: "five_hour", remaining: 8, resetsInHours: 2 },
+          { name: "seven_day", remaining: 80, resetsInHours: 100 },
+        ],
+      },
+    },
+    {},
+    T0
+  );
+  assert.equal(m5a.eligible, true);
+  assert.deepEqual(m5a.excluded, []);
+
+  const m5Exhausted = evaluateModelQuota(
+    "gpt-5.4",
+    "high",
+    { hours: 0.5 },
+    {
+      "codex/pro-acct": {
+        plan: "pro",
+        windows: [
+          { name: "five_hour", remaining: 0, resetsInHours: 2 },
+          { name: "seven_day", remaining: 80, resetsInHours: 100 },
+        ],
+      },
+    },
+    {},
+    T0
+  );
+  assert.equal(m5Exhausted.eligible, false);
+
+  const m5b = evaluateModelQuota(
+    "gpt-5.4",
+    "high",
+    { hours: 0.5 },
+    {
+      "codex/pro-5h-only": {
+        plan: "pro",
+        windows: [{ name: "five_hour", remaining: 50, resetsInHours: 2 }],
+      },
+    },
+    {},
+    T0
+  );
+  assert.equal(m5b.eligible, true);
+  assert.equal(m5b.opportunity_cost, 0);
+  assert.equal(m5b.reset_bonus, 0);
 });

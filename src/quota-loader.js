@@ -13,13 +13,28 @@ import { join } from "node:path";
 import { normalizeQuotaSnapshot } from "./quota.js";
 
 const CACHE_TTL_MS = 5000;
-const OPTION_KEYS = new Set(["usage_max_age_hours", "usageMaxAgeHours"]);
+const OPTION_KEYS = new Set(["usage_max_age_hours", "usageMaxAgeHours", "usage_fresh_hours", "usageFreshHours"]);
+const TIMESTAMP_KEYS = [
+  "fetched_at",
+  "fetchedAt",
+  "updated_at",
+  "updatedAt",
+  "read_at",
+  "last_success_at",
+  "lastSuccessAt",
+  "last_ok_at",
+  "lastOkAt",
+];
 
 let cachedPath = "";
 let cachedMtimeMs = 0;
+let cachedSize = -1;
+let cachedRawText = "";
 let cachedReadAt = 0;
 let cachedQuotas = null;
 let lastGoodAt = null;
+let failingPath = "";
+let failingSinceAt = null;
 let loadStatus = { configured: false, ok: true, path: "", cause: null, detail: null };
 let reportedSignature = "";
 
@@ -67,22 +82,66 @@ function reportLoad(signature, message) {
   if (message) console.warn(`agentcompass: ${message}`);
 }
 
+function hasExplicitTimestamp(item) {
+  if (!item || typeof item !== "object") return false;
+  for (const k of TIMESTAMP_KEYS) {
+    if (item[k] !== undefined && item[k] !== null && item[k] !== "") return true;
+    if (item.quota && typeof item.quota === "object" && item.quota[k] !== undefined && item.quota[k] !== null && item.quota[k] !== "") {
+      return true;
+    }
+  }
+  return false;
+}
+
+function stampItemTimestamp(item, fallbackAt) {
+  if (!fallbackAt || !item || typeof item !== "object" || hasExplicitTimestamp(item)) {
+    return item;
+  }
+  return { ...item, fetched_at: fallbackAt };
+}
+
+function stampSnapshotTimestamps(snapshot, fallbackAt) {
+  if (!snapshot || !fallbackAt || typeof snapshot !== "object") return snapshot;
+  if (Array.isArray(snapshot)) {
+    return snapshot.map((item) => stampItemTimestamp(item, fallbackAt));
+  }
+  if (snapshot.accounts && typeof snapshot.accounts === "object" && !Array.isArray(snapshot.accounts)) {
+    const accounts = {};
+    for (const [k, v] of Object.entries(snapshot.accounts)) {
+      accounts[k] = stampItemTimestamp(v, fallbackAt);
+    }
+    return { ...snapshot, accounts };
+  }
+  const out = {};
+  for (const [k, v] of Object.entries(snapshot)) {
+    out[k] = OPTION_KEYS.has(k) ? v : stampItemTimestamp(v, fallbackAt);
+  }
+  return out;
+}
+
 /**
  * The configured quotas file could not be used. The last good snapshot (if any) is kept, so its readings
  * age out through the 6h rule, and a pool-level `usage_failing` entry (`quotas_unreadable`) is added so the
- * account list and decision warnings say so. Dispatch is not blocked by this entry.
+ * account list and decision warnings say so. Once the file-level failure exceeds 6h without a successful read,
+ * dispatch is stopped.
  */
 function loadFailed(qPath, cause, detail, nowMs) {
   loadStatus = { configured: true, ok: false, path: qPath, cause, detail: detail || null };
+  if (!failingSinceAt || failingPath !== qPath) {
+    failingPath = qPath;
+    failingSinceAt = new Date(nowMs).toISOString();
+  }
   const text = `quotas_unreadable: ${cause}${detail ? ` (${detail})` : ""} at ${qPath}`;
   reportLoad(`${qPath}|${cause}|${detail || ""}`, `quotas file unusable, ${text}`);
-  const lastGood = cachedQuotas && cachedPath === qPath ? cachedQuotas : null;
+  const rawLastGood = cachedQuotas && cachedPath === qPath ? cachedQuotas : null;
+  const lastGood = stampSnapshotTimestamps(rawLastGood, lastGoodAt);
   const entry = {
     provider: "pool",
     name: "quotas",
     pool_level: true,
     status: "error",
     error: { message: text },
+    failing_since: failingSinceAt,
     ...(lastGoodAt !== null ? { last_success_at: lastGoodAt } : {}),
   };
   if (Array.isArray(lastGood)) return [...lastGood, entry];
@@ -112,27 +171,26 @@ export function loadLiveQuotas(options = {}, nowMs = Date.now()) {
     return null;
   }
 
-  if (
-    loadStatus.ok &&
-    cachedQuotas &&
-    cachedPath === qPath &&
-    nowMs - cachedReadAt < CACHE_TTL_MS
-  ) {
-    return cachedQuotas;
-  }
-
   let rawText;
   let mtimeMs;
+  let size;
   try {
     if (!existsSync(qPath)) return loadFailed(qPath, "missing", null, nowMs);
     const st = statSync(qPath);
     mtimeMs = st.mtimeMs;
-    if (loadStatus.ok && cachedQuotas && cachedPath === qPath && st.mtimeMs === cachedMtimeMs) {
+    size = st.size;
+    rawText = readFileSync(qPath, "utf8");
+    if (
+      loadStatus.ok &&
+      cachedQuotas &&
+      cachedPath === qPath &&
+      st.mtimeMs === cachedMtimeMs &&
+      st.size === cachedSize &&
+      rawText === cachedRawText
+    ) {
       cachedReadAt = nowMs;
-      lastGoodAt = new Date(nowMs).toISOString();
       return cachedQuotas;
     }
-    rawText = readFileSync(qPath, "utf8");
   } catch (err) {
     return loadFailed(qPath, "unreadable", err?.code || "read error", nowMs);
   }
@@ -148,9 +206,13 @@ export function loadLiveQuotas(options = {}, nowMs = Date.now()) {
 
   cachedPath = qPath;
   cachedMtimeMs = mtimeMs;
+  cachedSize = size;
+  cachedRawText = rawText;
   cachedReadAt = nowMs;
   cachedQuotas = parsed;
   lastGoodAt = new Date(nowMs).toISOString();
+  failingPath = "";
+  failingSinceAt = null;
   loadStatus = { configured: true, ok: true, path: qPath, cause: null, detail: null };
   reportLoad("", reportedSignature ? `quotas file readable again at ${qPath}` : "");
   return parsed;
@@ -159,9 +221,13 @@ export function loadLiveQuotas(options = {}, nowMs = Date.now()) {
 export function clearQuotasCache() {
   cachedPath = "";
   cachedMtimeMs = 0;
+  cachedSize = -1;
+  cachedRawText = "";
   cachedReadAt = 0;
   cachedQuotas = null;
   lastGoodAt = null;
+  failingPath = "";
+  failingSinceAt = null;
   loadStatus = { configured: false, ok: true, path: "", cause: null, detail: null };
   reportedSignature = "";
 }

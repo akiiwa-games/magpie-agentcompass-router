@@ -16,9 +16,18 @@ import {
   keepsEffort,
 } from "./continuity.js";
 import { extractRequestFacts } from "./profiler-core.js";
-import { healthOnlyQuotas } from "./quota.js";
+import { healthOnlyQuotas, listQuotaAccounts, quotaAccountWarnings } from "./quota.js";
 import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
+
+function emitWarnings(warnings, ctx) {
+  if (!Array.isArray(warnings) || warnings.length === 0) return;
+  for (const w of warnings) {
+    if (typeof ctx?.warn === "function") {
+      ctx.warn(w);
+    }
+  }
+}
 
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -215,6 +224,10 @@ export async function onRequest(body, ctx = {}) {
       );
     }
 
+    const heldAccounts = liveQuotas ? listQuotaAccounts(liveQuotas, now, options.catalog?.policy) : undefined;
+    const heldWarnings = liveQuotas ? quotaAccountWarnings(liveQuotas, now, options.catalog?.policy) : [];
+    emitWarnings(heldWarnings, ctx);
+
     const carrier = {
       v: 1,
       targetModel: heldModel,
@@ -223,6 +236,8 @@ export async function onRequest(body, ctx = {}) {
       modelWithEffort: `${heldModel}:${heldEffort}`,
       canRewriteModel,
       hasExplicitCandidates,
+      ...(heldWarnings.length ? { warnings: heldWarnings } : {}),
+      ...(heldAccounts ? { accounts: heldAccounts } : {}),
       workKind: sessionState?.workKind || "general_implementation",
       difficulty: sessionState?.difficulty || "routine",
       realtimeLoop: heldRealtime,
@@ -325,13 +340,55 @@ export async function onRequest(body, ctx = {}) {
       candidateModels,
       catalog: options.catalog,
       quotas: liveQuotas ? healthOnlyQuotas(liveQuotas, now, options.catalog?.policy) : undefined,
+      meteredOk: options.meteredOk,
       now,
       ...realtimeOption,
       ...pinOptionsOf(options),
     });
   }
 
+  emitWarnings(decision.warnings, ctx);
+
   if (!decision.ok || !decision.targetModel) {
+    const failedCarrier = {
+      v: 1,
+      ok: false,
+      reason: decision.reason || "no_eligible_candidate",
+      targetModel: null,
+      canonicalModel: null,
+      targetEffort: null,
+      modelWithEffort: null,
+      canRewriteModel,
+      hasExplicitCandidates,
+      selectedAccount: null,
+      quota: null,
+      ...(decision.warnings?.length ? { warnings: decision.warnings } : {}),
+      ...(decision.accounts ? { accounts: decision.accounts } : {}),
+      workKind: decision.workKind,
+      difficulty: decision.difficulty,
+      requiredAbility: decision.requiredAbility,
+      realtimeLoop: Boolean(decision.realtimeLoop),
+      score: null,
+      components: null,
+      profile: decision.profile || profile,
+      scorer: meta,
+      continuation: {
+        held: false,
+        why: cont.why,
+        reasonDetail: cont.reasonDetail || null,
+        sessionKey,
+        turn: facts.turn,
+        within: facts.within,
+        previousModel: cont.previousModel || null,
+        previousEffort: cont.previousEffort || null,
+      },
+      topCandidates: decision.topCandidates || [],
+    };
+    ctx.state = ctx.state || {};
+    ctx.state.sessionKey = sessionKey;
+    ctx.state.route = failedCarrier;
+    ctx.state.agentcompass = failedCarrier;
+    ctx.reject?.(503, `No eligible model/account available (${failedCarrier.reason}).`);
     ctx.report?.("empty");
     return undefined;
   }

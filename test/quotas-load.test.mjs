@@ -155,4 +155,37 @@ test("a file that breaks after a good read keeps the last snapshot, so an expire
       [["claude/a", "ready"], ["claude/dead", "plan_inactive"], ["pool/quotas", "usage_failing"]]
     );
     assert.equal(rows[2].last_success_at, new Date(T0).toISOString());
+
+    // M3a: 10h after quotas.json breaks, accounts without inline timestamps and pool/quotas age out and stop dispatch
+    const broken10h = loadLiveQuotas({ quotasPath }, T0 + 10 * 3600_000);
+    const rows10h = listQuotaAccounts(broken10h, T0 + 10 * 3600_000);
+    assert.equal(rows10h.find((r) => r.key === "claude/a").dispatchable, false);
+    assert.equal(rows10h.find((r) => r.key === "pool/quotas").dispatchable, false);
+    const d10h = selectBestRoute(implProfile, {
+      candidateModels: ["claude-sonnet-4-6"],
+      now: T0 + 10 * 3600_000,
+      quotas: broken10h,
+    });
+    assert.equal(d10h.ok, false);
+    assert.equal(d10h.targetModel, null);
+  }));
+
+test("M3a: a quotas file broken from startup stops dispatch once failing_since exceeds 6h", () =>
+  withTmp((dir) => {
+    const quotasPath = path.join(dir, "quotas.json");
+    fs.writeFileSync(quotasPath, "{ nope");
+    const q0 = loadLiveQuotas({ quotasPath }, T0);
+    assert.equal(listQuotaAccounts(q0, T0)[0].dispatchable, true);
+
+    const q7h = loadLiveQuotas({ quotasPath }, T0 + 7 * 3600_000);
+    const [pool7h] = listQuotaAccounts(q7h, T0 + 7 * 3600_000);
+    assert.equal(pool7h.key, "pool/quotas");
+    assert.equal(pool7h.dispatchable, false);
+    const d7h = selectBestRoute(implProfile, {
+      candidateModels: ["claude-sonnet-4-6"],
+      now: T0 + 7 * 3600_000,
+      quotas: q7h,
+    });
+    assert.equal(d7h.ok, false);
+    assert.equal(d7h.targetModel, null);
   }));

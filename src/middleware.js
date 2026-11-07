@@ -30,7 +30,13 @@ import {
   recentUserTurns,
 } from "./continuity.js";
 import { extractRequestFacts, inferTaskProfile } from "./profiler-core.js";
-import { healthOnlyQuotas, orderSeatsByQuotaEconomics } from "./quota.js";
+import {
+  healthOnlyQuotas,
+  listQuotaAccounts,
+  orderSeatsByQuotaEconomics,
+  quotaAccountWarnings,
+} from "./quota.js";
+import { loadLiveQuotas } from "./quota-loader.js";
 
 const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -323,13 +329,14 @@ function routeClaimed(body, ctx, env, depth = 0) {
   const anchor = chain?.stamp || "";
   const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
+  const liveQuotas = loadLiveQuotas(options, now);
 
   const cont = evaluateProviderContinuation(facts, sessionState, {
     now,
     affinityMode,
     availableModels: candidateModels,
     unhealthyModels: options.unhealthyModels,
-    quotas: options.quotas,
+    quotas: liveQuotas,
     policy: options.catalog?.policy,
     store,
     coldAfterMs: options.coldAfterMs,
@@ -361,6 +368,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
       heldRealtime && sessionState?.target
         ? sessionState.target
         : heldTarget(cont.model, sessionState, candidateModels, options.catalog?.aliases);
+    const heldAccounts = liveQuotas ? listQuotaAccounts(liveQuotas, now, options.catalog?.policy) : undefined;
+    const heldWarnings = liveQuotas ? quotaAccountWarnings(liveQuotas, now, options.catalog?.policy) : [];
     return {
       facts,
       sessionKey,
@@ -383,6 +392,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
         modelWithEffort: `${target}:${heldEffort}`,
         canRewriteModel,
         hasExplicitCandidates,
+        ...(heldWarnings.length ? { warnings: heldWarnings } : {}),
+        ...(heldAccounts ? { accounts: heldAccounts } : {}),
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
         realtimeLoop: heldRealtime,
@@ -422,7 +433,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
     catalog: options.catalog,
     unhealthyModels,
     minContextTokens,
-    quotas: options.quotas,
+    quotas: liveQuotas,
     meteredOk: options.meteredOk,
     now,
     ...realtimeOption,
@@ -435,17 +446,35 @@ function routeClaimed(body, ctx, env, depth = 0) {
     },
   });
 
-  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || options.quotas)) {
+  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || liveQuotas)) {
     // Exhausted windows are ignored here, but expired / failing / signed-out accounts stay excluded.
     decision = selectBestRoute(profile, {
       objective: facts.objective,
       candidateModels,
       catalog: options.catalog,
-      quotas: options.quotas ? healthOnlyQuotas(options.quotas, now, options.catalog?.policy) : undefined,
+      quotas: liveQuotas ? healthOnlyQuotas(liveQuotas, now, options.catalog?.policy) : undefined,
+      meteredOk: options.meteredOk,
       now,
       ...realtimeOption,
       ...pins,
     });
+  }
+
+  if (decision) {
+    decision.canRewriteModel = canRewriteModel;
+    decision.hasExplicitCandidates = hasExplicitCandidates;
+    decision.continuation = {
+      held: false,
+      why: cont.why,
+      reasonDetail: cont.reasonDetail || null,
+      sessionKey,
+      anchor,
+      replayed: Boolean(sessionState?.replayed),
+      turn: facts.turn,
+      within: facts.within,
+      previousModel: cont.previousModel || null,
+      previousEffort: cont.previousEffort || null,
+    };
   }
 
   if (!decision || !decision.targetModel) {
@@ -472,20 +501,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
   }
   decision.targetEffort = finalEffort;
   decision.modelWithEffort = `${decision.targetModel}:${finalEffort}`;
-  decision.canRewriteModel = canRewriteModel;
-  decision.hasExplicitCandidates = hasExplicitCandidates;
-  decision.continuation = {
-    held: false,
-    why: cont.why,
-    reasonDetail: cont.reasonDetail || null,
-    sessionKey,
-    anchor,
-    replayed: Boolean(sessionState?.replayed),
-    turn: facts.turn,
-    within: facts.within,
-    previousModel: cont.previousModel || null,
-    previousEffort: cont.previousEffort || null,
-  };
 
   return {
     facts,
@@ -515,8 +530,8 @@ export function onRequest(body, ctx = {}) {
     isClaimedModel &&
     ctx?.state?.route &&
     typeof ctx.state.route === "object" &&
-    typeof ctx.state.route.targetModel === "string" &&
-    ctx.state.route.targetModel.trim()
+    ((typeof ctx.state.route.targetModel === "string" && ctx.state.route.targetModel.trim()) ||
+      ctx.state.route.ok === false)
       ? ctx.state.route
       : null;
 
@@ -548,6 +563,7 @@ export function onRequest(body, ctx = {}) {
 
     if (stateRoute) {
       if (
+        stateRoute.ok === false ||
         !hasExplicitCandidates ||
         !Array.isArray(candidateModels) ||
         candidateModels.includes(stateRoute.targetModel) ||
@@ -595,19 +611,30 @@ export function onRequest(body, ctx = {}) {
       // Magpie's log is where a gateway operator sees that a pinned model is too slow for a live loop
       for (const warning of decision?.warnings || []) {
         console.warn(`agentcompass: ${warning}`);
+        if (typeof ctx?.warn === "function") {
+          ctx.warn(warning);
+        }
       }
       if (routed.record && routed.sessionKey && decision?.targetModel) {
         store.recordRequest(routed.sessionKey, routed.record, routed.facts, now);
       }
     }
 
-    if (!decision || !decision.targetModel) {
-      return dropRealtimeFlag(body) ? body : undefined;
+    if (decision && typeof decision === "object") {
+      ctx.state = ctx.state || {};
+      ctx.state.agentcompass = decision;
+      ctx.state.route = decision;
     }
 
-    ctx.state = ctx.state || {};
-    ctx.state.agentcompass = decision;
-    ctx.state.route = decision;
+    if (!decision || decision.ok === false || !decision.targetModel) {
+      if (decision && decision.ok === false && typeof ctx?.reject === "function") {
+        return ctx.reject(
+          503,
+          `agentcompass: no eligible model/account available (${decision.reason || "no_eligible_candidate"})`
+        );
+      }
+      return dropRealtimeFlag(body) ? body : undefined;
+    }
 
     const allowModelRewrite =
       canRewriteModel ||
@@ -644,12 +671,18 @@ export function onProvider(body, ctx = {}) {
   }
 
   const options = ctx?.options || {};
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const liveQuotas = loadLiveQuotas(options, now);
   const prov = ctx?.provider && typeof ctx.provider === "object" ? ctx.provider : null;
   const providerModels =
     extractModelList(options.modelsByProvider?.[prov?.id]) ||
     extractModelList(options.modelsByProvider?.[prov?.name]);
 
   const prevDecision = ctx?.state?.agentcompass || ctx?.state?.route;
+  if (prevDecision?.ok === false) {
+    return undefined;
+  }
+
   if (providerModels && providerModels.length > 0 && prevDecision?.profile) {
     const needProviderRoute =
       isVirtualModelName(body.model, options) ||
@@ -659,23 +692,38 @@ export function onProvider(body, ctx = {}) {
       options.routePerProvider === true;
 
     if (needProviderRoute) {
-      const routed = selectBestRoute(prevDecision.profile, {
+      let routed = selectBestRoute(prevDecision.profile, {
         objective: "",
         candidateModels: providerModels,
         catalog: options.catalog,
-        quotas: options.quotas,
+        quotas: liveQuotas,
         meteredOk: options.meteredOk,
+        now,
         ...pinOptionsOf(options),
       });
+      if (!routed.ok && liveQuotas) {
+        routed = selectBestRoute(prevDecision.profile, {
+          objective: "",
+          candidateModels: providerModels,
+          catalog: options.catalog,
+          quotas: healthOnlyQuotas(liveQuotas, now, options.catalog?.policy),
+          meteredOk: options.meteredOk,
+          now,
+          ...pinOptionsOf(options),
+        });
+      }
       if (routed.ok && routed.targetModel) {
         const updated = {
           ...prevDecision,
+          ok: true,
           targetModel: routed.targetModel,
           canonicalModel: routed.canonicalModel,
           targetEffort: routed.targetEffort || prevDecision.targetEffort || "high",
           modelWithEffort: `${routed.targetModel}:${routed.targetEffort || prevDecision.targetEffort || "high"}`,
           canRewriteModel: true,
           hasExplicitCandidates: true,
+          ...(routed.warnings?.length ? { warnings: routed.warnings } : {}),
+          ...(routed.accounts ? { accounts: routed.accounts } : {}),
         };
         if (ctx.state && typeof ctx.state === "object") {
           ctx.state.agentcompass = updated;
@@ -684,6 +732,7 @@ export function onProvider(body, ctx = {}) {
         applyRoutedModelAndEffort(body, updated, ctx);
         return body;
       }
+      return undefined;
     }
   }
 
@@ -692,6 +741,19 @@ export function onProvider(body, ctx = {}) {
     typeof prov?.model === "string" &&
     prov.model.trim()
   ) {
+    if (liveQuotas) {
+      const check = selectBestRoute(prevDecision?.profile || { objective: "" }, {
+        objective: "",
+        candidateModels: [prov.model.trim()],
+        catalog: options.catalog,
+        quotas: healthOnlyQuotas(liveQuotas, now, options.catalog?.policy),
+        meteredOk: options.meteredOk,
+        now,
+      });
+      if (!check.ok || !check.targetModel) {
+        return undefined;
+      }
+    }
     const fallbackDecision = {
       ...(prevDecision || {}),
       targetModel: prov.model.trim(),
@@ -741,7 +803,9 @@ export function onResponse(body, ctx = {}) {
 export function onAccount(accountOrBody, ctx = {}) {
   const decision = ctx?.state?.agentcompass || ctx?.state?.route;
   const options = ctx?.options || {};
-  if (!decision) return undefined;
+  if (decision?.ok === false) {
+    return { skip: true };
+  }
 
   const acct =
     ctx?.account && typeof ctx.account === "object"
@@ -758,6 +822,48 @@ export function onAccount(accountOrBody, ctx = {}) {
         : ctx;
 
   if (!acct || typeof acct !== "object") return undefined;
+
+  const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  const liveQuotas = loadLiveQuotas(options, now);
+  const quotaAccounts = Array.isArray(decision?.accounts)
+    ? decision.accounts
+    : liveQuotas
+      ? listQuotaAccounts(liveQuotas, now, options.catalog?.policy)
+      : null;
+
+  if (Array.isArray(quotaAccounts) && quotaAccounts.length > 0) {
+    if (quotaAccounts.some((a) => a.key === "pool/quotas" && a.dispatchable === false)) {
+      return { skip: true };
+    }
+    const acctIds = new Set(
+      [
+        acct.key,
+        acct.ref,
+        acct.name,
+        acct.account,
+        acct.provider && acct.name ? `${acct.provider}/${acct.name}` : "",
+        acct.provider && acct.account ? `${acct.provider}/${acct.account}` : "",
+      ]
+        .filter((v) => typeof v === "string" && v.trim())
+        .map((v) => v.trim())
+    );
+    const exactMatches = quotaAccounts.filter((a) => acctIds.has(a.key) || acctIds.has(a.account));
+    if (exactMatches.length > 0) {
+      if (exactMatches.some((a) => a.dispatchable === false)) {
+        return { skip: true };
+      }
+    } else if (typeof acct.provider === "string" && acct.provider.trim()) {
+      const prov = acct.provider.trim().toLowerCase();
+      const provMatches = quotaAccounts.filter(
+        (a) => a.key !== "pool/quotas" && String(a.provider || "").toLowerCase() === prov
+      );
+      if (provMatches.length > 0 && provMatches.every((a) => a.dispatchable === false)) {
+        return { skip: true };
+      }
+    }
+  }
+
+  if (!decision) return undefined;
 
   const allowedByKind = options.accountsByWorkKind?.[decision.workKind];
   if (Array.isArray(allowedByKind) && allowedByKind.length > 0) {
