@@ -30,10 +30,24 @@ import {
   keepsEffort,
 } from "./continuity.js";
 import { extractRequestFacts, noTextProfile, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
+import {
+  areCandidatesAccountBlocked,
+  listQuotaAccounts,
+  quotaAccountWarnings,
+} from "./quota.js";
 import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive, scorerOptionsOf } from "./scorer-live.js";
 
 export { extractModelList };
+
+function emitWarnings(warnings, ctx) {
+  if (!Array.isArray(warnings) || warnings.length === 0) return;
+  for (const w of warnings) {
+    if (typeof ctx?.warn === "function") {
+      ctx.warn(w);
+    }
+  }
+}
 
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -226,6 +240,12 @@ export async function onRequest(body, ctx = {}) {
         );
       }
 
+      const heldAccounts = liveQuotas ? listQuotaAccounts(liveQuotas, now, options.catalog?.policy) : undefined;
+      const heldWarnings = liveQuotas ? quotaAccountWarnings(liveQuotas, now, options.catalog?.policy) : [];
+      const stepWarnings = heldEffort === keptEffort ? [] : [`${heldModel}: effort ${keptEffort} is no longer offered; held at ${heldEffort}`];
+      const allHeldWarnings = [...stepWarnings, ...heldWarnings];
+      emitWarnings(allHeldWarnings, ctx);
+
       const carrier = {
         v: 1,
         targetModel: heldModel,
@@ -235,6 +255,7 @@ export async function onRequest(body, ctx = {}) {
         bundle: pool ? heldBundle(pool, heldModel, heldEffort, options.catalog, pins) : null,
         canRewriteModel,
         hasExplicitCandidates,
+        ...(heldAccounts ? { accounts: heldAccounts } : {}),
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
         realtimeLoop: heldRealtime,
@@ -243,7 +264,7 @@ export async function onRequest(body, ctx = {}) {
         components: null,
         profile: sessionState?.profile || null,
         pins,
-        warnings: heldEffort === keptEffort ? [] : [`${heldModel}: effort ${keptEffort} is no longer offered; held at ${heldEffort}`],
+        warnings: allHeldWarnings,
         scorer: {
           kind: "continuity_hold",
           held: true,
@@ -332,8 +353,68 @@ export async function onRequest(body, ctx = {}) {
   });
   if (cont.why === "effort_gone") decision.warnings = [effortGoneWarning(cont), ...decision.warnings];
 
+  emitWarnings(decision.warnings, ctx);
+
   if (!decision.ok || !decision.targetModel) {
     blockRoute(ctx, sessionKey, decision.error || "no_route", decision.warnings, decision.refusal);
+    const accountBlocked = Boolean(
+      liveQuotas &&
+        (areCandidatesAccountBlocked(candidateModels, liveQuotas, options, now) ||
+          selectBestRoute(profile, {
+            candidateModels,
+            catalog: options.catalog,
+            unhealthyModels,
+            minContextTokens,
+            quotas: undefined,
+            meteredOk: options.meteredOk,
+            now,
+            ...realtimeOption,
+            ...pins,
+          }).ok)
+    );
+    if (!accountBlocked) {
+      return undefined;
+    }
+    const failedCarrier = {
+      v: 1,
+      ok: false,
+      accountBlocked: true,
+      reason: decision.reason || "no_eligible_candidate",
+      targetModel: null,
+      canonicalModel: null,
+      targetEffort: null,
+      modelWithEffort: null,
+      canRewriteModel,
+      hasExplicitCandidates,
+      selectedAccount: null,
+      quota: null,
+      ...(decision.warnings?.length ? { warnings: decision.warnings } : {}),
+      ...(decision.accounts ? { accounts: decision.accounts } : {}),
+      workKind: decision.workKind,
+      difficulty: decision.difficulty,
+      requiredAbility: decision.requiredAbility,
+      realtimeLoop: Boolean(decision.realtimeLoop),
+      score: null,
+      components: null,
+      profile: decision.profile || profile,
+      scorer: meta,
+      continuation: {
+        held: false,
+        why: cont.why,
+        reasonDetail: cont.reasonDetail || null,
+        sessionKey,
+        turn: facts.turn,
+        within: facts.within,
+        previousModel: cont.previousModel || null,
+        previousEffort: cont.previousEffort || null,
+      },
+      topCandidates: decision.topCandidates || [],
+    };
+    ctx.state = ctx.state || {};
+    ctx.state.sessionKey = sessionKey;
+    ctx.state.route = failedCarrier;
+    ctx.state.agentcompass = failedCarrier;
+    ctx.reject?.(503, `No eligible model/account available (${failedCarrier.reason}).`);
     return undefined;
   }
 
@@ -387,6 +468,8 @@ export async function onRequest(body, ctx = {}) {
     hasExplicitCandidates,
     selectedAccount: decision.selectedAccount || null,
     quota: decision.quota || null,
+    ...(decision.warnings?.length ? { warnings: decision.warnings } : {}),
+    ...(decision.accounts ? { accounts: decision.accounts } : {}),
     workKind: decision.workKind,
     difficulty: decision.difficulty,
     requiredAbility: decision.requiredAbility,

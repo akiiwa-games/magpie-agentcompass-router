@@ -37,7 +37,7 @@ import {
   splitEffortSuffix,
 } from "./catalog.js";
 import { unroutedDecision, validateProfile } from "./profiler-core.js";
-import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
+import { evaluateModelQuota, listQuotaAccounts, normalizeQuotaSnapshot } from "./quota.js";
 
 const MARKED_UNHEALTHY = "model is currently marked unhealthy";
 const EFFORT_NOT_PINNED = "explicit effort constraint";
@@ -1785,6 +1785,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
           fast: Boolean(quotaEval.fast),
           shortage_probability: quotaEval.shortage_probability ?? 0.0,
           binding_window: quotaEval.binding_window || null,
+          warnings: quotaEval.warnings || [],
         }
       : null,
     components: {
@@ -2287,6 +2288,8 @@ export function rankCandidates(profileInput, options = {}) {
     selected: pinnedCand || eligible[0] || null,
     ranking: eligible,
     allCandidates: [...evaluated, ...outOfScope],
+    // Per-account state/reason/last successful reading, so a failing account is visible even when unselected.
+    ...(normalizedQuotas ? { accounts: listQuotaAccounts(normalizedQuotas) } : {}),
   };
 }
 
@@ -2679,6 +2682,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
   const warnings = [
     ...(top ? (top.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []) : blockedWarnings(result)),
     ...poolNameWarnings(options, models, aliases),
+    ...new Set((result.accounts || []).flatMap((a) => a.warnings)),
   ];
   return {
     ok: Boolean(top),
@@ -2699,6 +2703,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     responsivenessSource: top?.components?.responsiveness_source ?? null,
     warnings,
     excluded: result.allCandidates.flatMap((c) => c.excluded.map((reason) => excludedLine(c, reason))),
+    ...(result.accounts ? { accounts: result.accounts } : {}),
     score: top ? top.score : null,
     components: top ? top.components : null,
     profile: result.task.profile,
