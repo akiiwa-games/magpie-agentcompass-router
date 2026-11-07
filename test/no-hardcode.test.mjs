@@ -537,7 +537,7 @@ const EXCEPTIONS = [
       "continuity.js: allowedEfforts.includes(candidateEffort)",
       'continuity.js: allowedEfforts.includes("xhigh")',
       'continuity.js: allowedEfforts.includes("max")',
-      "continuity.js: canonicalCandidates.includes(currentModel)",
+      "continuity.js: candidateKeys.includes(running)",
       "continuity.js: new Set(",
       'hooks.js: trimmed.lastIndexOf(":")',
       'hooks.js: "auto"].includes(suffix)',
@@ -549,9 +549,6 @@ const EXCEPTIONS = [
       "middleware.js: return DEFAULT_VIRTUAL_MODELS.includes(clean)",
       'middleware.js: mappedModel.includes("/")',
       'middleware.js: targetModel.includes(":")',
-      "middleware.js: candidateModels.includes(sessionState.target)",
-      "middleware.js: candidateModels.includes(stateRoute.targetModel)",
-      "middleware.js: providerModels.includes(prevDecision.targetModel)",
     ],
   },
   {
@@ -576,7 +573,7 @@ const EXCEPTIONS = [
       "profiler-core.js: INTERACTION_STYLES.includes(style)",
       'profiler-core.js: "high"].includes(raw.hours_confidence)',
       'profiler-core.js: "high"].includes(raw.urgency)',
-      'profiler-core.js: ">3"].includes(raw.task_count)',
+      "profiler-core.js: TASK_COUNTS.includes(value)",
     ],
   },
 ];

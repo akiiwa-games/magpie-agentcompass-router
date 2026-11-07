@@ -27,13 +27,13 @@ Configure `candidateModels` (or `availableModels` / `allowedModels`) in the plug
     "agentcompass": {
       "routeAllModels": false,
       "candidateModels": [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-        "gpt-5.4",
-        "gpt-5.3-codex",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash"
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gemini-4-argon-high",
+        "gemini-3.8-flash-high"
       ]
     }
   }
@@ -43,13 +43,14 @@ Configure `candidateModels` (or `availableModels` / `allowedModels`) in the plug
 Or from the CLI:
 
 ```sh
-magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","claude-sonnet-4-6","gpt-5.4","gemini-2.5-pro","gemini-2.5-flash"]}'
+magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-5-5","claude-sonnet-5-5","gpt-6.1-sol","gemini-4-argon-high","gemini-3.8-flash-high"]}'
 ```
 
 - Requests to `agentcompass` or `agentcompass/*` rewrite `body.model` to `<targetModel>:<targetEffort>` (which Magpie's gateway splits natively) and set protocol-specific effort fields (`reasoning_effort`, `reasoning.effort`, `output_config.effort`).
 - If a virtual model (`agentcompass` / `agentcompass/*`) is requested without `candidateModels` or `defaultModel`, the middleware rejects the call with HTTP 400 (`agentcompass: set candidateModels in the plugin's options`) rather than guessing models.
 - If `routeAllModels: true` is set without `candidateModels`, concrete model names are kept as-is and only the reasoning effort is injected.
 - `moejs` has no network, so **the middleware cannot call a classifier**: it routes only a request that brings its profile (`body.profile`, see below). Every other request is forwarded unrouted. To have requests classified, use Mode B with a scorer.
+- To turn off one effort of a model, add a row for it with `disabled: true` next to the bare name or `efforts[]` row: `["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]`. No row of that account and model is dispatched at that effort, and pinning it returns 503. A disabled row with an `account` applies to that account only.
 
 ### 3. Account-pool seat strategy (`routings`)
 
@@ -188,6 +189,7 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | `quotas` / `quotasPath` | — | Inline quota snapshot object or explicit path to a quota JSON file (`quotaFile`). No implicit directory scanning. |
 | `meteredOk` | `true` | Allow metered API keys when scoring candidates. |
 | `enableDecisionProvider` | `false` | Register the `agentcompass/agentcompass-systemone` Decision Provider (`/v1/systemone`) for Routing Groups. |
+| `decisionProviderDetails` | `false` | Return accounts, quotas, warnings and the task profile in `/v1/systemone` answers. Any gateway key that may use the decision model can read them. Off, an answer holds only the model and effort, or a reason code and a sentence; warnings go to the local log. |
 | `allowExternalScorer` | `false` | Allow Mode B (`src/index.js`) or `src/hooks.js` to call an external `scorer` (`{ kind, baseUrl, apiKey, model, timeoutMs }`). On timeout or error the request is not routed. |
 
 ## Repository layout
@@ -200,10 +202,12 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | `src/profiler-core.js` | Single-pass multi-protocol request fact extractor, the task profile schema and its validation. |
 | `src/allocator.js` | 7D capability + 3D Model DNA + effort-curve candidate ranker. |
 | `src/quota.js`, `src/quota-loader.js` | 5h/7d window opportunity-cost model, pre-reset surplus sprint, and Magpie pool seat ordering. |
-| `src/catalog.js` | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. |
+| `src/catalog.js` | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. Generated from AgentCompass's `accounts.json` at the commit in `test/fixtures/agentcompass-pin.json` (`npm run catalog:sync`, `npm run catalog:check`). |
 | `src/scorer-live.js`, `src/hooks.js` | External System-One classifier client (LRU cache) and programmatic Bun hook helper. |
 | `test/router.test.mjs` | Unit test suite (`npm test` / `bun test`). |
 | `test/no-hardcode.test.mjs` | The rule against classifying by text: static scan of `src/` with its written exceptions, and same-answer-any-wording routing over `test/task_text_corpus.mjs`. |
+| `test/realtime-parity.test.mjs`, `test/routing-parity.test.mjs` | The port against AgentCompass's `allocator.py` at the pinned commit; regenerate with `test/fixtures/gen_realtime_parity.py` and `gen_routing_parity.py`. |
+| `test/routing-contract.test.mjs` | One regression test per finding of the routing review. |
 
 ## Tests
 
@@ -241,11 +245,13 @@ magpie plugin list
 在插件选项中配置 `candidateModels`（或 `availableModels` / `allowedModels`），客户端请求 `model: "agentcompass"`（或 `"agentcompass/auto"`，或设 `"routeAllModels": true`）：
 
 ```sh
-magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","claude-sonnet-4-6","gpt-5.4","gemini-2.5-pro","gemini-2.5-flash"]}'
+magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-5-5","claude-sonnet-5-5","gpt-6.1-sol","gemini-4-argon-high","gemini-3.8-flash-high"]}'
 ```
 
 - 请求虚拟模型 `agentcompass` / `agentcompass/*` 时，中间件将 `body.model` 改写为 `<targetModel>:<targetEffort>`，并按协议注入思考档位字段（`reasoning_effort`、`reasoning.effort`、`output_config.effort`）。
 - 未配置 `candidateModels` 或 `defaultModel` 时请求虚拟模型会返回 HTTP 400（`agentcompass: set candidateModels in the plugin's options`），不猜测模型列表。
+- 要禁用模型的某个档位，在裸名或 `efforts[]` 行旁边加一行 `disabled: true`：`["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]`。同账户、同模型的行都不会再派发这一档，点名这一档返回 503。禁用行带 `account` 时只对该账户生效。
+- `/v1/systemone` 默认只回答模型和档位，或原因码和一句说明，账号、配额和 `warnings` 不返回。需要明细时设置 `decisionProviderDetails: true`，能用这个分类器模型的网关 key 都能读到。
 - 开启 `routeAllModels: true` 且未配置候选列表时，具体模型名保持不变，仅自动注入思考档位。
 - `moejs` 没有网络，**中间件调用不了分类模型**：只有带了画像（`body.profile`）的请求才会被路由，其余请求一律不路由、直接转发。要让请求被分类，请用配了分类模型的模式 B。
 

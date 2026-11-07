@@ -74,9 +74,9 @@ const VARIANT_MODELS = [
   "gemini-3.8-flash-high-latest",
   "claude-opus-4-6",
   "claude-sonnet-4-6",
-  "gpt-5.4",
-  "gemini-2.5-pro",
-  "gemini-2.5-flash",
+  "gpt-6-astra",
+  "gemini-4-argon-high",
+  "gemini-3.8-flash-high",
   "grok-4.7-build-fast",
 ];
 
@@ -1474,7 +1474,7 @@ async function main() {
       const up = (m) => `upstream/${m}`;
       const pools = {
         default: { candidateModels: ALL_MODELS.map(up) },
-        "README pool": { candidateModels: ["claude-opus-4-6", "claude-sonnet-4-6", "gpt-5.4", "gemini-2.5-pro", "gemini-2.5-flash"].map(up) },
+        "README pool": { candidateModels: ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra", "gemini-4-argon-high", "gemini-3.8-flash-high"].map(up) },
         "bare strings": { candidateModels: ALL_MODELS },
         "dated/-latest/-preview/-chat": {
           candidateModels: VARIANT_MODELS.slice(0, 6).map(up),
@@ -1486,7 +1486,7 @@ async function main() {
         "bundles with effort": {
           candidateModels: ["claude-opus-5-5:xhigh", "claude-opus-5-5:medium", "gpt-6.1-sol:high", "gemini-4-argon-high:high", "gemini-3.8-flash-high:low"].map(up),
         },
-        "pin options, which only act on realtime routing": {
+        "pin options, which every mode honors (contract R3)": {
           candidateModels: ALL_MODELS.map(up),
           pinnedModel: up("gemini-4-argon-high"),
           pinnedEffort: "high",

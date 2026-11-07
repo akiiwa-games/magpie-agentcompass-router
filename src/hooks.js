@@ -7,7 +7,20 @@
  * and says so in `ctx.state.agentcompass` and the log.
  */
 
-import { pinOptionsOf, selectBestRoute } from "./allocator.js";
+import {
+  candidateOffers,
+  effortGoneWarning,
+  heldBundle,
+  heldEffortOn,
+  heldTarget,
+  explicitCandidateModels,
+  extractModelList,
+  mergePinOptions,
+  pinOptionsOf,
+  pinsFixEffort,
+  sessionProfile,
+  selectBestRoute,
+} from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
   computeSessionKey,
@@ -16,9 +29,11 @@ import {
   evaluateProviderContinuation,
   keepsEffort,
 } from "./continuity.js";
-import { extractRequestFacts, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
+import { extractRequestFacts, noTextProfile, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
 import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive, scorerOptionsOf } from "./scorer-live.js";
+
+export { extractModelList };
 
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -55,38 +70,8 @@ export function isVirtualModelName(model, options = {}) {
   return DEFAULT_VIRTUAL_MODELS.includes(clean);
 }
 
-export function extractModelList(source) {
-  if (!source) return null;
-  if (Array.isArray(source)) {
-    const list = source
-      .map((item) => {
-        if (typeof item === "string") return item.trim();
-        if (item && typeof item === "object") {
-          return String(item.id || item.name || item.model || "").trim();
-        }
-        return "";
-      })
-      .filter(Boolean);
-    return list.length > 0 ? list : null;
-  }
-  if (typeof source === "object") {
-    const keys = Object.keys(source)
-      .map((k) => k.trim())
-      .filter(Boolean);
-    return keys.length > 0 ? keys : null;
-  }
-  return null;
-}
-
 export function resolveCandidateModels(body, ctx = {}, options = {}) {
-  const explicit =
-    extractModelList(options.candidateModels) ||
-    extractModelList(options.allowedModels) ||
-    extractModelList(options.availableModels) ||
-    extractModelList(options.models) ||
-    extractModelList(ctx?.models) ||
-    extractModelList(ctx?.availableModels) ||
-    extractModelList(options.modelMap);
+  const explicit = explicitCandidateModels(options, ctx);
 
   if (explicit) {
     return { candidateModels: explicit, hasExplicitCandidates: true, canRewriteModel: true };
@@ -96,7 +81,8 @@ export function resolveCandidateModels(body, ctx = {}, options = {}) {
     return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: true };
   }
 
-  const rawModel = stripEffortSuffix(body?.model || ctx?.model || "");
+  // A `:effort` here is the user fixing the effort: it stays on the candidate.
+  const rawModel = String(body?.model || ctx?.model || "").trim();
   if (rawModel && !isVirtualModelName(rawModel, options)) {
     return {
       candidateModels: [rawModel],
@@ -125,6 +111,14 @@ export function shouldRouteRequest(model, options = {}) {
   if (!model || typeof model !== "string") return false;
   if (options.routeAllModels === true) return true;
   return isVirtualModelName(model, options);
+}
+
+/** Nothing may route this request: the middleware rejects it rather than deciding again. */
+function blockRoute(ctx, sessionKey, error, warnings, refusal) {
+  ctx.state = ctx.state || {};
+  ctx.state.sessionKey = sessionKey;
+  ctx.state.routeBlocked = { error, warnings, refusal };
+  ctx.report?.("empty");
 }
 
 export async function onRequest(body, ctx = {}) {
@@ -158,9 +152,11 @@ export async function onRequest(body, ctx = {}) {
 
   const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
+  const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
-  const cont = evaluateProviderContinuation(facts, sessionState, {
+  let cont = evaluateProviderContinuation(facts, sessionState, {
     now,
+    pins,
     affinityMode: options.affinityMode || options.affinity || "cache",
     availableModels: candidateModels,
     unhealthyModels: options.unhealthyModels,
@@ -182,7 +178,7 @@ export async function onRequest(body, ctx = {}) {
   // Fast path: Hold active session Provider/Model without calling the intent classifier
   if (cont.shouldHold && cont.model) {
     const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
-    const heldEffort = keepsEffort(
+    const keptEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
       facts.estimatedInputTokens,
@@ -194,77 +190,107 @@ export async function onRequest(body, ctx = {}) {
     );
     const canonical = canonicalModel(cont.model, options.catalog?.aliases);
     // A realtime session stays on the name it was routed to (`gpt-5.3-codex`, not its canonical `gpt-6.1-sol`).
-    const heldModel = heldRealtime && sessionState?.target ? sessionState.target : cont.model;
-    if (sessionKey) {
-      store.recordRequest(
-        sessionKey,
-        {
-          model: heldModel,
-          effort: heldEffort,
-          provider: cont.provider || sessionState?.provider || "",
-          workKind: sessionState?.workKind || "general_implementation",
-          difficulty: sessionState?.difficulty || "routine",
-          realtimeLoop: heldRealtime,
-          why: cont.why,
-          held: true,
-        },
-        facts,
-        now
-      );
-    }
-
-    const carrier = {
-      v: 1,
-      targetModel: heldModel,
-      canonicalModel: canonical,
-      targetEffort: heldEffort,
-      modelWithEffort: `${heldModel}:${heldEffort}`,
-      canRewriteModel,
-      hasExplicitCandidates,
-      workKind: sessionState?.workKind || "general_implementation",
-      difficulty: sessionState?.difficulty || "routine",
-      realtimeLoop: heldRealtime,
-      requiredAbility: null,
-      score: null,
-      components: null,
-      profile: null,
-      scorer: {
-        kind: "continuity_hold",
-        held: true,
-        why: cont.why,
-        calls: 0,
-      },
-      continuation: {
-        held: true,
-        why: cont.why,
-        sessionKey,
-        turn: facts.turn,
-        within: facts.within,
+    const heldModel =
+      heldRealtime && sessionState?.target ? sessionState.target : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
+    // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
+    const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
+    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState), realtimeLoop: heldRealtime }) : keptEffort;
+    const effortGone = heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins));
+    if (effortGone) {
+      cont = {
+        shouldHold: false,
+        why: "effort_gone",
         previousModel: cont.previousModel || cont.model,
-        previousEffort: cont.previousEffort || heldEffort,
-      },
-      topCandidates: [],
-    };
+        previousEffort: keptEffort,
+        within: Boolean(facts.within),
+        turn: facts.turn || 1,
+      };
+    }
+    if (!effortGone) {
+      if (sessionKey) {
+        store.recordRequest(
+          sessionKey,
+          {
+            model: heldModel,
+            effort: heldEffort,
+            provider: cont.provider || sessionState?.provider || "",
+            workKind: sessionState?.workKind || "general_implementation",
+            difficulty: sessionState?.difficulty || "routine",
+            realtimeLoop: heldRealtime,
+            why: cont.why,
+            held: true,
+            pinnedBundle: pins.pinnedBundle,
+          },
+          facts,
+          now
+        );
+      }
 
-    const payloadBytes = JSON.stringify(carrier).length;
-    ctx.state = ctx.state || {};
-    ctx.state.sessionKey = sessionKey;
-    ctx.state.route = carrier;
-    ctx.state.agentcompass = carrier;
-    ctx.report?.("ready", payloadBytes);
-    return undefined;
+      const carrier = {
+        v: 1,
+        targetModel: heldModel,
+        canonicalModel: canonical,
+        targetEffort: heldEffort,
+        modelWithEffort: `${heldModel}:${heldEffort}`,
+        bundle: pool ? heldBundle(pool, heldModel, heldEffort, options.catalog, pins) : null,
+        canRewriteModel,
+        hasExplicitCandidates,
+        workKind: sessionState?.workKind || "general_implementation",
+        difficulty: sessionState?.difficulty || "routine",
+        realtimeLoop: heldRealtime,
+        requiredAbility: null,
+        score: null,
+        components: null,
+        profile: sessionState?.profile || null,
+        pins,
+        warnings: heldEffort === keptEffort ? [] : [`${heldModel}: effort ${keptEffort} is no longer offered; held at ${heldEffort}`],
+        scorer: {
+          kind: "continuity_hold",
+          held: true,
+          why: cont.why,
+          calls: 0,
+        },
+        continuation: {
+          held: true,
+          why: cont.why,
+          sessionKey,
+          turn: facts.turn,
+          within: facts.within,
+          previousModel: cont.previousModel || cont.model,
+          previousEffort: cont.previousEffort || heldEffort,
+        },
+        topCandidates: [],
+      };
+
+      const payloadBytes = JSON.stringify(carrier).length;
+      ctx.state = ctx.state || {};
+      ctx.state.sessionKey = sessionKey;
+      ctx.state.route = carrier;
+      ctx.state.agentcompass = carrier;
+      ctx.report?.("ready", payloadBytes);
+      return undefined;
+    }
   }
 
+  // What this turn's text looks like is no ground for putting back the row the hold just refused (contract R2).
+  // A pool or a pin holds on a turn with no text too: an image alone doesn't get past either (contract R2, R3).
   const caller = resolveCallerProfile(facts.callerProfile, facts.hasVisualInput);
-  const { profile, meta } = caller?.error
-    ? { profile: null, meta: { source: "caller", reason: caller.error } }
-    : caller
-      ? { profile: caller.profile, meta: { source: "caller" } }
-      : await scoreTaskLive(facts, {
-          scorerTimeoutMs: Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
-          ...scorerOptionsOf(options),
-          signal: ctx.signal,
-        });
+  const { profile, meta } =
+    cont.why === "effort_gone"
+      ? { profile: sessionProfile(sessionState), meta: { kind: "continuity_hold", held: false, why: cont.why, calls: 0 } }
+      : caller?.error
+        ? { profile: null, meta: { source: "caller", reason: caller.error } }
+        : caller
+          ? { profile: caller.profile, meta: { source: "caller" } }
+          : !facts.objective
+            ? hasExplicitCandidates || Object.keys(pins).length > 0
+              ? { profile: noTextProfile(facts), meta: { source: "no_text", calls: 0 } }
+              : { profile: null, meta: { source: "none", reason: "empty_objective", calls: 0 } }
+            : await scoreTaskLive(facts, {
+                scorerTimeoutMs: Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
+                ...scorerOptionsOf(options),
+                signal: ctx.signal,
+              });
 
   if (!profile) {
     const unrouted = unroutedDecision(meta.reason);
@@ -280,14 +306,14 @@ export async function onRequest(body, ctx = {}) {
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
   ];
-  if (cont.why === "provider_unhealthy" && cont.previousModel) {
-    unhealthyModels.push(cont.previousModel);
+  if (cont.why === "provider_unhealthy" && cont.failedModel) {
+    unhealthyModels.push(cont.failedModel);
   }
 
   const minContextTokens =
     cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
-  let decision = selectBestRoute(profile, {
+  const decision = selectBestRoute(profile, {
     candidateModels,
     catalog: options.catalog,
     unhealthyModels,
@@ -296,7 +322,7 @@ export async function onRequest(body, ctx = {}) {
     meteredOk: options.meteredOk,
     now,
     ...realtimeOption,
-    ...pinOptionsOf(options),
+    ...pins,
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -304,20 +330,10 @@ export async function onRequest(body, ctx = {}) {
       cacheWarm: false,
     },
   });
-
-  // Graceful fallback if all candidates were filtered out by temporary unhealthy/context/quota constraints
-  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || liveQuotas)) {
-    decision = selectBestRoute(profile, {
-      candidateModels,
-      catalog: options.catalog,
-      now,
-      ...realtimeOption,
-      ...pinOptionsOf(options),
-    });
-  }
+  if (cont.why === "effort_gone") decision.warnings = [effortGoneWarning(cont), ...decision.warnings];
 
   if (!decision.ok || !decision.targetModel) {
-    ctx.report?.("empty");
+    blockRoute(ctx, sessionKey, decision.error || "no_route", decision.warnings, decision.refusal);
     return undefined;
   }
 
@@ -329,15 +345,17 @@ export async function onRequest(body, ctx = {}) {
     cont.why !== "cold" &&
     cont.why !== "compacted" &&
     cont.why !== "first" &&
-    cont.why !== "worn"
+    cont.why !== "worn" &&
+    !pinsFixEffort(pins)
   ) {
-    finalEffort = keepsEffort(
+    const kept = keepsEffort(
       sessionState,
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
       { ...options, ...realtimeOption }
     );
+    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept, options.catalog)) finalEffort = kept;
   }
 
   if (sessionKey) {
@@ -351,6 +369,8 @@ export async function onRequest(body, ctx = {}) {
         realtimeLoop: Boolean(decision.realtimeLoop),
         why: cont.why,
         held: false,
+        profile: decision.profile,
+        pinnedBundle: pins.pinnedBundle,
       },
       facts,
       now
@@ -374,6 +394,10 @@ export async function onRequest(body, ctx = {}) {
     score: decision.score,
     components: decision.components,
     profile: decision.profile,
+    bundle: decision.bundle,
+    pins,
+    minContextTokens,
+    warnings: decision.warnings || [],
     scorer: meta,
     continuation: {
       held: false,

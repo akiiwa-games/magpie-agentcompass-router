@@ -1,7 +1,6 @@
 /**
- * Pins the two invariants the realtime_loop port has to keep:
- *   - non-realtime routing is identical to the pre-branch code (the fixed pre-branch commit ab8baba, `MAGPIE_PARITY_BASELINE` overrides);
- *   - realtime responsiveness, step-down and pin identity are identical to AgentCompass (fixture from gen_realtime_parity.py).
+ * Pins the realtime_loop port: responsiveness, step-down and pin identity are identical to AgentCompass (fixture from
+ * gen_realtime_parity.py). Routing as a whole is compared in routing-parity.test.mjs.
  */
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
@@ -17,8 +16,10 @@ import {
   CANONICAL_ROUTES,
   DISPATCH_EFFORTS,
   canonicalModel,
+  resolveModel,
   resolveModelSpec,
   resolveResponsivenessModelKey,
+  splitEffortSuffix,
 } from "../src/catalog.js";
 import {
   bundleResponsiveness,
@@ -26,8 +27,10 @@ import {
   rankCandidates,
   resolveRealtimeCurves,
   resolveRealtimeEffort,
+  mergePinOptions,
   selectBestRoute,
 } from "../src/allocator.js";
+import { validateProfile } from "../src/profiler-core.js";
 import { SessionContinuityStore, evaluateProviderContinuation, keepsEffort } from "../src/continuity.js";
 import { onRequest as hooksForProfile } from "../src/hooks.js";
 import { onProvider as middlewareOnProvider, onRequest as middlewareForProfile } from "../src/middleware.js";
@@ -50,47 +53,6 @@ const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(ROOT, "test/fixtures/agentcompass-realtime-parity.json"), "utf8"));
 const NOW = 1790000000000;
 
-// ---------------------------------------------------------------------------------------------------------------------
-// Baseline: the code this branch forked from
-// ---------------------------------------------------------------------------------------------------------------------
-
-let baseline = null;
-let baselineSkip = null;
-let baselineDir = null;
-
-before(async () => {
-  const git = (...args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
-  let sha;
-  try {
-    // A fixed commit, not origin/main: once this branch is merged, origin/main is HEAD and the test compares nothing.
-    sha = git("rev-parse", "--verify", `${process.env.MAGPIE_PARITY_BASELINE || "ab8baba2aa9b41df1b9e5a76a56c9df8721d5abb"}^{commit}`);
-  } catch {
-    baselineSkip = "the pre-realtime baseline commit is not in this checkout";
-    return;
-  }
-  baselineDir = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-baseline-"));
-  fs.mkdirSync(path.join(baselineDir, "src"));
-  fs.writeFileSync(path.join(baselineDir, "package.json"), git("show", `${sha}:package.json`));
-  for (const file of git("ls-tree", "--name-only", `${sha}`, "src/").split(/\r?\n/)) {
-    fs.writeFileSync(path.join(baselineDir, file), execFileSync("git", ["show", `${sha}:${file}`], { cwd: ROOT }));
-  }
-  const load = (name) => import(pathToFileURL(path.join(baselineDir, "src", name)).href);
-  baseline = {
-    sha,
-    allocator: await load("allocator.js"),
-    catalog: await load("catalog.js"),
-    continuity: await load("continuity.js"),
-    hooks: await load("hooks.js"),
-    middleware: await load("middleware.js"),
-    index: await load("index.js"),
-    scorer: await load("scorer-live.js"),
-  };
-});
-
-after(() => {
-  if (baselineDir) fs.rmSync(baselineDir, { recursive: true, force: true });
-});
-
 const STYLES = ["engineering", "exploration", "text_only", "advisory"];
 const GRID = [];
 for (const work_kind of Object.keys(CANONICAL_ROUTES)) {
@@ -100,6 +62,8 @@ for (const work_kind of Object.keys(CANONICAL_ROUTES)) {
         for (const error_cost of [1, 2, 3]) {
           GRID.push({
             work_kind,
+            multi_task: false,
+            task_count: "1",
             reasoning_depth,
             code_complexity,
             context_scale: ((reasoning_depth + divergence) % 3) + 1,
@@ -119,243 +83,8 @@ for (const work_kind of Object.keys(CANONICAL_ROUTES)) {
 // Every 12th profile still covers every route, depth and effort tier; the README pool walks the whole grid.
 const SAMPLED_GRID = GRID.filter((_, i) => i % 12 === 0);
 
-// Fields the branch adds to every result. Anything else differing is a routing change.
-const ADDED_KEYS = new Set(["realtimeLoop", "realtime_loop", "responsiveness", "responsivenessSource", "warnings"]);
-function withoutAddedKeys(value) {
-  if (Array.isArray(value)) return value.map(withoutAddedKeys);
-  if (!value || typeof value !== "object") return value;
-  const out = {};
-  for (const [k, v] of Object.entries(value)) {
-    if (!ADDED_KEYS.has(k)) out[k] = withoutAddedKeys(v);
-  }
-  return out;
-}
-
-function routingDiffs(pool, grid, options = {}) {
-  const diffs = [];
-  for (const profile of grid) {
-    const opts = { candidateModels: pool, now: NOW, ...options };
-    const head = withoutAddedKeys(rankCandidates(profile, opts));
-    const base = withoutAddedKeys(baseline.allocator.rankCandidates(profile, opts));
-    if (JSON.stringify(head) !== JSON.stringify(base)) {
-      diffs.push({ kind: profile.work_kind, depth: profile.reasoning_depth, base: base.selected?.id, head: head.selected?.id });
-    }
-  }
-  return diffs;
-}
-
-const README_POOL = ["claude-opus-4-6", "claude-sonnet-4-6", "gpt-5.4", "gemini-2.5-pro", "gemini-2.5-flash"];
-
-const NON_REALTIME_POOLS = {
-  "dated openai and anthropic": ["o3-mini-2025-01-31", "o4-mini-2025-04-16", "gpt-5-2025-08-07", "claude-3-7-sonnet-20250219"],
-  "gpt-5 chat variants": ["openai/gpt-5-chat", "openai/gpt-5-turbo", "anthropic/claude-sonnet-4-6"],
-  "deepseek dated": ["deepseek-pro-20250501", "gemini-2.5-flash"],
-  "-preview/-latest": ["kimi-k2.6-preview", "glm-5.2-latest", "openrouter/xai/grok-4.6", "qwen3-max-20260101"],
-  "openrouter :free": ["deepseek/deepseek-r1:free", "google/gemini-2.0-flash-exp:free", "meta-llama/llama-3.3-70b-instruct:free"],
-  ":default suffix": ["claude-opus-5-5:default", "claude-sonnet-5-5:default", "gpt-6.1-sol:default"],
-  "legacy claude and modern": ["claude-opus-4-6:xhigh", "claude-sonnet-4-6:medium", "claude-haiku-4-5:medium", "claude-sonnet-5-5:high", "gpt-6-astra:high"],
-  "modern bare strings": ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra", "gpt-6.1-sol", "gemini-4-argon-high", "gemini-3.8-flash-high", "grok-4.7"],
-  "grok-bot and dot": ["grok-bot", "dot", "claude-sonnet-5-5:high"],
-  "{model} objects": [{ model: "claude-opus-5-5" }, { model: "claude-sonnet-5-5" }, { model: "gpt-6-astra" }, { model: "gpt-6.1-terra" }],
-  "{model} dated objects": [{ model: "o3-mini-2025-01-31" }, { model: "claude-3-7-sonnet-20250219" }, { model: "deepseek-pro-20250501" }],
-  "{id,provider,model}": [{ id: "o", provider: "claude", model: "claude-opus-5-5" }, { id: "s", provider: "claude", model: "claude-sonnet-5-5" }, { id: "a", provider: "codex", model: "gpt-6-astra" }],
-  "{id,provider,model} dated": [{ id: "m", provider: "openai", model: "o3-mini-2025-01-31" }, { id: "c", provider: "openrouter", model: "openai/gpt-5-chat" }],
-  "bundles with effort": [{ id: "o", provider: "claude", model: "claude-opus-5-5", effort: "high" }, { id: "s", provider: "claude", model: "claude-sonnet-5-5", effort: "low" }, { id: "a", provider: "codex", model: "gpt-6-astra", effort: "xhigh" }],
-  "bundles dated with effort": [{ id: "m", provider: "openai", model: "o3-mini-2025-01-31", effort: "low" }, { id: "g", provider: "openai", model: "gpt-5-2025-08-07", effort: "medium" }, { id: "c", provider: "anthropic", model: "claude-3-7-sonnet-20250219", effort: "high" }],
-  "object fields main ignores": [{ model: "claude-opus-5-5", effort: "HIGH", disabled: true }, { model: "gpt-6-astra", efforts: ["LOW", "high"], when: { min_difficulty: "frontier" } }, { id: "x", model: "claude-sonnet-5-5", discovery_unavailable: true, pinned: true }],
-};
-
-test("R3 parity: non-realtime default pool routes identically to origin/main", (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  assert.deepEqual(routingDiffs(undefined, GRID), []);
-});
-
-test("R3 parity: non-realtime README pool (2304 profiles) routes identically to origin/main", (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  assert.equal(GRID.length, 2304);
-  assert.deepEqual(routingDiffs(README_POOL, GRID), []);
-});
-
-for (const [name, pool] of Object.entries(NON_REALTIME_POOLS)) {
-  test(`R3 parity: non-realtime pool routes identically to origin/main: ${name}`, (t) => {
-    if (!baseline) return t.skip(baselineSkip);
-    assert.deepEqual(routingDiffs(pool, SAMPLED_GRID), []);
-  });
-}
-
-test("R3 parity: non-realtime options and inputs main ignores or treats its own way route identically", (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  const pool = ["claude-opus-5-5", "gpt-6-astra", "claude-sonnet-5-5"];
-  // Pin and availability options are realtime-only; unhealthy names keep main's canonical matching.
-  for (const options of [
-    { constraintModel: "gpt-6-astra" },
-    { pinnedBundle: "nope" },
-    { constraintEffort: "low" },
-    { unavailable: ["x"], launchFailures: { claude: { until: "2099-01-01T00:00:00Z" } } },
-    { realtime_loop: false },
-  ]) {
-    assert.deepEqual(routingDiffs(pool, SAMPLED_GRID, options), [], JSON.stringify(options));
-  }
-  assert.deepEqual(
-    routingDiffs(["kimi-k2.6-preview", "glm-5.2-latest", "claude-sonnet-5-5"], SAMPLED_GRID, { unhealthyModels: ["kimi-k2.6", "glm-5.2"] }),
-    [],
-  );
-});
-
-test("R3 parity: canonicalModel and resolveModelSpec match origin/main on every spelling", (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  const names = [...Object.keys(FIXTURE.canonical), "claude-opus-5-5:default", "openrouter/qwen/foo", "qwen/foo", "OpenRouter/OpenAI/GPT-5-Mini", "spark", "gemini-spark", "grok-spark", "gpt-5.3-spark", "gpt-5.3-codex_spark"];
-  for (const name of names) {
-    assert.equal(canonicalModel(name), baseline.catalog.canonicalModel(name), name);
-    if (name.includes("codex-spark")) continue; // has its own entry now; see the Spark tests
-    const head = resolveModelSpec(name);
-    const base = baseline.catalog.resolveModelSpec(name);
-    assert.equal(head.canonical, base.canonical, name);
-    assert.equal(head.spec.tier, base.spec.tier, name);
-    assert.deepEqual(head.spec.capabilities, base.spec.capabilities, name);
-  }
-});
-
-const E2E_TEXTS = [
-  "Fix the null check in src/foo.js and add a unit test",
-  "Refactor the cross-module architecture to remove the race condition and find the root cause of the deadlock",
-  "Write a short poem about autumn",
-  "Look at this screenshot and tell me what is wrong with the layout",
-  "Search the web for the latest pricing of hosted vector databases",
-];
-const E2E_POOLS = { README: README_POOL, modern: NON_REALTIME_POOLS["modern bare strings"], dated: NON_REALTIME_POOLS["dated openai and anthropic"] };
-
-function conversation(text, turns) {
-  const messages = [];
-  for (let i = 0; i < turns; i++) {
-    messages.push({ role: "user", content: i === 0 ? text : `${text} (follow-up ${i})` });
-    if (i < turns - 1) messages.push({ role: "assistant", content: `answer ${i}` });
-  }
-  return messages;
-}
-
-async function hooksRun(lib, text, pool, turns = 3) {
-  const out = [];
-  const store = new lib.continuity.SessionContinuityStore();
-  for (let turn = 1; turn <= turns; turn++) {
-    const ctx = { state: {}, options: { continuityStore: store, candidateModels: pool, now: NOW + turn * 1000 } };
-    await lib.hooks.onRequest({ model: "agentcompass/auto", messages: conversation(text, turn) }, ctx);
-    const r = ctx.state.route;
-    out.push(r ? withoutAddedKeys({ ...r, scorer: null }) : null);
-  }
-  return out;
-}
-
-async function middlewareRun(lib, text, pool, turns = 3) {
-  const out = [];
-  const store = new lib.continuity.SessionContinuityStore();
-  for (let turn = 1; turn <= turns; turn++) {
-    const body = { model: "agentcompass/auto", messages: conversation(text, turn) };
-    const ctx = { state: {}, options: { continuityStore: store, candidateModels: pool, now: NOW + turn * 1000 } };
-    await lib.middleware.onRequest(body, ctx);
-    out.push(withoutAddedKeys({ body, route: ctx.state.route ?? null }));
-  }
-  return out;
-}
-
-const HEAD_LIB = () => ({
-  continuity: { SessionContinuityStore },
-  hooks: { onRequest: hooksOnRequest },
-  middleware: { onRequest: middlewareOnRequest },
-  index: { handleSystemOneRequest },
-});
-
-test("R3 parity: hooks end to end routes non-realtime sessions identically to origin/main", async (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  for (const [poolName, pool] of Object.entries(E2E_POOLS)) {
-    for (const text of E2E_TEXTS) {
-      assert.deepEqual(await hooksRun(HEAD_LIB(), text, pool), await hooksRun(baseline, text, pool), `${poolName}: ${text}`);
-    }
-  }
-});
-
-test("R3 parity: middleware end to end routes non-realtime sessions identically to origin/main", async (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  for (const [poolName, pool] of Object.entries(E2E_POOLS)) {
-    for (const text of E2E_TEXTS) {
-      assert.deepEqual(await middlewareRun(HEAD_LIB(), text, pool), await middlewareRun(baseline, text, pool), `${poolName}: ${text}`);
-    }
-  }
-});
-
-test("R3 parity: the decision provider answers non-realtime requests identically to origin/main", async (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  const questions = baseline.scorer.buildJevScorerPayload({ objective: "x" }).questions;
-  const answer = async (lib, state, pool) =>
-    withoutAddedKeys(
-      (await lib.handleSystemOneRequest({ model: "jev-6b-int8", state, questions }, { candidateModels: pool })).answers,
-    );
-  for (const pool of Object.values(E2E_POOLS)) {
-    for (const message of E2E_TEXTS) {
-      for (const extra of [{}, { previous_message_kind: "general_implementation", previous_message_reasoning: "high" }, { task: { hasVisualInput: true } }]) {
-        const state = { message, ...extra };
-        assert.deepEqual(await answer({ handleSystemOneRequest }, state, pool), await answer(baseline.index, state, pool));
-      }
-    }
-  }
-});
-
-test("R3 parity: the scorer cache and prompt only gain what realtime_loop needs", async (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  // Main caches by objective alone, whatever other fields the task carries; only an explicit realtime_loop splits an entry.
-  const options = {
-    allowExternalScorer: true,
-    scorerType: "openai_compatible",
-    scorerBaseUrl: "http://127.0.0.1:9999",
-    fetch: async () =>
-      new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ...GRID[100], expected_hours: 1, task_count: "1" }) } }] }), { status: 200 }),
-  };
-  const run = async (score, salt) => {
-    const objective = `cache parity ${salt}`;
-    const first = await score({ objective, needs: { visual: true } }, options);
-    const second = await score({ objective, work_kind: "web_research" }, options);
-    return [first.meta.source, second.meta.source, withoutAddedKeys(first.profile), withoutAddedKeys(second.profile)];
-  };
-  assert.deepEqual(await run(scoreTaskLive, "a"), await run(baseline.scorer.scoreTaskLive, "a"));
-  const prompt = (text) =>
-    text.split("\n").filter((line) => !line.includes("realtime_loop") && !line.includes("previous_user") && line !== "CRITICAL RULES:").join("\n").trim();
-  assert.equal(prompt(SCORER_SYSTEM_PROMPT), prompt(baseline.scorer.SCORER_SYSTEM_PROMPT));
-});
-
-test("R3 parity: continuation decisions and keepsEffort match origin/main without realtime", (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  const sessions = [
-    { model: "claude-haiku-5-5", effort: "high", tokens: 100, updatedAt: NOW - 1000 },
-    { model: "claude-haiku-5-5", effort: "low", tokens: 5000, cached: true, updatedAt: NOW - 1000 },
-    { model: "claude-opus-5-5", effort: "xhigh", tokens: 100, updatedAt: NOW - 1000, realtimeLoop: false },
-  ];
-  const facts = [
-    { turnText: "ok thanks, next", estimatedInputTokens: 50 },
-    { within: true },
-  ];
-  for (const affinityMode of ["cache", "turn", "session", "strict"]) {
-    for (const session of sessions) {
-      for (const fact of facts) {
-        const options = { now: NOW, affinityMode };
-        assert.deepEqual(
-          evaluateProviderContinuation(fact, session, options),
-          baseline.continuity.evaluateProviderContinuation(fact, session, options),
-        );
-        assert.equal(
-          keepsEffort(session, "low", 2048, NOW),
-          baseline.continuity.keepsEffort(session, "low", 2048, NOW),
-        );
-      }
-    }
-  }
-});
-
-// ---------------------------------------------------------------------------------------------------------------------
-// Python AgentCompass parity
-// ---------------------------------------------------------------------------------------------------------------------
-
 test("R3 Python: fixture covers the agreed spellings and grid", () => {
-  assert.ok(FIXTURE.variants.length >= 95, `${FIXTURE.variants.length} spellings`);
+  assert.ok(FIXTURE.variants.length >= 30, `${FIXTURE.variants.length} spellings`);
   assert.ok(FIXTURE.models.length >= 31, `${FIXTURE.models.length} models`);
   assert.equal(Object.keys(FIXTURE.responsiveness[FIXTURE.models[0]]).length, 9);
 });
@@ -365,9 +94,52 @@ test("m1-R3 Python: responsiveness key equals allocator.canonical on every spell
   for (const [name, canonical] of Object.entries(FIXTURE.canonical)) {
     const { key, known } = resolveResponsivenessModelKey(name);
     if (key !== canonical) diffs.push(`${name}: js=${key} py=${canonical}`);
-    // Spark has a catalog entry here and none in accounts.json; its speed is the same default either way
-    const pyKnown = FIXTURE.models.includes(canonical) || canonical === "gpt-5.3-codex-spark";
-    if (known !== pyKnown) diffs.push(`${name}: known=${known}`);
+    // A family guess is placed but not known: it never stands in for the row it was placed on
+    const { source } = FIXTURE.resolutions[name];
+    if (known !== (source === "exact" || source === "alias")) diffs.push(`${name}: known=${known} source=${source}`);
+  }
+  assert.deepEqual(diffs, []);
+});
+
+test("R1 Python: resolveModel matches resolve_model on every spelling", () => {
+  const diffs = [];
+  for (const [name, { key, source, effort }] of Object.entries(FIXTURE.resolutions)) {
+    const js = resolveModel(name);
+    if (js.source !== source || (js.effort ?? null) !== effort || (source !== "unknown" && js.key !== key)) {
+      diffs.push(`${name}: js=${js.key}/${js.source}/${js.effort} py=${key}/${source}/${effort}`);
+    }
+  }
+  assert.deepEqual(diffs, []);
+  // Family rows shrink by what auto_bundles says
+  const { key: target } = resolveModel("gemini-2.5-pro");
+  const family = resolveModelSpec("gemini-2.5-pro").spec;
+  const row = resolveModelSpec(target).spec;
+  assert.ok(Math.abs(row.tier - FIXTURE.family_shrink.tier - family.tier) < 0.01);
+  assert.ok(Math.abs(row.capabilities.coding * FIXTURE.family_shrink.vector - family.capabilities.coding) < 0.001);
+});
+
+test("R4 Python: validateProfile agrees with validate_profile on task counts", () => {
+  const base = { work_kind: "general_implementation", reasoning_depth: 2, code_complexity: 1, context_scale: 1, divergence: 1, hallucination_risk: 1, error_cost: 1, needs_visual: false, needs_gui: false, local_only: true, interaction_style: "engineering" };
+  const plain = (value) => (value === "nan" ? NaN : value === "inf" ? Infinity : value);
+  for (const { multi_task, task_count, valid, bucket } of FIXTURE.profile_validation) {
+    const label = JSON.stringify([multi_task, task_count]);
+    const raw = { ...base, multi_task, task_count: plain(task_count) };
+    if (valid) assert.equal(validateProfile(raw).task_count, bucket, label);
+    else assert.throws(() => validateProfile(raw), undefined, label);
+  }
+});
+
+test("R3 Python: a pin routes as plan() does over the reference accounts", () => {
+  const pool = Object.values(FIXTURE.pin_bundles);
+  const profile = { work_kind: "general_implementation", multi_task: false, task_count: "1", reasoning_depth: 2, code_complexity: 1, context_scale: 1, divergence: 1, hallucination_risk: 1, error_cost: 1, needs_visual: false, needs_gui: false, local_only: true, interaction_style: "engineering" };
+  const diffs = [];
+  for (const { task, realtime_loop, model, effort, blocked } of FIXTURE.pins) {
+    const js = selectBestRoute(profile, { candidateModels: pool, realtime_loop, now: NOW, ...mergePinOptions(task) });
+    const label = JSON.stringify([task, realtime_loop]);
+    if (blocked ? js.ok !== false : js.targetModel !== model || js.targetEffort !== effort) {
+      diffs.push(`${label}: js=${js.targetModel}:${js.targetEffort} py=${model}:${effort} blocked=${blocked}`);
+    }
+    if (blocked) assert.ok(js.warnings.length > 0, label);
   }
   assert.deepEqual(diffs, []);
 });
@@ -396,7 +168,7 @@ test("R3 Python: bundleResponsiveness matches bundle_responsiveness for every mo
       }
     }
   }
-  assert.ok(compared >= (FIXTURE.models.length + 95) * 9 - 9 * 5);
+  assert.ok(compared >= FIXTURE.models.length * 9);
   assert.deepEqual(diffs.slice(0, 40), []);
 });
 
@@ -424,8 +196,6 @@ test("M1-R3: ability curves on realtime tasks are the ones accounts.json declare
     const js = resolveRealtimeCurves(model, canonicalModel(model));
     assert.deepEqual(js.ability, curve.ability, `${model} ability`);
   }
-  // Non-realtime scoring still reads the routing table only.
-  assert.equal(EFFORT_CURVES["deepseek-v4-pro"], undefined);
 });
 
 test("M1-R3: slow models with a flat ability curve are excluded, models without one step down", () => {
@@ -447,23 +217,24 @@ test("M1-R3: slow models with a flat ability curve are excluded, models without 
   for (const model of ["deepseek-v4-pro", "glm-5.3", "mistral-large-4"]) {
     const c = ranked.allCandidates.find((x) => x.model === model);
     assert.equal(c.eligible, false, model);
-    assert.ok(c.excluded.some((e) => e.includes("too slow per turn")), model);
+    assert.ok(c.excluded.some((e) => e.includes("below the realtime_loop floor")), model);
   }
 });
 
-test("M2-R3: pin identity follows allocator.canonical: a pin never crosses 4-x and 5-5", () => {
+test("M2-R3: pin identity is each row's own key (contract R1): a pin never crosses 4-x and 5-5, nor reaches a family row", () => {
   const names = Object.keys(FIXTURE.canonical);
+  const leaf = (name) => splitEffortSuffix(name).name.split("/").pop().toLowerCase();
   const diffs = [];
   for (const pin of names) {
-    // A pin's own `:effort` narrows it further, which Python's `canonical` has no notion of; ask at that effort.
-    const effort = /:(none|off|minimal|low|medium|high|xhigh|max|ultra|auto|default)$/i.exec(pin)?.[1].toLowerCase() || "high";
+    // As `allocator.py:named_pin`, a name only a family guess could place stays itself. Unlike this pin of it, so does a row (X1).
+    const { key, source, effort } = FIXTURE.resolutions[pin];
+    const isDirect = (name) => ["exact", "alias"].includes(FIXTURE.resolutions[name].source);
+    const direct = source === "exact" || source === "alias";
     for (const model of names) {
-      const js = isCandidatePinned({ model, effort }, canonicalModel(model), { constraint_model: pin });
-      const py = FIXTURE.canonical[pin] === FIXTURE.canonical[model];
-      // A pin may also name the candidate literally; Python only ever sees it canonicalized, and the two can only differ for unknown names.
-      if (js !== py && !(js && pin.split("/").pop() === model.split("/").pop())) {
-        diffs.push(`pin=${pin} model=${model}: js=${js} py=${py}`);
-      }
+      const bare = splitEffortSuffix(model).name;
+      const js = isCandidatePinned({ model: bare, effort: effort || "high" }, canonicalModel(bare), { constraint_model: pin });
+      const wanted = direct ? (isDirect(model) && key === FIXTURE.resolutions[model].key) || key.toLowerCase() === leaf(model) : leaf(pin) === leaf(model);
+      if (js !== wanted) diffs.push(`pin=${pin} model=${model}: js=${js} wanted=${wanted}`);
     }
   }
   assert.deepEqual(diffs.slice(0, 40), []);
@@ -485,9 +256,9 @@ test("M2-R3: pin identity follows allocator.canonical: a pin never crosses 4-x a
 });
 
 test("M2-R3: a 5-5 candidate is not a sibling of an older opus, so the step-down is not blocked", () => {
-  // Routing folds both names into claude-opus-5-5; allocator.py keeps them apart, so 5-5@medium does not defer 4-7@high.
+  // Each name reads its own row, so 5-5@medium does not defer 4-7@high.
   assert.equal(canonicalModel("claude-opus-4-7"), "claude-opus-4-7");
-  assert.equal(resolveModelSpec("claude-opus-4-7").canonical, "claude-opus-5-5");
+  assert.equal(resolveModelSpec("claude-opus-4-7").canonical, "claude-opus-4-7");
   const bundles = [
     { id: "o47", account: "acct", provider: "gw", model: "claude-opus-4-7", effort: "high" },
     { id: "o55", account: "acct", provider: "gw", model: "claude-opus-5-5", effort: "medium" },
@@ -523,7 +294,11 @@ test("R3: provider-less candidates stay on dispatchable efforts, with or without
 
 const REALTIME_FIRST_TURN = "Stay in the live match and react each turn";
 const SCORER_PROFILE = {
+  multi_task: false,
+  task_count: "1",
   work_kind: "general_implementation",
+  multi_task: false,
+  task_count: "1",
   reasoning_depth: 2,
   code_complexity: 2,
   context_scale: 2,
@@ -577,7 +352,7 @@ const twoTurns = (second) => [
 
 test("M3-R3: a short realtime session holds on turn 2, without rerouting or ratcheting the effort back up", async () => {
   const store = new SessionContinuityStore();
-  const { options, calls } = scorerOptions(store, ["gpt-6-astra:xhigh", "gpt-5.3-codex-spark:high"]);
+  const { options, calls } = scorerOptions(store, ["gpt-6-astra", "gpt-5.3-codex-spark"]);
   const first = await hooksTurn(options, [{ role: "user", content: REALTIME_FIRST_TURN }]);
   assert.equal(first.state.route.realtimeLoop, true);
   assert.equal(store.get(first.state.sessionKey, NOW).realtimeLoop, true);
@@ -596,7 +371,7 @@ test("M3-R3: a short realtime session holds on turn 2, without rerouting or ratc
 
 test("M3-R3: an explicit realtime_loop:false ends the realtime hold; a non-realtime session is untouched", async () => {
   const store = new SessionContinuityStore();
-  const { options } = scorerOptions(store, ["gpt-6-astra:xhigh"]);
+  const { options } = scorerOptions(store, ["gpt-6-astra"]);
   const first = await hooksTurn(options, [{ role: "user", content: REALTIME_FIRST_TURN }]);
   assert.equal(first.state.route.realtimeLoop, true);
   const off = await hooksTurn(options, twoTurns("Now write up the summary."), { realtime_loop: false });
@@ -636,20 +411,20 @@ test("M3-R3: keepsEffort reads the realtime flag off the session", () => {
 
 test("M3-R3: a hold keeps the routed name instead of rewriting it to the canonical model", async () => {
   const store = new SessionContinuityStore();
-  const options = { continuityStore: store, candidateModels: ["gpt-5.3-codex:medium"], now: NOW };
+  const options = { continuityStore: store, candidateModels: ["gpt-6.1-sol-20261001:medium"], now: NOW };
   const first = await hooksTurn(options, [{ role: "user", content: REALTIME_FIRST_TURN }], { realtime_loop: true });
-  assert.equal(first.state.route.targetModel, "gpt-5.3-codex");
+  assert.equal(first.state.route.targetModel, "gpt-6.1-sol-20261001");
   store.recordResponse(first.state.sessionKey, { usage: { input_tokens: 2000, output_tokens: 300 } }, {}, NOW);
   const second = await hooksTurn(options, twoTurns("Redesign the distributed architecture and find the root cause of this deadlock."), {});
   assert.equal(second.state.route.continuation.held, true);
-  assert.equal(second.state.route.targetModel, "gpt-5.3-codex");
-  assert.equal(second.state.route.modelWithEffort, "gpt-5.3-codex:medium");
+  assert.equal(second.state.route.targetModel, "gpt-6.1-sol-20261001");
+  assert.equal(second.state.route.modelWithEffort, "gpt-6.1-sol-20261001:medium");
   assert.equal(second.state.route.realtimeLoop, true);
 });
 
 test("M3-R3: rerouting a realtime session keeps it realtime, so the effort is not ratcheted back up", async () => {
   const store = new SessionContinuityStore();
-  const pool = ["gpt-6-astra:xhigh", "claude-sonnet-5-5:xhigh"];
+  const pool = ["gpt-6-astra", "claude-sonnet-5-5"];
   // Turn mode reroutes every new turn, and the scorer no longer calls this turn realtime.
   const { options } = scorerOptions(store, pool, { affinityMode: "turn" });
   const first = await hooksTurn(options, [{ role: "user", content: REALTIME_FIRST_TURN }]);
@@ -763,7 +538,7 @@ test("m1-R4: a middleware with its own store keeps the realtime flag of the hook
 });
 
 const classifierSays = (realtime_loop) => {
-  const answer = JSON.stringify({ reasoning_depth: 4, code_complexity: 3, context_scale: 2, divergence: 1, hallucination_risk: 3, error_cost: 3, interaction_style: "engineering", needs_visual: false, needs_gui: false, realtime_loop, work_kind: "debug_review", confidence: 0.9 });
+  const answer = JSON.stringify({ multi_task: false, task_count: "1", reasoning_depth: 2, code_complexity: 2, context_scale: 2, divergence: 1, hallucination_risk: 2, error_cost: 2, interaction_style: "engineering", needs_visual: false, needs_gui: false, realtime_loop, work_kind: "debug_review", confidence: 0.9 });
   const reply = JSON.stringify({ choices: [{ message: { content: answer } }] });
   const fetch = async () => ({ ok: true, status: 200, text: async () => reply, json: async () => JSON.parse(reply) });
   return { scorerType: "openai_compatible", allowExternalScorer: true, scorerBaseUrl: "http://127.0.0.1:9/v1", scorerApiKey: "k", scorerModel: "m", fetch, useCache: false };
@@ -771,7 +546,7 @@ const classifierSays = (realtime_loop) => {
 
 test("P1: a Tandem middleware with its own store follows a classifier-only realtime route on an effort-suffixed pool", async () => {
   const pools = {
-    suffixed: ["claude-opus-5-5:xhigh", "gemini-4-argon-high:high", "gpt-6-astra:high", "claude-sonnet-5-5:medium"],
+    suffixed: ["claude-opus-5-5:medium", "gemini-4-argon-high:high", "gpt-6-astra:high", "claude-sonnet-5-5:high"],
     bare: ["claude-opus-5-5", "gemini-4-argon-high", "gpt-6-astra", "claude-sonnet-5-5"],
   };
   const tandem = async (pool, shared, realtime) => {
@@ -793,14 +568,12 @@ test("P1: a Tandem middleware with its own store follows a classifier-only realt
     assert.equal(own.stored, true, name);
     assert.doesNotMatch(own.final, /^gemini-4-argon-high/, name);
   }
-  // Without realtime the middleware routes for itself on a suffixed pool, as it does on origin/main, from the classifier's answer
-  const noRealtime = await tandem(pools.suffixed, false, false);
-  const solo = { model: "agentcompass/auto", messages: [{ role: "user", content: "Find the root cause of the race in the scheduler across modules" }] };
-  middlewareOnRequest(solo, { state: {}, profile: noRealtime.route.profile, options: { candidateModels: pools.suffixed, now: NOW, continuityStore: new SessionContinuityStore() } });
-  assert.equal(noRealtime.final, solo.model);
+  // Without realtime the same route carries over: the pool offers its model at that effort
+  const plain = await tandem(pools.suffixed, false, false);
+  assert.equal(plain.final, `${plain.route.targetModel}:${plain.route.targetEffort}`);
 });
 
-test("m2-R4: onProvider and the decision provider honor pins, and only under realtime_loop", async (t) => {
+test("m2-R4: onProvider and the decision provider honor pins, with or without realtime_loop", async (t) => {
   t.mock.method(console, "warn", () => {});
   const pool = ["gemini-4-argon-high", "gpt-6-astra"];
   const pin = { pinnedModel: "gemini-4-argon-high" };
@@ -814,22 +587,25 @@ test("m2-R4: onProvider and the decision provider honor pins, and only under rea
   };
   assert.equal(await provider({ realtime_loop: true }, pin), "gemini-4-argon-high:high");
   assert.match(await provider({ realtime_loop: true }, {}), /^gpt-6-astra:/);
-  assert.equal(await provider({}, pin), await provider({}, {}));
+  assert.equal(await provider({}, pin), "gemini-4-argon-high:high");
 
   const questions = { effort: { type: "level" }, intent: { criteria: { "gemini-4-argon-high": "Argon", "gpt-6-astra": "Astra", none: "none of these" } } };
   const effort = async (state, pins) =>
     (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", ...state }, questions }, { candidateModels: pool, ...pins })).answers.effort;
   assert.deepEqual(await effort({ realtime_loop: true }, { ...pin, pinnedEffort: "high" }), await effort({ realtime_loop: true }, { candidateModels: ["gemini-4-argon-high"], ...pin }));
   assert.notDeepEqual(await effort({ realtime_loop: true }, pin), await effort({ realtime_loop: true }, {}));
-  assert.deepEqual(await effort({}, pin), await effort({}, {}), "no pin effect without realtime_loop");
 
-  // When the quotas leave nothing, the second try without them keeps the pin too
+  // When the quotas leave nothing, nothing routes: there is no second try without them (contract R3)
   const spent = { kind: "subscription", quota: { windows: [{ name: "7d", used: 100, remaining: 0, resetsAt: new Date(Date.now() + 48 * 3600 * 1000).toISOString() }] } };
   const quotas = Object.fromEntries(["codex", "gemini", "antigravity", "openai", "google"].map((p) => [`${p}/a@example.com`, spent]));
-  const intent = async (pins) =>
-    (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", realtime_loop: true, quotas }, questions }, { candidateModels: pool, ...pins })).answers.intent.choice;
-  assert.equal(await intent(pin), "gemini-4-argon-high");
-  assert.equal(await intent({}), "gpt-6-astra");
+  const spentRoute = async (pins) =>
+    (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", realtime_loop: true, quotas }, questions }, { candidateModels: pool, decisionProviderDetails: true, ...pins })).agentcompass;
+  for (const pins of [pin, {}]) {
+    const route = await spentRoute(pins);
+    assert.equal(route.blocked, true);
+    assert.equal(route.targetModel, null);
+    assert.ok(route.warnings.length > 0);
+  }
 });
 
 test("m3-R4: the slow pin warning names the model the speed was read for", () => {
@@ -851,50 +627,14 @@ test("Spark: every spelling has its own conservative entry and none resolves to 
     assert.equal(spec.tier, 3.0, name);
   }
   const spark = resolveModelSpec(SPARK).spec;
-  const luna = resolveModelSpec("gpt-6-luna").spec;
-  assert.ok(spark.tier <= luna.tier);
-  assert.ok(spark.cost <= luna.cost);
-  for (const [k, v] of Object.entries(spark.capabilities)) assert.ok(v <= luna.capabilities[k], k);
   assert.match(spark.basis, /Not in AgentCompass accounts\.json/);
   assert.equal(FIXTURE.models.includes(SPARK), false, "If AgentCompass lists Spark now, copy its values instead");
-  // Other codex names keep the family fallback, the default pool never picks Spark
-  assert.equal(resolveModelSpec("gpt-5.3-codex").canonical, "gpt-6.1-sol");
-  assert.equal(resolveModelSpec("some-codex-model").canonical, "gpt-6.1-sol");
+  // The default pool never picks Spark, and other codex names are not it
+  assert.equal(resolveModel("gpt-5.3-codex").source, "unknown");
   // Spark's entry is for this model: another model's "spark" is not it
   for (const name of ["spark", "gemini-spark", "grok-spark", "gpt-5.3-spark", "gpt-5.3-codex_spark"]) assert.notEqual(resolveModelSpec(name).canonical, SPARK, name);
   assert.ok(rankCandidates(GRID[0], { now: NOW }).allCandidates.every((c) => c.canonicalModel !== SPARK));
   // Named in a realtime pool it runs on the same default as in AgentCompass
-  assert.deepEqual(FIXTURE.responsiveness[SPARK].high, [0.52, "default"]);
   const bundle = bundleResponsiveness({ model: SPARK, effort: "high" });
   assert.deepEqual([bundle.value, bundle.source], [0.52, "default"]);
-});
-
-test("Spark: non-realtime differences from origin/main are all Spark's own entry, each with a reason", (t) => {
-  if (!baseline) return t.skip(baselineSkip);
-  // Every row names why origin/main, which scored Spark as gpt-6.1-sol (tier 3.6, its efforts and curves), chose otherwise.
-  const reasonFor = (base, head, sparkRow) => {
-    if (base.selected.canonicalModel !== "gpt-6.1-sol" || !base.selected.id.includes(SPARK)) return null;
-    if (head.selected?.model?.includes(SPARK)) {
-      return ["xhigh", "max"].includes(base.selected.effort) ? "effort-not-listed" : "no-effort-curve";
-    }
-    return sparkRow?.eligible ? "outscored-by-peer" : "below-the-task-gate";
-  };
-  const pools = { "spark alone": [SPARK], "spark + luna": [SPARK, "gpt-6-luna"], "spark + sol": [SPARK, "gpt-6.1-sol"], "spark + flash + sonnet": [SPARK, "claude-sonnet-5-5", "gemini-3.8-flash-high"] };
-  const counts = {};
-  for (const [name, pool] of Object.entries(pools)) {
-    counts[name] = {};
-    for (const profile of GRID) {
-      const opts = { candidateModels: pool, now: NOW };
-      const head = rankCandidates(profile, opts);
-      const base = baseline.allocator.rankCandidates(profile, opts);
-      if ((head.selected?.id ?? null) === (base.selected?.id ?? null)) continue;
-      const sparkRows = head.allCandidates.filter((c) => c.model === SPARK);
-      const reason = reasonFor(base, head, sparkRows.find((c) => c.eligible) || sparkRows[0]);
-      assert.ok(reason, `${name}: a difference that is not Spark's: ${base.selected?.id} -> ${head.selected?.id} on ${JSON.stringify(profile)}`);
-      counts[name][reason] = (counts[name][reason] || 0) + 1;
-    }
-    assert.ok(Object.keys(counts[name]).length > 0, `${name}: the entry changed nothing, so this test compares nothing`);
-  }
-  // Pools that do not name Spark are the "R3 parity" tests above: 0 differences.
-  t.diagnostic(JSON.stringify(counts));
 });

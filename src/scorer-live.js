@@ -11,7 +11,13 @@
  */
 
 import { CANONICAL_ROUTES, INTERACTION_STYLES, KIND_TRAITS } from "./catalog.js";
-import { PROFILE_INTEGERS, REALTIME_LOOP_QUESTION, validateProfile } from "./profiler-core.js";
+import {
+  MULTI_TASK_QUESTION,
+  PROFILE_INTEGERS,
+  REALTIME_LOOP_QUESTION,
+  TASK_COUNT_QUESTION,
+  validateProfile,
+} from "./profiler-core.js";
 
 const SCORE_CACHE = new Map();
 const SCORE_CACHE_MAX = 256;
@@ -112,17 +118,33 @@ function extractExplicitRealtimeLoop(task, options = {}) {
   return undefined;
 }
 
-function cacheKeyOf(task, config) {
+export function cacheKeyOf(task, config) {
   return JSON.stringify([
     task.objective?.slice(0, 4000) || "",
     task.previousUser?.slice(0, 4000) || "",
     Boolean(task.hasVisualInput),
+    task.toolCount || 0,
+    task.work_kind ?? null,
+    task.difficulty ?? null,
+    task.needs ?? null,
+    task.context ?? null,
+    task.cwd ?? null,
+    task.multi_task ?? null,
+    task.task_count ?? null,
+    task.expected_hours ?? task.hours ?? null,
     config.scorerType || "",
     config.scorerModel || "",
+    config.scorerBaseUrl || config.scorerUrl || config.jevBaseUrl || "",
+    config.routes ?? null,
     extractExplicitRealtimeLoop(task, config) ?? null,
   ]);
 }
 
+const copied = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+
+/**
+ * A cached profile, which no caller can change for the next one. An entry that no longer validates is a miss.
+ */
 export function getCachedProfile(key) {
   const entry = SCORE_CACHE.get(key);
   if (!entry) return null;
@@ -130,7 +152,12 @@ export function getCachedProfile(key) {
     SCORE_CACHE.delete(key);
     return null;
   }
-  return entry;
+  try {
+    return { at: entry.at, profile: validateProfile(copied(entry.profile)), meta: copied(entry.meta) };
+  } catch {
+    SCORE_CACHE.delete(key);
+    return null;
+  }
 }
 
 export function putCachedProfile(key, profile, meta) {
@@ -138,7 +165,7 @@ export function putCachedProfile(key, profile, meta) {
     const oldest = SCORE_CACHE.keys().next().value;
     if (oldest !== undefined) SCORE_CACHE.delete(oldest);
   }
-  SCORE_CACHE.set(key, { at: Date.now(), profile, meta });
+  SCORE_CACHE.set(key, { at: Date.now(), profile: copied(profile), meta: copied(meta) });
 }
 
 export function clearProfileCache() {
@@ -184,6 +211,20 @@ export function buildJevScorerPayload(task, model = "jev-latest", routes = CANON
     realtime_loop: {
       type: "noul",
       instructions: REALTIME_LOOP_QUESTION,
+    },
+    multi_task: {
+      type: "noul",
+      instructions: MULTI_TASK_QUESTION,
+    },
+    task_count: {
+      type: "choice",
+      instructions: TASK_COUNT_QUESTION,
+      criteria: {
+        1: "One task.",
+        2: "Two separate tasks.",
+        3: "Three separate tasks.",
+        ">3": "More than three separate tasks.",
+      },
     },
   };
   for (const [name, [instructions, criteria]] of Object.entries(JEV_SCORE_QUESTIONS)) {
@@ -236,6 +277,8 @@ export function parseJevScorerAnswer(response, fallbackTask = {}) {
       ? rtAns.noul ?? rtAns.probabilities?.yes ?? rtAns.yes
       : rtAns;
   raw.realtime_loop = typeof rtVal === "number" && Number.isFinite(rtVal) ? rtVal >= 0.5 : false;
+  raw.multi_task = Number(pick("multi_task", "noul")) >= 0.5;
+  raw.task_count = pick("task_count", "choice");
   return validateProfile(raw);
 }
 
@@ -259,6 +302,17 @@ function extractJsonObject(text, requiredKey) {
     } catch {}
   }
   return null;
+}
+
+/** The classifier answered, but not with a valid profile (contract R4): never repaired, and never replaced by a guess. */
+class InvalidClassifierOutput extends Error {}
+
+function classifierProfile(build) {
+  try {
+    return build();
+  } catch (err) {
+    throw new InvalidClassifierOutput(String(err?.message || err));
+  }
 }
 
 /**
@@ -324,6 +378,51 @@ async function postClassifier(classifier, payload, options) {
   }
 }
 
+async function callClassifierForProfile(classifier, task, options, explicitRt) {
+  if (classifier.scorerType === "jev") {
+    const data = await postClassifier(
+      classifier,
+      buildJevScorerPayload(task, classifier.model, options.routes || CANONICAL_ROUTES),
+      options,
+    );
+    const profile = classifierProfile(() => parseJevScorerAnswer(data, task));
+    return explicitRt !== undefined ? { ...profile, realtime_loop: explicitRt } : profile;
+  }
+  const data = await postClassifier(
+    classifier,
+    {
+      model: classifier.model,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SCORER_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify({
+            objective: task.objective.slice(0, 12000),
+            previous_user: task.previousUser ? task.previousUser.slice(0, 4000) : undefined,
+            has_visual_input: Boolean(task.hasVisualInput),
+            tool_count: task.toolCount || 0,
+          }),
+        },
+      ],
+    },
+    options,
+  );
+  const content = data?.choices?.[0]?.message?.content;
+  const rawObj = extractJsonObject(typeof content === "string" ? content : JSON.stringify(content), "reasoning_depth");
+  if (!rawObj) {
+    throw new InvalidClassifierOutput("Scorer returned no valid task profile JSON");
+  }
+  if (task.hasVisualInput) rawObj.needs_visual = true;
+  if (explicitRt !== undefined) {
+    rawObj.realtime_loop = explicitRt;
+  } else if (rawObj.realtime_loop === undefined || rawObj.realtime_loop === null) {
+    rawObj.realtime_loop = false;
+  }
+  return classifierProfile(() => validateProfile(rawObj));
+}
+
 /**
  * A host's scorer settings (`options.scorer`, or the flat `scorer*` options) as `scoreTaskLive` takes them.
  */
@@ -379,52 +478,12 @@ export async function scoreTaskLive(task, options = {}) {
 
   try {
     let profile;
-    if (classifier.scorerType === "jev") {
-      const data = await postClassifier(
-        classifier,
-        buildJevScorerPayload(task, classifier.model, options.routes || CANONICAL_ROUTES),
-        options,
-      );
-      profile = parseJevScorerAnswer(data, task);
-      if (explicitRt !== undefined) {
-        profile = { ...profile, realtime_loop: explicitRt };
-      }
-    } else {
-      const data = await postClassifier(
-        classifier,
-        {
-          model: classifier.model,
-          temperature: 0,
-          response_format: { type: "json_object" },
-          messages: [
-            { role: "system", content: SCORER_SYSTEM_PROMPT },
-            {
-              role: "user",
-              content: JSON.stringify({
-                objective: task.objective.slice(0, 12000),
-                previous_user: task.previousUser ? task.previousUser.slice(0, 4000) : undefined,
-                has_visual_input: Boolean(task.hasVisualInput),
-                tool_count: task.toolCount || 0,
-              }),
-            },
-          ],
-        },
-        options,
-      );
-      const content = data?.choices?.[0]?.message?.content;
-      const rawObj = extractJsonObject(typeof content === "string" ? content : JSON.stringify(content), "reasoning_depth");
-      if (!rawObj) {
-        throw new Error("Scorer returned no valid task profile JSON");
-      }
-      if (task.hasVisualInput) rawObj.needs_visual = true;
-      if (explicitRt !== undefined) {
-        rawObj.realtime_loop = explicitRt;
-      } else if (rawObj.realtime_loop === undefined || rawObj.realtime_loop === null) {
-        rawObj.realtime_loop = false;
-      }
-      profile = validateProfile(rawObj);
+    try {
+      profile = await callClassifierForProfile(classifier, task, options, explicitRt);
+    } catch (err) {
+      if (!(err instanceof InvalidClassifierOutput)) throw err;
+      profile = await callClassifierForProfile(classifier, task, options, explicitRt);
     }
-
     const meta = {
       source: "system_one_live",
       scorerType: classifier.scorerType,
@@ -434,6 +493,19 @@ export async function scoreTaskLive(task, options = {}) {
     putCachedProfile(cacheKey, profile, meta);
     return { profile, meta };
   } catch (err) {
+    if (err instanceof InvalidClassifierOutput) {
+      return {
+        profile: null,
+        meta: {
+          source: "classifier_invalid",
+          scorerType: classifier.scorerType,
+          error: "classifier_invalid_output",
+          reason: "classifier_invalid_output",
+          detail: String(err.message).slice(0, 200),
+          durationMs: Date.now() - started,
+        },
+      };
+    }
     return unavailable(err?.message || err);
   }
 }

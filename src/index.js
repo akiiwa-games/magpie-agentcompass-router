@@ -15,7 +15,19 @@
  *    - Shape C (Direct AgentCompass 10-field `/v1/systemone` query): `state.task` + `questions.work_kind` / `reasoning_depth` / etc.
  */
 
-import { pinOptionsOf, rankCandidates, selectBestRoute } from "./allocator.js";
+import {
+  explicitCandidateModels,
+  blockedRefusal,
+  candidateOffers,
+  effortUnchecked,
+  logRouteWarnings,
+  mergePinOptions,
+  pinOptionsOf,
+  pinsFixEffort,
+  refusalSummary,
+  rankCandidates,
+  selectBestRoute,
+} from "./allocator.js";
 import { CANONICAL_ROUTES, canonicalModel } from "./catalog.js";
 import {
   SessionContinuityStore,
@@ -126,7 +138,9 @@ function buildEffortAnswer(effort, confidence = 0.9) {
 }
 
 /**
- * Handle a POST `/v1/systemone` request from Magpie (`internal/gateway/decide.go`).
+ * Handle a POST `/v1/systemone` request from Magpie (`internal/gateway/decide.go`). Magpie reads `model`, `answers` and `usage`.
+ * This is a public gateway route, so `agentcompass` holds the conclusion only: accounts, quotas, the pool and health go to the
+ * local log, and to the caller only under the operator's `decisionProviderDetails: true`.
  */
 export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   const model = bodyObj?.model || DECISION_MODEL_ID;
@@ -192,6 +206,21 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
             ? rawTaskObj.needs.realtime_loop
             : undefined;
 
+  const pins = mergePinOptions(pinOptionsOf(pluginOptions), state, rawTaskObj);
+  const withDetails = pluginOptions.decisionProviderDetails === true;
+  const blockedAnswer = (blocked) => {
+    logRouteWarnings(blocked.warnings);
+    const { code, message } = refusalSummary(blocked);
+    return {
+      model,
+      answers: {},
+      agentcompass: withDetails
+        ? { targetModel: null, blocked: true, error: blocked.error, refusal: blockedRefusal(blocked), warnings: blocked.warnings }
+        : { targetModel: null, blocked: true, error: code, message },
+      usage: { input_tokens: Math.max(16, Math.ceil(turnText.length / 4)), output_tokens: 16 },
+    };
+  };
+
   const taskFacts = {
     objective: turnText,
     previousUser: prevUser,
@@ -233,22 +262,22 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   }
 
   const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions);
-  let decision = selectBestRoute(profile, {
-    candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
+  const decision = selectBestRoute(profile, {
+    candidateModels: explicitCandidateModels(pluginOptions) || undefined,
     catalog: pluginOptions.catalog,
     quotas: liveQuotas,
+    unhealthyModels: [
+      ...(pluginOptions.continuityStore?.getUnhealthyModels?.(Date.now()) || []),
+      ...(Array.isArray(pluginOptions.unhealthyModels) ? pluginOptions.unhealthyModels : []),
+    ],
     meteredOk: pluginOptions.meteredOk,
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
-    ...pinOptionsOf(pluginOptions),
+    ...pins,
   });
-  if (!decision.ok && liveQuotas) {
-    decision = selectBestRoute(profile, {
-      candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
-      catalog: pluginOptions.catalog,
-      ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
-      ...pinOptionsOf(pluginOptions),
-    });
+  if (decision.blocked) {
+    return blockedAnswer({ error: decision.error || "no_route", warnings: decision.warnings, refusal: decision.refusal });
   }
+  logRouteWarnings(decision.warnings);
 
   const answers = {};
   let matchedChoice = "";
@@ -274,17 +303,14 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   let effectiveEffort = decision.targetEffort;
   if (
     !decision.realtimeLoop &&
+    !pinsFixEffort(pins) &&
     prevReasoning &&
     ((prevKind && matchedChoice && prevKind === matchedChoice) ||
       (prevKind && prevKind === decision.workKind))
   ) {
-    effectiveEffort = ratchetEffort(prevReasoning, effectiveEffort, [
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-      "max",
-    ]);
+    const ratcheted = ratchetEffort(prevReasoning, effectiveEffort, ["low", "medium", "high", "xhigh", "max"]);
+    const pool = explicitCandidateModels(pluginOptions);
+    if (!pool || candidateOffers(pool, decision.targetModel, ratcheted, pluginOptions.catalog)) effectiveEffort = ratcheted;
   }
 
   if (questions.effort) {
@@ -320,24 +346,27 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   return {
     model,
     answers,
-    agentcompass: {
-      targetModel: decision.targetModel,
-      targetEffort: effectiveEffort,
-      selectedAccount: decision.selectedAccount || null,
-      quota: decision.quota || null,
-      workKind: decision.workKind,
-      difficulty: decision.difficulty,
-      requiredAbility: decision.requiredAbility,
-      realtimeLoop: Boolean(decision.realtimeLoop),
-      continuation: {
-        held: false,
-        why: prevKind ? "reclassified" : "first",
-        previousKind: prevKind || null,
-        previousEffort: prevReasoning || null,
-      },
-      profile,
-      scorer: meta,
-    },
+    agentcompass: withDetails
+      ? {
+          targetModel: decision.targetModel,
+          targetEffort: effectiveEffort,
+          selectedAccount: decision.selectedAccount || null,
+          quota: decision.quota || null,
+          workKind: decision.workKind,
+          difficulty: decision.difficulty,
+          requiredAbility: decision.requiredAbility,
+          realtimeLoop: Boolean(decision.realtimeLoop),
+          warnings: decision.warnings,
+          continuation: {
+            held: false,
+            why: prevKind ? "reclassified" : "first",
+            previousKind: prevKind || null,
+            previousEffort: prevReasoning || null,
+          },
+          profile,
+          scorer: meta,
+        }
+      : { targetModel: decision.targetModel, targetEffort: effectiveEffort },
     usage: {
       input_tokens: Math.max(16, Math.ceil(turnText.length / 4)),
       output_tokens: 48,

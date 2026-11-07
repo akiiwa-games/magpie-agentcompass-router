@@ -24,6 +24,7 @@ import {
   MODEL_ALIASES,
   canonicalModel,
   resolveModelSpec,
+  pyRound,
 } from "./catalog.js";
 
 const SQRT2 = Math.SQRT2;
@@ -70,7 +71,7 @@ export function clamp(val, low, high) {
 }
 
 export function round4(val) {
-  return Math.round(val * 10000) / 10000;
+  return pyRound(val, 4);
 }
 
 export function round3(val) {
@@ -154,7 +155,7 @@ export function inferModelProviderFamily(rawModel, aliases = MODEL_ALIASES) {
   }
   const canon = canonicalModel(rawModel, aliases).toLowerCase();
   if (canon.startsWith("claude")) return "claude";
-  if (canon.startsWith("gpt") || canon.includes("codex") || canon.includes("o1") || canon.includes("o3")) {
+  if (canon.startsWith("gpt") || canon.includes("codex") || /^o\d/.test(canon)) {
     return "codex";
   }
   if (canon.startsWith("gemini") || canon.includes("argon")) return "gemini";
@@ -209,22 +210,25 @@ export function providerMatchesModel(accountProvider, rawModel, aliases = MODEL_
  * Check whether a specific quota window applies to the given canonical model
  * (`allocator.py:legacy_model_binds_window` and Magpie `strategies.go:124`).
  */
-export function windowBindsModel(windowName, canonicalModelName, explicitModels = null) {
+export function windowBindsModel(windowName, canonicalModelName, explicitModels = null, rawModel = null) {
   const wid = String(windowName || "").trim().toLowerCase();
   const model = String(canonicalModelName || "").trim().toLowerCase();
+  // The window may be written against the key or the name as routed (contract R1).
+  const raw = String(rawModel || model).trim().toLowerCase();
+  const names = (tag) => model.includes(tag) || raw.includes(tag);
 
   if (Array.isArray(explicitModels) && explicitModels.length > 0) {
     const matchesExplicit = explicitModels.some((tag) => {
       const t = String(tag || "").toLowerCase();
-      return t && (model.includes(t) || wid.includes(t));
+      return t && (names(t) || wid.includes(t) || canonicalModel(t).toLowerCase() === model);
     });
     if (!matchesExplicit) return false;
   }
 
-  if (wid.includes("fable") && !model.includes("fable")) return false;
-  if (wid.includes("opus") && !model.includes("opus")) return false;
-  if (wid.includes("sonnet") && !model.includes("sonnet")) return false;
-  if (wid.includes("haiku") && !model.includes("haiku")) return false;
+  if (wid.includes("fable") && !names("fable")) return false;
+  if (wid.includes("opus") && !names("opus")) return false;
+  if (wid.includes("sonnet") && !names("sonnet")) return false;
+  if (wid.includes("haiku") && !names("haiku")) return false;
   if (wid.startsWith("gemini-") && !model.startsWith("gemini")) return false;
   if (wid.startsWith("3p-") && model.startsWith("gemini")) return false;
 
@@ -742,7 +746,8 @@ export function evaluateAccountQuotaForModel(
   effort,
   effortScale,
   taskHours,
-  policy = DEFAULT_SCORING_POLICY
+  policy = DEFAULT_SCORING_POLICY,
+  rawModel = null
 ) {
   const excluded = [];
   const kind = String(accountEntry.kind || "subscription").toLowerCase();
@@ -764,7 +769,7 @@ export function evaluateAccountQuotaForModel(
   }
 
   const applicable = (accountEntry.windows || []).filter((w) =>
-    windowBindsModel(w.id, canonicalModelName, w.models)
+    windowBindsModel(w.id, canonicalModelName, w.models, rawModel)
   );
 
   // If this is a metered / balance-only account with no subscription windows
@@ -774,7 +779,7 @@ export function evaluateAccountQuotaForModel(
       if (bal && typeof bal.amount === "number" && bal.amount <= 0) {
         excluded.push(`${accountEntry.key}: prepaid balance is exhausted (${bal.amount})`);
       }
-      const usdPerHour = Number(modelSpec?.usd_per_hour ?? 3.0);
+      const usdPerHour = Number(modelSpec?.usd_per_hour ?? 4.0);
       const stepUsd = taskHours * usdPerHour * effortScale;
       const scorePerUsd = Number(
         policy?.opportunity_exchange?.score_per_displaced_usd ??
@@ -808,7 +813,7 @@ export function evaluateAccountQuotaForModel(
     };
   }
 
-  const usdPerHour = Number(modelSpec?.usd_per_hour ?? 3.0);
+  const usdPerHour = Number(modelSpec?.usd_per_hour ?? 4.0);
   const durMult = Number(modelSpec?.duration_multiplier ?? 1.0);
   const effectiveHours = taskHours * durMult;
   const stepUsd = effectiveHours * usdPerHour * effortScale;
@@ -939,7 +944,8 @@ export function evaluateModelQuota(
       effort,
       effortScale,
       taskHours,
-      policy
+      policy,
+      rawModel
     )
   );
 

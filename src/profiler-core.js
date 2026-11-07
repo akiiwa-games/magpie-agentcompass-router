@@ -298,6 +298,43 @@ export function extractRequestFacts(body, ctx = {}) {
   };
 }
 
+/**
+ * A profile from a request's structured signals alone (image parts, explicit `needs.gui`, `realtime_loop`), used only
+ * when the turn has no text (`!facts.objective`) and the user set a candidate pool or a pin (contract R2, R3).
+ */
+export function noTextProfile(facts = {}) {
+  const gui = Boolean(facts.hasComputerUse);
+  return {
+    work_kind: gui ? "computer_use" : "other_or_mixed",
+    reasoning_depth: 1,
+    code_complexity: gui ? 0 : 1,
+    context_scale: 1,
+    divergence: 1,
+    hallucination_risk: gui ? 2 : 1,
+    error_cost: gui ? 2 : 1,
+    needs_visual: Boolean(facts.hasVisualInput || gui),
+    needs_gui: gui,
+    local_only: gui,
+    realtime_loop: Boolean(facts.realtime_loop),
+    interaction_style: "engineering",
+    expected_hours: 0.4,
+    hours_confidence: "medium",
+    urgency: "unknown",
+    multi_task: false,
+    task_count: "1",
+  };
+}
+
+const TASK_COUNTS = ["1", "2", "3", ">3"];
+
+function taskCountBucket(value) {
+  if (TASK_COUNTS.includes(value)) return value;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 1) {
+    return TASK_COUNTS[Math.min(value, 4) - 1];
+  }
+  throw new Error(`task.profile.task_count must be one of ${TASK_COUNTS.join(", ")} or a positive whole number`);
+}
+
 export function validateProfile(raw) {
   if (!raw || typeof raw !== "object") {
     throw new Error("task.profile must be an object");
@@ -350,7 +387,15 @@ export function validateProfile(raw) {
   if (typeof raw.reason === "string" && raw.reason.trim()) {
     profile.reason = raw.reason.trim().slice(0, 300);
   }
-  profile.multi_task = Boolean(raw.multi_task);
-  profile.task_count = ["1", "2", "3", ">3"].includes(raw.task_count) ? raw.task_count : "1";
+  if (typeof raw.multi_task !== "boolean") {
+    throw new Error("task.profile.multi_task must be true or false");
+  }
+  profile.multi_task = raw.multi_task;
+  profile.task_count = taskCountBucket(raw.task_count);
+  if (profile.multi_task !== (profile.task_count !== "1")) {
+    throw new Error(
+      `task.profile.multi_task ${profile.multi_task} contradicts task.profile.task_count ${profile.task_count}`
+    );
+  }
   return profile;
 }

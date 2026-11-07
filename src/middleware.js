@@ -20,7 +20,23 @@
  *    and filter accounts, and exports `strategies["agentcompass"]` / `strategies["agentcompass-pure"]`.
  */
 
-import { pinOptionsOf, selectBestRoute } from "./allocator.js";
+import {
+  blockedRefusal,
+  candidateOffers,
+  effortGoneWarning,
+  heldBundle,
+  heldEffortOn,
+  heldTarget,
+  logRouteWarnings,
+  dropPinFields,
+  explicitCandidateModels,
+  extractModelList,
+  mergePinOptions,
+  pinOptionsOf,
+  pinsFixEffort,
+  sessionProfile,
+  selectBestRoute,
+} from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
   bodyUpTo,
@@ -31,7 +47,7 @@ import {
   keepsEffort,
   recentUserTurns,
 } from "./continuity.js";
-import { extractRequestFacts, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
+import { extractRequestFacts, noTextProfile, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
 import { orderSeatsByQuotaEconomics } from "./quota.js";
 
 const ROUTE_CARRIER_KEY = "__agentcompass_route";
@@ -66,7 +82,7 @@ function dropRouterFields(body) {
       dropped = true;
     }
   }
-  return dropped;
+  return dropPinFields(body) || dropped;
 }
 
 function stripEffortSuffix(rawModel) {
@@ -95,38 +111,8 @@ function isVirtualModelName(model, options = {}) {
   return DEFAULT_VIRTUAL_MODELS.includes(clean);
 }
 
-function extractModelList(source) {
-  if (!source) return null;
-  if (Array.isArray(source)) {
-    const list = source
-      .map((item) => {
-        if (typeof item === "string") return item.trim();
-        if (item && typeof item === "object") {
-          return String(item.id || item.name || item.model || "").trim();
-        }
-        return "";
-      })
-      .filter(Boolean);
-    return list.length > 0 ? list : null;
-  }
-  if (typeof source === "object") {
-    const keys = Object.keys(source)
-      .map((k) => k.trim())
-      .filter(Boolean);
-    return keys.length > 0 ? keys : null;
-  }
-  return null;
-}
-
 function resolveCandidateModels(body, ctx = {}, options = {}) {
-  const explicit =
-    extractModelList(options.candidateModels) ||
-    extractModelList(options.allowedModels) ||
-    extractModelList(options.availableModels) ||
-    extractModelList(options.models) ||
-    extractModelList(ctx?.models) ||
-    extractModelList(ctx?.availableModels) ||
-    extractModelList(options.modelMap);
+  const explicit = explicitCandidateModels(options, ctx);
 
   if (explicit) {
     return { candidateModels: explicit, hasExplicitCandidates: true, canRewriteModel: true };
@@ -136,7 +122,8 @@ function resolveCandidateModels(body, ctx = {}, options = {}) {
     return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: true };
   }
 
-  const rawModel = stripEffortSuffix(body?.model || ctx?.model || "");
+  // A `:effort` here is the user fixing the effort: it stays on the candidate.
+  const rawModel = String(body?.model || ctx?.model || "").trim();
   if (rawModel && !isVirtualModelName(rawModel, options)) {
     return {
       candidateModels: [rawModel],
@@ -242,19 +229,6 @@ function turnChain(body, facts) {
 }
 
 /**
- * The model a hold sends the request to, as the candidate list names it: the store keeps models
- * canonical (`claude-opus-5-5`), and the bare name may resolve to another provider in Magpie than
- * the `upstream/claude-opus-5-5` the session was routed to. The name routed last (`target`) when
- * it is still a candidate, else the one candidate of that canonical model, else the model itself.
- */
-function heldTarget(model, sessionState, candidateModels, aliases) {
-  if (!Array.isArray(candidateModels) || candidateModels.length === 0) return model;
-  if (sessionState?.target && candidateModels.includes(sessionState.target)) return sessionState.target;
-  const canonical = canonicalModel(model, aliases);
-  return candidateModels.find((m) => canonicalModel(m, aliases) === canonical) || model;
-}
-
-/**
  * The session's state before this request, decided again from the history: the request that
  * began the `prior` turn, cut out of the body (`bodyUpTo`) and routed as it was then. Magpie
  * hands each request a pooled runtime and gives middleware no storage across requests
@@ -282,6 +256,8 @@ function replayedState(body, ctx, env, chain, stale, depth) {
     workKind: d.workKind || "general_implementation",
     difficulty: d.difficulty || "routine",
     realtimeLoop: Boolean(d.realtimeLoop),
+    profile: d.profile || null,
+    pinnedBundle: d.pins?.pinnedBundle || null,
     tokens,
     requestTokens: tokens,
     compactedTokens: Number(stale?.compactedTokens || 0),
@@ -319,9 +295,11 @@ function routeClaimed(body, ctx, env, depth = 0) {
   const anchor = chain?.stamp || "";
   const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
+  const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
-  const cont = evaluateProviderContinuation(facts, sessionState, {
+  let cont = evaluateProviderContinuation(facts, sessionState, {
     now,
+    pins,
     affinityMode,
     availableModels: candidateModels,
     unhealthyModels: options.unhealthyModels,
@@ -342,7 +320,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
 
   if (cont.shouldHold && cont.model) {
     const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
-    const heldEffort = keepsEffort(
+    const keptEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
       facts.estimatedInputTokens,
@@ -355,8 +333,20 @@ function routeClaimed(body, ctx, env, depth = 0) {
     const target =
       heldRealtime && sessionState?.target
         ? sessionState.target
-        : heldTarget(cont.model, sessionState, candidateModels, options.catalog?.aliases);
-    return {
+        : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
+    // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
+    const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
+    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState), realtimeLoop: heldRealtime }) : keptEffort;
+    if (heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins))) {
+      cont = {
+        shouldHold: false,
+        why: "effort_gone",
+        previousModel: cont.previousModel || cont.model,
+        previousEffort: keptEffort,
+        within: Boolean(facts.within),
+        turn: facts.turn || 1,
+      };
+    } else return {
       facts,
       sessionKey,
       record: {
@@ -369,6 +359,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         why: cont.why,
         held: true,
         anchor,
+        pinnedBundle: pins.pinnedBundle,
       },
       decision: {
         ok: true,
@@ -376,11 +367,15 @@ function routeClaimed(body, ctx, env, depth = 0) {
         canonicalModel: canonicalModel(cont.model, options.catalog?.aliases),
         targetEffort: heldEffort,
         modelWithEffort: `${target}:${heldEffort}`,
+        bundle: pool ? heldBundle(pool, target, heldEffort, options.catalog, pins) : null,
         canRewriteModel,
         hasExplicitCandidates,
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
         realtimeLoop: heldRealtime,
+        profile: sessionState?.profile || null,
+        pins,
+        warnings: heldEffort === keptEffort ? [] : [`${target}: effort ${keptEffort} is no longer offered; held at ${heldEffort}`],
         continuation: {
           held: true,
           why: cont.why,
@@ -396,22 +391,30 @@ function routeClaimed(body, ctx, env, depth = 0) {
     };
   }
 
+  // What this turn's text looks like is no ground for putting back the row the hold just refused (contract R2).
+  // A pool or a pin holds on a turn with no text too: an image alone doesn't get past either (contract R2, R3).
   const caller = resolveCallerProfile(facts.callerProfile, facts.hasVisualInput);
-  if (!caller?.profile) {
+  const profile =
+    cont.why === "effort_gone"
+      ? sessionProfile(sessionState)
+      : caller?.profile
+        ? caller.profile
+        : !caller && !facts.objective && (hasExplicitCandidates || Object.keys(pins).length > 0)
+          ? noTextProfile(facts)
+          : null;
+  if (!profile) {
     return { facts, sessionKey, record: null, decision: unroutedDecision(caller?.error || "no_task_profile") };
   }
-  const { profile } = caller;
   const unhealthyModels = [
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
   ];
-  if (cont.why === "provider_unhealthy" && cont.previousModel) {
-    unhealthyModels.push(cont.previousModel);
+  if (cont.why === "provider_unhealthy" && cont.failedModel) {
+    unhealthyModels.push(cont.failedModel);
   }
   const minContextTokens = cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
-  const pins = pinOptionsOf(options);
-  let decision = selectBestRoute(profile, {
+  const decision = selectBestRoute(profile, {
     candidateModels,
     catalog: options.catalog,
     unhealthyModels,
@@ -428,16 +431,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
       cacheWarm: false,
     },
   });
-
-  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || options.quotas)) {
-    decision = selectBestRoute(profile, {
-      candidateModels,
-      catalog: options.catalog,
-      now,
-      ...realtimeOption,
-      ...pins,
-    });
-  }
+  if (cont.why === "effort_gone") decision.warnings = [effortGoneWarning(cont), ...decision.warnings];
 
   if (!decision || !decision.targetModel) {
     return { facts, sessionKey, record: null, decision };
@@ -451,20 +445,24 @@ function routeClaimed(body, ctx, env, depth = 0) {
     cont.why !== "cold" &&
     cont.why !== "compacted" &&
     cont.why !== "first" &&
-    cont.why !== "worn"
+    cont.why !== "worn" &&
+    !pinsFixEffort(pins)
   ) {
-    finalEffort = keepsEffort(
+    const kept = keepsEffort(
       sessionState,
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
       { ...options, ...realtimeOption }
     );
+    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept, options.catalog)) finalEffort = kept;
   }
   decision.targetEffort = finalEffort;
   decision.modelWithEffort = `${decision.targetModel}:${finalEffort}`;
   decision.canRewriteModel = canRewriteModel;
   decision.hasExplicitCandidates = hasExplicitCandidates;
+  decision.pins = pins;
+  decision.minContextTokens = minContextTokens;
   decision.continuation = {
     held: false,
     why: cont.why,
@@ -491,6 +489,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
       why: cont.why,
       held: false,
       anchor,
+      profile: decision.profile,
+      pinnedBundle: pins.pinnedBundle,
     },
   };
 }
@@ -510,6 +510,19 @@ function sendUnrouted(body, ctx, decision, options) {
     return true;
   }
   return false;
+}
+
+/**
+ * Refuse a claimed request nothing may serve, naming why, rather than send it on to some other model. A concrete model
+ * under `routeAllModels` with no pin is the one case with a target of its own: routing found nothing better, it goes as asked.
+ */
+function rejectBlocked(body, ctx, blocked) {
+  const options = ctx?.options || {};
+  const pinned = Object.keys(mergePinOptions(pinOptionsOf(options), body, body.task)).length > 0;
+  if (!pinned && !isVirtualModelName(body.model, options)) return null;
+  ctx.state = ctx.state || {};
+  ctx.state.routeBlocked = blocked;
+  return typeof ctx?.reject === "function" ? { rejected: ctx.reject(503, `agentcompass: ${blockedRefusal(blocked)}`) } : null;
 }
 
 export function onRequest(body, ctx = {}) {
@@ -552,18 +565,24 @@ export function onRequest(body, ctx = {}) {
       return undefined;
     }
 
+    const hooksBlocked = isClaimedModel && !stateRoute && ctx?.state?.routeBlocked;
+    if (hooksBlocked) {
+      logRouteWarnings(hooksBlocked.warnings);
+      const refused = rejectBlocked(body, ctx, hooksBlocked);
+      if (refused) return refused.rejected;
+      return dropRouterFields(body) ? body : undefined;
+    }
+
     let decision = null;
 
     if (stateRoute) {
       if (
         !hasExplicitCandidates ||
         !Array.isArray(candidateModels) ||
-        candidateModels.includes(stateRoute.targetModel) ||
-        // A pool may spell the model with an effort suffix, and when only the classifier called this realtime the
-        // hooks' route is all there is to say so
-        (stateRoute.realtimeLoop === true && candidateModels.some((m) => stripEffortSuffix(m) === stateRoute.targetModel))
+        candidateOffers(candidateModels, stateRoute.targetModel, stateRoute.targetEffort || "high", options.catalog, stateRoute.pins)
       ) {
         decision = stateRoute;
+        logRouteWarnings(decision.warnings);
       }
 
       if (decision && decision.targetModel) {
@@ -581,6 +600,8 @@ export function onRequest(body, ctx = {}) {
               realtimeLoop: Boolean(decision.realtimeLoop),
               why: decision.continuation?.why || "first",
               held: Boolean(decision.continuation?.held),
+              profile: decision.profile,
+              pinnedBundle: decision.pins?.pinnedBundle,
             },
             facts,
             now
@@ -602,11 +623,13 @@ export function onRequest(body, ctx = {}) {
       });
       decision = routed.decision;
       // Magpie's log is where a gateway operator sees that a pinned model is too slow for a live loop
-      for (const warning of decision?.warnings || []) {
-        console.warn(`agentcompass: ${warning}`);
-      }
+      logRouteWarnings(decision?.warnings);
       if (routed.record && routed.sessionKey && decision?.targetModel) {
         store.recordRequest(routed.sessionKey, routed.record, routed.facts, now);
+      }
+      if (decision?.blocked) {
+        const refused = rejectBlocked(body, ctx, { error: decision.error || "no_route", warnings: decision.warnings, refusal: decision.refusal });
+        if (refused) return refused.rejected;
       }
     }
 
@@ -647,6 +670,7 @@ export function onRequest(body, ctx = {}) {
  * Magpie passes `ctx.provider = { id, name, account, model }`.
  * Supports optional per-provider model lists via `options.modelsByProvider[provider.id]`
  * or fallback to `ctx.provider.model` if `body.model` is still a virtual model name.
+ * `ctx.reject` turns nothing away here: with nothing usable on this provider, the request goes as routed, with a warning.
  */
 export function onProvider(body, ctx = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
@@ -659,23 +683,42 @@ export function onProvider(body, ctx = {}) {
     extractModelList(options.modelsByProvider?.[prov?.id]) ||
     extractModelList(options.modelsByProvider?.[prov?.name]);
 
+  if (ctx?.state?.routeBlocked) return undefined;
+
   const prevDecision = ctx?.state?.agentcompass || ctx?.state?.route;
-  if (providerModels && providerModels.length > 0 && prevDecision?.profile) {
+  // A held turn has no profile from this request: the session's own, else the kind and difficulty it was routed on.
+  const prevProfile =
+    prevDecision?.profile ||
+    (prevDecision?.workKind ? sessionProfile(prevDecision) : null);
+  if (providerModels && providerModels.length > 0 && prevProfile) {
+    // The user unchecks an effort in the pool, and a provider's own list holds no such row (contract R2).
+    const unchecked = (explicitCandidateModels(options, ctx) || []).filter((entry) => entry?.disabled && !entry.disabled_by_default);
+    const providerPool = [...providerModels, ...unchecked];
     const needProviderRoute =
       isVirtualModelName(body.model, options) ||
       prevDecision.canRewriteModel === false ||
       prevDecision.hasExplicitCandidates === false ||
-      !providerModels.includes(prevDecision.targetModel) ||
+      !candidateOffers(providerPool, prevDecision.targetModel, prevDecision.targetEffort || "high", options.catalog) ||
       options.routePerProvider === true;
 
     if (needProviderRoute) {
-      const routed = selectBestRoute(prevDecision.profile, {
-        candidateModels: providerModels,
+      const store = options.continuityStore || defaultContinuityStore;
+      const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+      const routed = selectBestRoute(prevProfile, {
+        candidateModels: providerPool,
         catalog: options.catalog,
+        unhealthyModels: [
+          ...store.getUnhealthyModels(now),
+          ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
+        ],
+        minContextTokens: prevDecision.minContextTokens || 0,
         quotas: options.quotas,
         meteredOk: options.meteredOk,
-        ...pinOptionsOf(options),
+        now,
+        realtime_loop: Boolean(prevDecision.realtimeLoop),
+        ...mergePinOptions(pinOptionsOf(options), prevDecision.pins),
       });
+      logRouteWarnings(routed.warnings);
       if (routed.ok && routed.targetModel) {
         const updated = {
           ...prevDecision,
@@ -683,6 +726,9 @@ export function onProvider(body, ctx = {}) {
           canonicalModel: routed.canonicalModel,
           targetEffort: routed.targetEffort || prevDecision.targetEffort || "high",
           modelWithEffort: `${routed.targetModel}:${routed.targetEffort || prevDecision.targetEffort || "high"}`,
+          bundle: routed.bundle,
+          profile: routed.profile,
+          warnings: [...(prevDecision.warnings || []), ...(routed.warnings || [])],
           canRewriteModel: true,
           hasExplicitCandidates: true,
         };
