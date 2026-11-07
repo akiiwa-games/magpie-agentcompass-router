@@ -84,17 +84,26 @@ Where a request gets its task profile, in order:
 1. The caller: `ctx.state.profile`, `ctx.profile` or `body.profile` (`state.task.profile` / `state.profile` on `/v1/systemone`), with the schema's integer fields present (`divergence` may be left out). The middleware removes `body.profile` before the upstream sees it. A profile that does not validate counts as none (`invalid_caller_profile`).
 2. The classifier (`allowExternalScorer: true` and a `scorer`), from `src/hooks.js` and `/v1/systemone`. The middleware can't reach one.
 
-With neither, or when the classifier fails or times out, **there is no routing decision and no guess**, and no error either:
+With neither, or when the classifier fails or times out, **there is no routing decision and no guess**, and the plugin raises no error of its own:
 
 | Entry | What the request does | Where it says so |
 |---|---|---|
-| Middleware (Mode A) | Goes on with `body.model` as the client sent it, with no effort added. A virtual name (`agentcompass/auto`) becomes `defaultModel` if one is set; otherwise it stays, and `onProvider` takes the model of the provider Magpie picked, if Magpie gets that far | `ctx.state.agentcompass`, Magpie's log (`agentcompass: 未路由：分类不可用 (<reason>)`), and an `agentcompass` field on a JSON reply |
+| Middleware (Mode A) | Goes on with `body.model` as the client sent it, with no effort added. A virtual name (`agentcompass/auto`) is only the router's, so it becomes `defaultModel`, the model you named for this, with no effort added. With no `defaultModel` it stays, and Magpie, which serves no model of that name, answers HTTP 404 | `ctx.state.agentcompass`, Magpie's log (`agentcompass: 未路由：分类不可用 (<reason>)`), and `agentcompass: { routed: false, notice, reason }` on a JSON reply, an error's included (chat, responses and messages; a stream says it only in the log) |
 | Hooks | No `ctx.state.route`, so the middleware above decides | `ctx.state.agentcompass`, the log |
 | `/v1/systemone` (Mode B) | `intent` / `level` answer `none of these`, so the group's fallback rule applies; no `effort`. The levels probe answers "not a scale" | `agentcompass: { routed: false, notice, reason }` in the response, the log |
 
-An unrouted request records nothing in the session store, so it starts no session that later turns would hold. A virtual model with neither `candidateModels` nor `defaultModel` is still refused with HTTP 400: that is a configuration error, not a classification one.
+An unrouted request records nothing in the session store, so it starts no session that later turns would hold. A virtual model with neither `candidateModels` nor `defaultModel` is refused with HTTP 400 and a message naming both: that is a configuration error, not a classification one.
 
 **What this changes if you upgrade with no classifier configured:** requests to `agentcompass` / `agentcompass/*` are no longer sent to a model picked from `candidateModels`. Set `defaultModel` so that they still reach a model of your choice, or configure Mode B with a scorer, or have your client send `body.profile`. `scorerType: "heuristic"` and `prefer_local_heuristic` no longer exist and count as no classifier.
+
+### Known limitations
+
+- **Mode A can't ask a classifier.** The package ships no `magpie.hooks` and `moejs` has no network, so on Mode A a profile comes with the request or not at all.
+- **A client that sends `body.profile` sends it on every request of a session.** Magpie hands each request a pooled runtime, and only a runtime that served the session has anything to hold it by. In the sandbox a tool-loop step sent with no profile mid-session was held on about half of the requests and got Magpie's 404 on the rest.
+- **A request carries this turn's answer, and no earlier one's.** A new turn with a different profile holds on a runtime that served the session and goes where the new profile says on one that didn't (4 of 20 in the sandbox for a realtime session). With the same profile on every turn nothing moves.
+- **A warm session doesn't ask the classifier about each new turn.** Holds run first, so a harder task in a warm session on a light model moves only if the caller's profile says so.
+- **Streams aren't annotated.** A stream goes through `onEvent`, which the plugin doesn't export, so a streamed reply says nothing of not being routed; Magpie's log does.
+- **The classifier sees the first and last 4000 characters** of a long turn (`capTextSlice`), to bound the work.
 
 ### Names by install source
 
@@ -202,6 +211,12 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 npm test                       # or: bun test
 ```
 
+Against real Magpie builds, with fake credentials and a local mock upstream and classifier (`docs/RESEARCH_AND_SCHEME.md` §4.6):
+
+```sh
+BASELINE_SRC=<export of the commit to compare with> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
+```
+
 ---
 
 ## 中文说明
@@ -255,15 +270,24 @@ magpie group set <group> effort=auto classifier=agentcompass/agentcompass-system
 
 画像的来源依次是：调用方显式传入（`ctx.state.profile`、`ctx.profile`、`body.profile`，`/v1/systemone` 上是 `state.task.profile` / `state.profile`；中间件转发前会移除 `body.profile`；校验不过视为没有，原因 `invalid_caller_profile`），然后是分类模型（`src/hooks.js` 与 `/v1/systemone` 可调用，中间件不能）。
 
-都拿不到，或分类模型失败、超时时，**不做路由决策、不猜测、也不报错**：
+都拿不到，或分类模型失败、超时时，**不做路由决策、不猜测，插件自己也不报错**：
 
-- 中间件：`body.model` 原样转发，不附加档位。虚拟模型名（`agentcompass/auto`）在配置了 `defaultModel` 时改用它；否则保持原样，由 `onProvider` 取 Magpie 选中的 Provider 自己的模型（前提是 Magpie 能走到这一步）。写明在 `ctx.state.agentcompass`、Magpie 日志（`agentcompass: 未路由：分类不可用 (<原因>)`）和 JSON 响应的 `agentcompass` 字段里。
+- 中间件：`body.model` 原样转发，不附加档位。虚拟模型名（`agentcompass/auto`）只属于路由器，配置了 `defaultModel` 时改用你指定的这个模型，不附加档位；没有配置则保持原样，Magpie 没有这个名字的模型，会返回 HTTP 404。写明在 `ctx.state.agentcompass`、Magpie 日志（`agentcompass: 未路由：分类不可用 (<原因>)`）和 JSON 响应（含错误响应）的 `agentcompass: { routed: false, notice, reason }` 字段里（chat、responses、messages；流式只有日志）。
 - Hooks：不写 `ctx.state.route`，交给上面的中间件；写明在 `ctx.state.agentcompass` 和日志里。
 - `/v1/systemone`：`intent` / `level` 回答 `none of these`，由路由组的兜底规则处理，不回答 `effort`；量表探测回答"不是量表"。响应里带 `agentcompass: { routed: false, notice, reason }`，并写日志。
 
-未路由的请求不写入会话状态，不会形成后续轮次要保持的会话。虚拟模型既没有 `candidateModels` 也没有 `defaultModel` 时仍返回 HTTP 400：这是配置错误，不是分类问题。
+未路由的请求不写入会话状态，不会形成后续轮次要保持的会话。虚拟模型既没有 `candidateModels` 也没有 `defaultModel` 时返回 HTTP 400，错误信息写明这两个选项：这是配置错误，不是分类问题。
 
 **没有配置分类模型时升级的影响：** 发给 `agentcompass` / `agentcompass/*` 的请求不再从 `candidateModels` 里选模型。请设置 `defaultModel` 让它们仍能到达你指定的模型，或配置带分类模型的模式 B，或让客户端传 `body.profile`。`scorerType: "heuristic"` 和 `prefer_local_heuristic` 已删除，等同于没有分类模型。
+
+#### 已知限制
+
+- **模式 A 问不了分类模型。** 包里没有 `magpie.hooks`，`moejs` 没有网络，模式 A 的画像只能随请求带来。
+- **客户端用 `body.profile` 时，会话的每个请求都要带。** Magpie 给每个请求分配池里的运行时，只有服务过该会话的运行时才能保持。沙盒里会话中途不带画像的工具循环请求，约一半被保持，其余收到 Magpie 的 404。
+- **请求只带当前轮的答案，不带前一轮的。** 新一轮画像变了时，服务过该会话的运行时保持，没服务过的按新画像走（沙盒里实时会话 20 次中有 4 次）。每轮画像不变则不会移动。
+- **温会话不会每轮都问分类模型。** 保持判断在前，所以轻量模型上的温会话遇到更难的任务时，只有调用方画像说明了才会移动。
+- **流式回复没有标注。** 流式走 `onEvent`，插件没有导出它，所以流式回复不会说明未路由；日志会写。
+- **分类模型只看长文本的首尾各 4000 字符**（`capTextSlice`），用于限制工作量。
 
 #### 各安装来源下的名称
 

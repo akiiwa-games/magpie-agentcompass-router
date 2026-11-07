@@ -811,7 +811,7 @@ async function main() {
 
     // What a request reached the upstream as
     const lastUp = () => upstreamCalls[upstreamCalls.length - 1];
-    const routedAs = (u) => `${u.model}:${u.reasoning_effort}`;
+    const routedAs = (u) => `${u.model}:${u.reasoning_effort ?? u.effort ?? null}`;
     const postTo = (port, requestPath, body, headers) =>
       fetch(`http://127.0.0.1:${port}${requestPath}`, { method: "POST", headers, body: JSON.stringify(body) });
     const anthropicHeaders = { "Content-Type": "application/json", "x-api-key": "sk-local-agent", "anthropic-version": "2023-06-01" };
@@ -842,7 +842,8 @@ async function main() {
       debug: answer("debug_review", "engineering", 3, 2, 2, 2, 3, 2),
     };
     const NOT_ROUTED = "未路由：分类不可用";
-    const unroutedLogged = () => magpieLogs.join("").split("\n").filter((l) => l.includes("[warn]") && l.includes(NOT_ROUTED));
+    // `middleware <spec> [warn]: ...` from moejs, `plugin: ...` from the decision provider's Bun host
+    const unroutedLogged = () => magpieLogs.join("").split("\n").filter((l) => l.includes(NOT_ROUTED));
     const awaitUnroutedLogged = async (n) => {
       for (let i = 0; i < 25 && unroutedLogged().length < n; i++) await new Promise((r) => setTimeout(r, 200));
       return unroutedLogged();
@@ -1513,7 +1514,7 @@ async function main() {
               ],
             },
           });
-          out.push({ path: CHAT, askedAbout: asked, body: { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")] } });
+          out.push({ path: CHAT, askedAbout: asked, followupOf: out.length - 2, body: { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")] } });
           out.push({ path: CHAT, body: { model: "agentcompass/auto", stream: true, messages: [userMsg(`${text} [stream ${salt}]`)] } });
           out.push({
             path: "/v1/responses",
@@ -1556,7 +1557,7 @@ async function main() {
             stream: u.stream,
             body: u.body,
           }));
-          seen.push({ request: `#${at} ${req.path} ${String(JSON.stringify(req.body.messages?.at(-1)?.content ?? req.body.input)).slice(0, 60)}`, status: resp.status, sent });
+          seen.push({ request: `#${at} ${req.path} ${String(JSON.stringify(req.body.messages?.at(-1)?.content ?? req.body.input)).slice(0, 60)}`, followupOf: req.followupOf, status: resp.status, sent });
         }
         return seen;
       };
@@ -1597,6 +1598,7 @@ async function main() {
       let served = 0;
       const routes = new Set();
       const diffs = [];
+      const followupsRerouted = [];
       const perPool = {};
       const newTurnDiffs = [];
       let newTurnRows = 0;
@@ -1625,8 +1627,15 @@ async function main() {
             poolRoutes.add(`${s.model}:${s.effort}`);
           }
           if (JSON.stringify(row) !== JSON.stringify(theirs[i])) {
-            poolDiffs += 1;
-            diffs.push({ pool: name, worktree: row, baseline: theirs[i] });
+            // The one difference the removal means to make: a short turn isn't held for being short. Routed again on the same
+            // answer it must land where this session's first request did, and wherever else it lands is a difference.
+            const asFirst = row.followupOf !== undefined && row.status === 200 && row.sent.length === 1 && routedAs(row.sent[0]) === routedAs(mine[row.followupOf].sent[0] || {});
+            if (asFirst) {
+              followupsRerouted.push({ pool: name, request: row.request, worktree: routedAs(row.sent[0]), baseline: theirs[i].sent.map((u) => routedAs(u)) });
+            } else {
+              poolDiffs += 1;
+              diffs.push({ pool: name, worktree: row, baseline: theirs[i] });
+            }
           }
         });
         perPool[name] = { requests: mine.length, diffs: poolDiffs, routes: poolRoutes.size };
@@ -1650,6 +1659,7 @@ async function main() {
         requests,
         served,
         diffs: diffs.length,
+        followupsRoutedAgainAsTheirFirstRequest: followupsRerouted,
         distinctRoutes: routes.size,
         perPool,
         newTurnSampling: {
@@ -1664,7 +1674,7 @@ async function main() {
         test: "Scenario 9: given the answers the removed text rules gave, requests reach the upstream as a second real Magpie running the build that had them sends them (status, model, effort, full body)",
         ...report.scenarios.scenario9_same_answers_match_baseline,
       });
-      console.log(`[PASS] Scenario 9 (same answers vs baseline): ${requests} requests over ${Object.keys(pools).length} pools, ${served} served, ${routes.size} distinct routes, ${diffs.length} diffs; new turns: ${newTurnRows} rows x ${NEW_TURN_SAMPLES} samples, ${newTurnDiffs.length} diffs, ${newTurnRowsThatReroute} rows rerouted on both builds (the baseline flips on ${newTurnRowsThatFlip} rows)`);
+      console.log(`[PASS] Scenario 9 (same answers vs baseline): ${requests} requests over ${Object.keys(pools).length} pools, ${served} served, ${routes.size} distinct routes, ${diffs.length} diffs, ${followupsRerouted.length} short turns routed again as their first request ${JSON.stringify(followupsRerouted)}; new turns: ${newTurnRows} rows x ${NEW_TURN_SAMPLES} samples, ${newTurnDiffs.length} diffs, ${newTurnRowsThatReroute} rows rerouted on both builds (the baseline flips on ${newTurnRowsThatFlip} rows)`);
       await setPluginOptions(basePluginOptions);
     }
 
@@ -1785,6 +1795,7 @@ async function main() {
       let flaglessDrift = 0;
       const rerouted = [];
       const flaglessRoutes = {};
+      const otherAnswerRoutes = {};
       let first;
       let ended;
       for (let i = 0; i < repeats; i++) {
@@ -1799,19 +1810,15 @@ async function main() {
         ]);
         // Short follow-up
         const c = await send([opening, { role: "assistant", content: "Acted. Continue?" }, userMsg("继续")]);
-        // A whole new turn that would route elsewhere on its own, and asks for high stakes work that would raise effort
-        const d = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], rt, PROFILE.ideation);
-        const e = await send(
-          [
-            opening,
-            { role: "assistant", content: "Acted." },
-            userMsg(`Next, ${IDEATION}`),
-            { role: "assistant", content: "Acted again." },
-            userMsg("Now find the root cause of the deadlock across every module and prove the fix formally."),
-          ],
-          rt,
-          { ...PROFILE.debug, reasoning_depth: 4, context_scale: 3, error_cost: 3 }
-        );
+        // Whole new turns in words that would once have routed elsewhere and raised effort, with the session's answer
+        const d = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)]);
+        const e = await send([
+          opening,
+          { role: "assistant", content: "Acted." },
+          userMsg(`Next, ${IDEATION}`),
+          { role: "assistant", content: "Acted again." },
+          userMsg("Now find the root cause of the deadlock across every module and prove the fix formally."),
+        ]);
         const turns = { a, b, c, d, e };
         const moved = Object.entries(turns).filter(([, u]) => routedAs(u) !== routedAs(a));
         if (moved.length > 0) {
@@ -1822,9 +1829,15 @@ async function main() {
         const f = await send([opening, { role: "assistant", content: "Acted." }, userMsg("继续")], {});
         flaglessRoutes[routedAs(f)] = (flaglessRoutes[routedAs(f)] || 0) + 1;
         if (routedAs(f) !== routedAs(a)) flaglessDrift += 1;
+        // A new turn with another answer: a request carries this turn's answer and no earlier one's, so a runtime that hasn't
+        // seen the session can only go by it, where one that has holds. Recorded, and those are the only two routes it may take.
+        const g = await send([opening, { role: "assistant", content: "Acted." }, userMsg("Another turn.")], rt, PROFILE.ideation);
+        otherAnswerRoutes[routedAs(g)] = (otherAnswerRoutes[routedAs(g)] || 0) + 1;
         if (i === 0) first = Object.fromEntries(Object.entries(turns).map(([k, u]) => [k, routedAs(u)]));
       }
       assert.equal(reroutes, 0, `Later turns of a realtime session must hold turn 1's route: ${JSON.stringify(rerouted)}`);
+      const otherAnswerAllowed = ["claude-opus-5-5:medium", "gpt-6-astra:medium"];
+      assert.deepEqual(Object.keys(otherAnswerRoutes).filter((r) => !otherAnswerAllowed.includes(r)), [], `A new answer holds or goes where it says: ${JSON.stringify(otherAnswerRoutes)}`);
 
       // An explicit realtime_loop:false ends the session's realtime routing
       const opening = userMsg(`${IDEATION} [session end]`);
@@ -1839,7 +1852,7 @@ async function main() {
       const anth1 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening], profile: PROFILE.debug, ...rt }, anthropicHeaders);
       assert.equal(anth1.status, 200);
       const anthA = lastUp();
-      const anth2 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], profile: PROFILE.ideation, ...rt }, anthropicHeaders);
+      const anth2 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], profile: PROFILE.debug, ...rt }, anthropicHeaders);
       assert.equal(anth2.status, 200);
       const anthB = lastUp();
       assert.equal(anthA.model, "claude-opus-5-5");
@@ -1851,6 +1864,7 @@ async function main() {
         reroutes,
         turns: first,
         flaglessFollowups: { routes: flaglessRoutes, differFromTurn1: flaglessDrift, asserted: false },
+        newTurnWithAnotherAnswer: { routes: otherAnswerRoutes, holdsOnlyOnARuntimeThatSawTheSession: true },
         explicitFalse: ended,
         anthropic: [routedAs(anthA), routedAs(anthB)],
       };
@@ -1859,7 +1873,7 @@ async function main() {
         ...report.scenarios.scenario11_realtime_session_hold,
       });
       console.log(
-        `[PASS] Scenario 11 (realtime session hold): ${repeats} sessions, ${reroutes} reroutes, turns ${JSON.stringify(first)}; flagless follow-ups ${JSON.stringify(flaglessRoutes)}; explicit false ${JSON.stringify(ended)}; /v1/messages ${routedAs(anthA)} -> ${routedAs(anthB)}`
+        `[PASS] Scenario 11 (realtime session hold): ${repeats} sessions, ${reroutes} reroutes, turns ${JSON.stringify(first)}; flagless follow-ups ${JSON.stringify(flaglessRoutes)}; new turn with another answer ${JSON.stringify(otherAnswerRoutes)}; explicit false ${JSON.stringify(ended)}; /v1/messages ${routedAs(anthA)} -> ${routedAs(anthB)}`
       );
     }
 
@@ -2010,6 +2024,9 @@ async function main() {
       const virtual = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15a]`)] });
       const virtualBody = await bodyOf(virtual);
       const virtualUpstreamCalls = upstreamCalls.length - virtualBefore;
+      assert.equal(virtual.status, 404, `Magpie serves no model of that name: ${virtualBody.text.slice(0, 300)}`);
+      assert.equal(virtualUpstreamCalls, 0, "Nothing may be picked for it");
+      assert.equal(virtualBody.json?.[NOTE]?.routed, false, "Even the error says why");
 
       // 15b. A model the client named, claimed by routeAllModels: goes on as it asked, on each protocol
       await setPluginOptions({ ...basePluginOptions, routeAllModels: true });
@@ -2031,6 +2048,13 @@ async function main() {
         forwarded[protocol] = { route: routedAs(up), replyCarries: json?.[NOTE] ?? (text.includes(NOT_ROUTED) ? "in the stream text" : null) };
       }
 
+      // A whole JSON reply takes onResponse's return, so the client is told. A stream goes by event, and the plugin has no onEvent.
+      for (const protocol of ["chat", "responses", "messages"]) {
+        assert.equal(forwarded[protocol].replyCarries?.notice, NOT_ROUTED, `${protocol}: the JSON reply must say it wasn't routed`);
+        assert.equal(forwarded[protocol].replyCarries?.reason, "no_task_profile", `${protocol}: and why`);
+      }
+      assert.equal(forwarded.stream.replyCarries, null, "A stream doesn't say; the log does");
+
       // 15c. The client's own effort is left alone, and the words don't raise it
       const ownEffort = await postChat({ model: named, reasoning_effort: "low", messages: [userMsg(`${WORDS} [15c]`)] });
       assert.equal(ownEffort.status, 200);
@@ -2042,6 +2066,7 @@ async function main() {
       const invalidBody = await bodyOf(invalid);
       assert.equal(invalid.status, 200);
       assert.equal(routedAs(lastUp()), "gpt-6-luna:null");
+      assert.ok(invalidBody.json?.[NOTE]?.reason.startsWith("invalid_caller_profile"), invalidBody.text.slice(0, 300));
       assert.ok(!("profile" in lastUp().body));
 
       // 15e. Not routed starts no session: the same conversation with a profile is routed as new
@@ -2060,11 +2085,19 @@ async function main() {
       const withDefaultBody = await bodyOf(withDefault);
       assert.equal(withDefault.status, 200, withDefaultBody.text.slice(0, 300));
       assert.equal(routedAs(lastUp()), "gpt-6-luna:null");
+      assert.equal(withDefaultBody.json?.[NOTE]?.notice, NOT_ROUTED);
       await setPluginOptions({ ...basePluginOptions, candidateModels: [], defaultModel: named });
       const defaultOnly = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15f only]`)] });
       await defaultOnly.text();
       assert.equal(defaultOnly.status, 200, "defaultModel alone is a configuration: no 400");
       assert.equal(routedAs(lastUp()), "gpt-6-luna:null");
+
+      // The default install has no decision provider: the same virtual name, with nothing of the plugin's to answer it. Recorded.
+      await setPluginOptions({ ...basePluginOptions, enableDecisionProvider: false });
+      const noProviderBefore = upstreamCalls.length;
+      const noProvider = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15f no provider]`)] });
+      const noProviderBody = await bodyOf(noProvider);
+      const noProviderCalls = upstreamCalls.length - noProviderBefore;
       await setPluginOptions(basePluginOptions);
 
       // 15g. What the operator sees
@@ -2080,6 +2113,7 @@ async function main() {
         namedModel: forwarded,
         invalidProfile: invalidBody.json?.[NOTE] ?? null,
         virtualNameWithDefault: { status: withDefault.status, replyCarries: withDefaultBody.json?.[NOTE] ?? null },
+        virtualNameNoDecisionProvider: { status: noProvider.status, upstreamCalls: noProviderCalls, body: noProviderBody.text.slice(0, 300), asserted: false },
         logLine: lines[lines.length - 1],
       };
       report.steps.push({
@@ -2087,7 +2121,7 @@ async function main() {
         ...report.scenarios.scenario15_no_profile_not_routed,
       });
       console.log(
-        `[PASS] Scenario 15 (no profile): virtual name alone -> HTTP ${virtual.status} (${virtualUpstreamCalls} upstream calls); reply field ${JSON.stringify(Object.fromEntries(Object.entries(forwarded).map(([k, v]) => [k, Boolean(v.replyCarries)])))}; invalid profile ${JSON.stringify(invalidBody.json?.[NOTE]?.reason ?? null)}; defaultModel -> ${withDefault.status} ${JSON.stringify(withDefaultBody.json?.[NOTE]?.notice ?? null)}; log: ${lines[lines.length - 1]}`
+        `[PASS] Scenario 15 (no profile): virtual name alone -> HTTP ${virtual.status} (${virtualUpstreamCalls} upstream calls), ${noProvider.status} with no decision provider (${noProviderCalls}); reply field ${JSON.stringify(Object.fromEntries(Object.entries(forwarded).map(([k, v]) => [k, Boolean(v.replyCarries)])))}; invalid profile ${JSON.stringify(invalidBody.json?.[NOTE]?.reason ?? null)}; defaultModel -> ${withDefault.status} ${JSON.stringify(withDefaultBody.json?.[NOTE]?.notice ?? null)}; log: ${lines[lines.length - 1]}`
       );
     }
 
