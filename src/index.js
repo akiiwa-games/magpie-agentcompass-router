@@ -19,6 +19,7 @@ import {
   explicitCandidateModels,
   blockedRefusal,
   candidateOffers,
+  effortUnchecked,
   logRouteWarnings,
   mergePinOptions,
   pinOptionsOf,
@@ -325,21 +326,24 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     };
   };
 
+  const heldEffort = ratchetEffort(prevReasoning || "high", "medium", [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+  ]);
+
   // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)
   // when Magpie's `decide.go` passes `previous_message_kind` / `previous_message_reasoning`.
+  // An effort the user unchecked takes the full route, which reads the pool (contract R2).
   if (
     !explicitStateRt &&
     Object.keys(pins).length === 0 &&
     (prevKind || prevReasoning) &&
     isShortFollowupMessage(turnText) &&
-    !isCompactionText(turnText)
+    !isCompactionText(turnText) &&
+    !effortUnchecked(explicitCandidateModels(pluginOptions), heldEffort, pluginOptions.catalog)
   ) {
-    const heldEffort = ratchetEffort(prevReasoning || "high", "medium", [
-      "low",
-      "medium",
-      "high",
-      "xhigh",
-    ]);
     const answers = {};
     const syntheticDecision = {
       workKind: prevKind || "general_implementation",

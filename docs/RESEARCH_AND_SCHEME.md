@@ -328,19 +328,20 @@ AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 
 
 `src/catalog.js` 的 GENERATED 段由 `scripts/sync-catalog.mjs` 从 AgentCompass `accounts.json` 生成，版本固定在 `test/fixtures/agentcompass-pin.json`，读取方式是 `git show <sha>:...`，不读任何工作树。`MAGPIE_AGENTCOMPASS_COMMIT` 可以临时改用其他提交。AgentCompass 没有的条目在 `scripts/catalog-overlay.mjs`，每条都写了理由。
 
-对拍数据由 `test/fixtures/gen_routing_parity.py` 生成：模型写法 × 档位子集 × 是否实时 × 点名方式 × 画像边界，共 180064 行。仓库里提交的是抽样（每 23 行取 1 行，共 7829 行）；`--out` 可以输出全量，再用 `MAGPIE_ROUTING_PARITY_FIXTURE` 指向它跑测试。AgentCompass 45637c6 上，全量结果如下（只比较选中的模型和档位）：
+对拍数据由 `test/fixtures/gen_routing_parity.py` 生成：模型写法 × 档位子集 × 是否实时 × 点名方式 × 画像边界，共 191328 行，候选池里包含 family 行（`claude-opus-9` 对 `claude-opus-5-5`）。仓库里提交的是抽样（每 23 行取 1 行，共 8319 行）；`--out` 可以输出全量，再用 `MAGPIE_ROUTING_PARITY_FIXTURE` 指向它跑测试。AgentCompass 45637c6 上，全量结果如下（只比较选中的模型和档位）：
 
 | 行数 | 占比 | 分类 | 原因 |
 |---:|---:|---|---|
-| 170292 | 94.57% | 一致 | |
-| 9357 | 5.20% | 专项路由 | 候选池里没有该路由的专项模型时，Magpie 不封死路由（`specialist_available`）：网关的候选池由用户配置，不像 AgentCompass 那样来自账户。AgentCompass 排除全部候选 |
-| 244 | 0.14% | Spark | `gpt-5.3-codex-spark` 只有 Magpie 有条目（见 4.5），AgentCompass 按未测量模型评分 |
+| 176452 | 92.22% | 一致 | |
+| 10025 | 5.24% | 专项路由 | 候选池里没有该路由的专项模型时，Magpie 不封死路由（`specialist_available`）：网关的候选池由用户配置，不像 AgentCompass 那样来自账户。AgentCompass 排除全部候选 |
+| 4436 | 2.32% | 点名与 family 行 | 契约 R1（2026-11-07 修订）：点名只匹配本模型的行，family 行是另一个模型。AgentCompass 45637c6 还让 family 行顶替点名被选，待 AgentCompass 侧修复 |
+| 244 | 0.13% | Spark | `gpt-5.3-codex-spark` 只有 Magpie 有条目（见 4.5），AgentCompass 按未测量模型评分 |
 | 167 | 0.09% | 关闭思考 | Magpie 让 `none` 损失能力值（`catalog-overlay.mjs` 的 `effort_ability`）；AgentCompass 在模型没有该档曲线时按 High 的 tier 计算，所以降到 `none` 也过得了门槛 |
 | 4 | 0.00% | 同分 | 两边分数相同，顺序不同：Magpie 按候选池顺序，AgentCompass 按账户遍历 |
 
 未解释的差异是 0 行。选中结果一致时分数仍差一个常数 0.03：AgentCompass 对没有容量观测的订阅账户加 `unknown_capacity_penalty`，Magpie 没有这个数据来源，所以不加，这不影响排序。
 
-thinking-off 那 167 行是 AgentCompass 的缺陷，这里不跟。
+thinking-off 那 167 行是 AgentCompass 的缺陷，这里不跟。点名与 family 行那一类随契约修订出现：加入 family 候选池之前的 180064 行网格上，一致行从 170292 降到 168074，少的 2218 行全部来自别名在前、family 在后的候选池；新增的两个候选池再贡献 2218 行。
 
 非实时路由相对对齐之前（ab8baba）有变化，这是 R6 允许的。按裸模型名的 20 个候选池（`test/fixtures/nonrealtime-pools.json`）× 全部 176 个画像比较（3520 行），1579 行不变（44.86%），其余按类说明。`node test/nonrealtime-change-report.mjs` 可以复现这些数字。分类只看候选池和结果，不代表唯一成因：
 
@@ -354,9 +355,9 @@ thinking-off 那 167 行是 AgentCompass 的缺陷，这里不跟。
 
 会话保持（R2）：保持前先看当前候选池是否还提供这个档位。不提供就降到候选池提供、且新路由也能接受的最高档，并加警告；没有这样的档位或档位是用户点名的，就结束保持，`why` 为 `effort_gone`，重新路由。重新路由沿用会话的任务画像，并加警告。这个降档只在存储跨候选池保留时发生。真实 Magpie 宿主改配置会重载运行时、清空存储，会话按新候选池重放，结果和新路由相同，重放不经过 `effort_gone`。保持期间换点名走 R1 解析器，`gpt-6-astra-medium` 这类写法也生效。点名裸模型名表外的档位时，提供判断和新路由一样展开这个档位，所以不会每轮打破保持。
 
-健康状态：`exact`、`alias` 名字的失败记在解析后的条目下；`family` 名字的失败只记在原名下，所以 `gpt-6.2-sol-preview` 一次 502 不会让 `gpt-6.1-sol` 下线，不点名时 `gpt-6.1-sol` 不健康也不再排除 `gpt-6.2-sol-preview`。点名解析为 `exact`、`alias` 且不健康时（R3），它匹配到的所有行都排除，包括 family 行，返回 503。这对应契约 R1 的健康/熔断例外（2026-11-07）。
+健康状态：`exact`、`alias` 名字的失败记在解析后的条目下；`family` 名字的失败只记在原名下，所以 `gpt-6.2-sol-preview` 一次 502 不会让 `gpt-6.1-sol` 下线，不点名时 `gpt-6.1-sol` 不健康也不再排除 `gpt-6.2-sol-preview`。点名以 `row_key` 为准（契约 R1，2026-11-07 修订）：`exact`、`alias` 名字只匹配本模型的行，family 行是另一个模型，健康与否都不能顶替点名被选。点名的模型不健康时（R3）返回 503。
 
-用户禁用的档位（R2）：`attachDisabledEfforts` 把 `disabled: true` 行的档位写到同账户同模型的所有行上，`availabilityExclusions` 据此排除，所以裸名或 `efforts[]` 行展开的这一档也不会被选中，点名时 blocked，与 AgentCompass 相同。对拍网格没有 `disabled` 行，这部分由 `routing-contract` 的回归测试覆盖。
+用户禁用的档位（R2）：`attachDisabledEfforts` 把 `disabled: true` 行的档位写到同账户同模型的所有行上，`availabilityExclusions` 据此排除，所以裸名或 `efforts[]` 行展开的这一档也不会被选中，点名时 blocked，行级 `disabled_by_default` 也一样。“同模型”按各行自己的 `row_key` 算：禁用旗舰的 high 不影响 family 行，禁用 family 的 high 也不影响旗舰。AgentCompass 45637c6 在后一种输入上会 blocked，待 AgentCompass 侧修复。`onProvider` 按 `modelsByProvider` 重新路由时带上这些禁用行，`/v1/systemone` 的短跟进快路径先在本地检查，只有这一档被禁用才重新路由并调用分类器。保持被拒绝时 `bundle` 只指向仍提供的行。对拍网格没有 `disabled` 行，这部分由 `routing-contract` 的回归测试覆盖。
 
 拒绝和日志：503 返回给客户端的文案只有原因码、点名的模型名和一句说明，候选池和配额明细只写本地日志。`/v1/systemone` 是网关的公开路由，默认只回答模型和档位，或原因码和一句说明，带点名的拒绝统一成 `pin_unavailable`；`decisionProviderDetails: true` 才返回明细。Magpie 的 `readJev` 只读 `model`、`answers`、`usage`，AgentCompass 的 `route_judge.py` 只读 `answers`，Cindy 是内嵌分配器，不走这个接口。日志和 503 里的模型名会转义控制字符、截断。名字提示每个运行时只打一次，去重集合按 LRU 最多 1024 条。
 

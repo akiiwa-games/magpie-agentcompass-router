@@ -740,9 +740,8 @@ function splitPinModelAndEffort(normConstraint) {
 }
 
 /**
- * Whether a pinned model names this candidate. Identity is the responsiveness key, as `allocator.py` compares
- * `canonical()` of both sides: `claude-opus-4-6` and `claude-opus-5-5` are different models here even though routing
- * folds one into the other.
+ * Whether a pinned model names this candidate. Identity is each row's own key (contract R1): a family row
+ * (`claude-opus-9` for `claude-opus-5-5`) is another model, so it neither answers to the pin nor stands in for it.
  */
 function matchesPinnedModel(bundle, computedId, normConstraint, modelPart, taskCtx) {
   const rawModel = bundle?.model;
@@ -764,7 +763,7 @@ function matchesPinnedModel(bundle, computedId, normConstraint, modelPart, taskC
   // A name only a family guess could place stays itself: naming gemini-2.5-pro never launches the flagship it folds to.
   const { key: wanted, source } = resolveModel(modelPart, models, aliases);
   if (source !== "exact" && source !== "alias") return false;
-  return wanted === bid || wanted === canonicalModel(rawModel, aliases, models);
+  return wanted === bid || wanted === healthKey(rawModel, models, aliases);
 }
 
 function pinnedModelOf(taskCtx) {
@@ -1333,7 +1332,7 @@ function availabilityExclusions(candidate, rawEffort, taskCtx) {
   // Off by default is not the user's checkbox: naming the model still reaches it.
   const named = candidate.disabled_by_default && pinScope(candidate, canonicalModel(rawModel, taskCtx.aliases, taskCtx.models), taskCtx);
   // Unchecking an effort takes it from every row of that account and model, a bare name's included (contract R2).
-  if ((candidate.disabled && !named) || (!candidate.disabled && candidate.disabled_efforts?.includes(String(rawEffort).toLowerCase()))) {
+  if ((candidate.disabled && !named) || candidate.disabled_efforts?.includes(String(rawEffort).toLowerCase())) {
     excluded.push("unchecked in model management");
   }
   if (candidate.discovery_unavailable) {
@@ -1475,10 +1474,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (taskCtx.needs_visual && !info.visual) {
     excluded.push("task needs visual input");
   }
-  if (
-    (taskCtx.unhealthy_models && (taskCtx.unhealthy_models.has(healthKey(rawModel, models, aliases)) || taskCtx.unhealthy_models.has(rawModel))) ||
-    (taskCtx.pinned_row_down && pinScope(candidate, canonical, taskCtx))
-  ) {
+  if (taskCtx.unhealthy_models && (taskCtx.unhealthy_models.has(healthKey(rawModel, models, aliases)) || taskCtx.unhealthy_models.has(rawModel))) {
     excluded.push(MARKED_UNHEALTHY);
   }
   if (
@@ -1961,14 +1957,14 @@ function expandCandidate(entry, taskCtx, catalog, models, aliases) {
 }
 
 /**
- * Contract R2: an effort the user unchecked on an account, harness and model is no landing for any row of them. Off by
- * default is not the user's checkbox.
+ * Contract R2: an effort the user unchecked on an account, harness and model is no landing for any row of them, a model being
+ * each row's own key: a family row is another model (R1). Off by default is not the user's checkbox.
  */
 function attachDisabledEfforts(expanded, models, aliases) {
   const groups = new Map();
   const keyOf = (c) => {
     const harness = c.harness || bundleHarness(c, c.account, c.id);
-    return JSON.stringify([c.account || "", harness, canonicalModel(c.model, aliases, models)]);
+    return JSON.stringify([c.account || "", harness, healthKey(c.model, models, aliases)]);
   };
   for (const c of expanded) {
     if (!c.disabled || c.disabled_by_default) continue;
@@ -2180,10 +2176,7 @@ export function rankCandidates(profileInput, options = {}) {
   // Build candidate list from user-configured pool or default catalog. `disabled_by_default` keeps a model out of the
   // automatic pool, not away from a user who names it.
   const pinned = pinnedModelOf(taskCtx);
-  const pinnedName = pinned ? resolveModel(splitPinModelAndEffort(String(pinned).trim()).modelPart, models, aliases) : null;
-  const pinnedKey = pinnedName?.key ?? null;
-  // A pin on a name with a row of its own also matches family rows of it; with that row down, those do not stand in (contract R3).
-  taskCtx.pinned_row_down = (pinnedName?.source === "exact" || pinnedName?.source === "alias") && unhealthySet.has(pinnedName.key);
+  const pinnedKey = pinned ? canonicalModel(splitPinModelAndEffort(String(pinned).trim()).modelPart, aliases, models) : null;
   const candidateModels =
     Array.isArray(options.candidateModels) && options.candidateModels.length > 0
       ? options.candidateModels
@@ -2261,7 +2254,6 @@ export function rankCandidates(profileInput, options = {}) {
       model: pinned || null,
       effort: taskCtx.constraint_effort || taskCtx.constraints?.effort || null,
       bundle: taskCtx.pinned_bundle || taskCtx.constraint_bundle || null,
-      row_down: taskCtx.pinned_row_down,
     },
     selected: pinnedCand || eligible[0] || null,
     ranking: eligible,
@@ -2475,11 +2467,21 @@ export function effortGoneWarning(cont) {
   return `${cont.previousModel}: effort ${cont.previousEffort} is no longer offered; routed again`;
 }
 
-/** The pool's row a held session runs on (`modeId`, `draws`, ...), at its held effort. */
-export function heldBundle(list, model, effort, catalog) {
-  const rows = rowsNaming(list, model, catalog);
-  const row = rows.find((r) => r.effort === effort) || rows[0];
+/** The pool's row a held session runs on (`modeId`, `draws`, ...), at its held effort: one that offers it, on an account that does. */
+export function heldBundle(list, model, effort, catalog, pins) {
+  const rows = rowsNaming(list, model, catalog, pins);
+  const offering = rows.filter((r) => rowOffers(r, effort, catalog));
+  const row = offering.find((r) => r.effort === effort) || offering[0] || rows.find((r) => r.effort === effort) || rows[0];
   return row ? { ...row, effort } : null;
+}
+
+/** Whether a candidate list unchecks this effort on any of its models: a turn that knows no model yet cannot rely on it. */
+export function effortUnchecked(list, effort, catalog) {
+  const models = catalog?.models || DEFAULT_MODELS;
+  const aliases = catalog?.aliases || MODEL_ALIASES;
+  const rows = (list || []).flatMap((entry) => expandCandidate(entry, {}, catalog || {}, models, aliases));
+  attachDisabledEfforts(rows, models, aliases);
+  return rows.some((row) => row.disabled_efforts?.includes(effort));
 }
 
 /**
@@ -2540,7 +2542,7 @@ export function logRouteWarnings(warnings) {
 /**
  * Why a pinned choice came back blocked (`warnings` of the decision).
  */
-function blockedWarnings(result, models, aliases) {
+function blockedWarnings(result) {
   const label = pinLabel(result.pin);
   if (!label) {
     const reasons = [...new Set(result.allCandidates.flatMap((c) => c.excluded.map((reason) => excludedLine(c, reason))))];
@@ -2548,18 +2550,8 @@ function blockedWarnings(result, models, aliases) {
   }
   const matching = rowsThePinNames(result);
   if (matching.length === 0) return [`${label} is not among the candidates`];
-  const pinKey = pinnedRowKey(result.pin, models, aliases);
-  // What is wrong with a family row the pin also matches is that row's, not the pinned model's (contract R1).
-  const ownRow = (c) => !pinKey || result.pin.row_down || healthKey(c.model, models, aliases) === pinKey;
-  const reasons = [...new Set(matching.flatMap((c) => (ownRow(c) ? c.excluded : c.excluded.map((reason) => excludedLine(c, reason)))))];
+  const reasons = [...new Set(matching.flatMap((c) => c.excluded))];
   return [`${label} is unavailable: ${reasons.join("; ")}`];
-}
-
-/** The key of a pinned name with a row of its own, or `null`: a family name stays itself. */
-function pinnedRowKey(pin, models, aliases) {
-  if (pin?.bundle || !pin?.model) return null;
-  const named = resolveModel(splitPinModelAndEffort(String(pin.model).trim()).modelPart, models, aliases);
-  return named.source === "exact" || named.source === "alias" ? named.key : null;
 }
 
 /** How a blocked route refers to what was pinned, or `null` with no pin. */
@@ -2575,7 +2567,7 @@ function rowsThePinNames(result) {
 }
 
 /** What a client hears when a route is refused: what it pinned, a code, one sentence. The pool and its quotas stay in the local log. */
-function refusalOf(result, models, aliases) {
+function refusalOf(result) {
   const { pin } = result;
   const label = pinLabel(pin);
   if (!label) return "no_route: no candidate can serve this request";
@@ -2584,10 +2576,7 @@ function refusalOf(result, models, aliases) {
   // Health belongs to a model: a row left out by its effort says nothing here, and an effort pin has no model to blame.
   const down = matching.some((c) => c.excluded.includes(MARKED_UNHEALTHY) && !c.excluded.includes(EFFORT_NOT_PINNED));
   if (pin.bundle && down) return `model_unhealthy: the model of ${label} is marked unhealthy`;
-  if (!pin.bundle && pin.model && (pin.row_down || down)) {
-    const onlyAFamilyRow = !pin.row_down && pinnedRowKey(pin, models, aliases);
-    return `model_unhealthy: ${onlyAFamilyRow ? `a family row of ${label}` : label} is marked unhealthy`;
-  }
+  if (!pin.bundle && pin.model && down) return `model_unhealthy: ${label} is marked unhealthy`;
   return `pin_unavailable: ${label} cannot serve this request`;
 }
 
@@ -2635,13 +2624,13 @@ export function selectBestRoute(taskOrProfile, options = {}) {
   const models = options.catalog?.models || DEFAULT_MODELS;
   const aliases = options.catalog?.aliases || MODEL_ALIASES;
   const warnings = [
-    ...(top ? (top.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []) : blockedWarnings(result, models, aliases)),
+    ...(top ? (top.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []) : blockedWarnings(result)),
     ...poolNameWarnings(options, models, aliases),
   ];
   return {
     ok: Boolean(top),
     blocked: !top,
-    refusal: top ? null : refusalOf(result, models, aliases),
+    refusal: top ? null : refusalOf(result),
     targetModel: top ? top.model : null,
     canonicalModel: top ? top.canonicalModel : null,
     targetEffort: top ? top.effort : "high",

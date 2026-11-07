@@ -233,7 +233,7 @@ export async function onRequest(body, ctx = {}) {
         canonicalModel: canonical,
         targetEffort: heldEffort,
         modelWithEffort: `${heldModel}:${heldEffort}`,
-        bundle: pool ? heldBundle(pool, heldModel, heldEffort, options.catalog) : null,
+        bundle: pool ? heldBundle(pool, heldModel, heldEffort, options.catalog, pins) : null,
         canRewriteModel,
         hasExplicitCandidates,
         workKind: sessionState?.workKind || "general_implementation",

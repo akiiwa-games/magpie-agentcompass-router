@@ -20,8 +20,7 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 |---|---|---|
 | `no_route` | `no_route: no candidate can serve this request` | 没有点名，候选池里选不出模型 |
 | `pin_not_in_pool` | `pin_not_in_pool: pinned model <名字> is not among the candidates` | 点名的模型不在候选池里 |
-| `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型本身不健康（旗舰，或点名的 family 名字） |
-| `model_unhealthy` | `model_unhealthy: a family row of pinned model <名字> is marked unhealthy` | 点名的旗舰健康，但它匹配到的 family 行不健康；本地日志写明是哪一行 |
+| `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型不健康（旗舰，或点名的 family 名字） |
 | `model_unhealthy` | `model_unhealthy: the model of pinned bundle <名字> is marked unhealthy` | 点名的 bundle 所用的模型不健康 |
 | `pin_unavailable` | `pin_unavailable: pinned model <名字> cannot serve this request` | 点名的模型因其他原因不可用，例如档位不提供、能力不够 |
 | `invalid_caller_profile` | `invalid_caller_profile: the task profile is invalid` | 调用方给的任务画像不合法 |
@@ -124,7 +123,7 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 | 选出模型 | `{ targetModel, targetEffort }` |
 | 选不出 | `{ targetModel: null, blocked: true, error, message }` |
 
-- 以前回答里的账号标识、配额、候选池名、健康状态、能力值、任务画像、`warnings` 现在默认都没有。`warnings` 写本地日志，账号和配额不写。
+- 以前回答里的账号标识、配额、候选池名、健康状态、能力值、任务画像、`warnings` 现在默认都没有。`warnings` 写本地日志。成功回答里去掉的账号和配额不写日志；选不出时 `warnings` 可能带账号和配额，把日志发给别人之前要注意。
 - 带点名的拒绝统一成 `pin_unavailable`，文案不带名字，调用方不能借此探测某个名字是否在候选池里、是否健康。这和 middleware 的 503 不同，那边的 503 带原因码和点名的名字。
 - Magpie 只读 `model`、`answers`、`usage`，路由不受影响。如果运营者确实需要明细，比如自己的工具要读，就显式设置 `"decisionProviderDetails": true`（默认关闭，只认 `true`），回答恢复之前的字段，blocked 回答另外多一个 `refusal`。打开后，能调这个接口的 key 都能读到明细。
 
@@ -139,12 +138,16 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 - 这一档不再被任何同账户、同模型的行派发。这个修复之前，裸名或 `efforts[]` 行展开出来的这一档仍可能被选中。
 - 点名这一档时返回 503（`pin_unavailable`），和 AgentCompass 相同。
 - 会话停在这一档时会离开它。
+- provider 自己的模型表（`modelsByProvider`）不用抄这一行，`onProvider` 重新路由时同样排除这一档。`/v1/systemone` 的短跟进在这一档被禁用时不走快路径，这一轮会调用分类器。
+- 只对这一个模型生效。family 行是另一个模型：禁用 `claude-opus-5-5` 的 high 不影响 `claude-opus-9`，反过来也一样。
+- 禁用行带 `account` 时只对该账户生效，其他账户和不带账户的裸名不受影响。
+- 手写了 `disabled_by_default` 的行也一样：点名能用它，但用不了被禁用的档位。
 
 ### 模型健康状态
 
 - 名字有自己的条目或别名时，失败记在解析后的条目下，任何写法都会让这一行下线。
 - family 名字的失败只记在原名下。`gpt-6.2-sol-preview` 一次 502 不再让 `gpt-6.1-sol` 下线；反过来，不点名时，`gpt-6.1-sol` 不健康也不再排除 `gpt-6.2-sol-preview`。代价是上游整体故障时，返回 503 之前多几次失败请求，上限是池里的名字数。
-- 点名的模型有自己的条目或别名且不健康时，它匹配到的所有行都排除，包括 family 行，返回 503（`model_unhealthy`）。已经停在 family 行上的会话也不再保持。点名 family 名字本身时，只看这个名字的健康状态。
+- 点名有自己条目或别名的模型时，只匹配这个模型的行。family 行是另一个模型，不算匹配，不能顶替点名被选，健康与否都一样。所以点名 `claude-opus-5-5` 时总是选它自己；它不健康时返回 503（`model_unhealthy`）；候选池里只有 `claude-opus-9` 时返回 503（`pin_not_in_pool`）。以前 family 行分数更高时可能被选中。停在 family 行上的会话收到点名后会离开它。点名 family 名字本身时，只看这个名字的健康状态。
 
 ### 其他行为变化
 

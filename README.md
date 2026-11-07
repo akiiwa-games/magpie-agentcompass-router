@@ -47,7 +47,7 @@ magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-5-5","clau
 - Requests to `agentcompass` or `agentcompass/*` rewrite `body.model` to `<targetModel>:<targetEffort>` (which Magpie's gateway splits natively) and set protocol-specific effort fields (`reasoning_effort`, `reasoning.effort`, `output_config.effort`).
 - If a virtual model (`agentcompass` / `agentcompass/*`) is requested without `candidateModels` or `defaultModel`, the middleware rejects the call with HTTP 400 (`agentcompass: set candidateModels in the plugin's options`) rather than guessing models.
 - If `routeAllModels: true` is set without `candidateModels`, concrete model names are kept as-is and only the reasoning effort is injected.
-- To turn off one effort of a model, add a row for it with `disabled: true` next to the bare name or `efforts[]` row: `["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]`. No row of that account and model is dispatched at that effort, and pinning it returns 503.
+- To turn off one effort of a model, add a row for it with `disabled: true` next to the bare name or `efforts[]` row: `["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]`. No row of that account and model is dispatched at that effort, and pinning it returns 503. A disabled row with an `account` applies to that account only.
 
 ### 3. Account-pool seat strategy (`routings`)
 
@@ -201,7 +201,7 @@ magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-5-5","clau
 
 - 请求虚拟模型 `agentcompass` / `agentcompass/*` 时，中间件将 `body.model` 改写为 `<targetModel>:<targetEffort>`，并按协议注入思考档位字段（`reasoning_effort`、`reasoning.effort`、`output_config.effort`）。
 - 未配置 `candidateModels` 或 `defaultModel` 时请求虚拟模型会返回 HTTP 400（`agentcompass: set candidateModels in the plugin's options`），不猜测模型列表。
-- 要禁用模型的某个档位，在裸名或 `efforts[]` 行旁边加一行 `disabled: true`：`["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]`。同账户、同模型的行都不会再派发这一档，点名这一档返回 503。
+- 要禁用模型的某个档位，在裸名或 `efforts[]` 行旁边加一行 `disabled: true`：`["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]`。同账户、同模型的行都不会再派发这一档，点名这一档返回 503。禁用行带 `account` 时只对该账户生效。
 - `/v1/systemone` 默认只回答模型和档位，或原因码和一句说明，账号、配额和 `warnings` 不返回。需要明细时设置 `decisionProviderDetails: true`，能用这个分类器模型的网关 key 都能读到。
 - 开启 `routeAllModels: true` 且未配置候选列表时，具体模型名保持不变，仅自动注入思考档位。
 

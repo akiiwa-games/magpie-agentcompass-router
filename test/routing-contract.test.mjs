@@ -657,6 +657,39 @@ test("onProvider cannot turn a request away: nothing usable on this provider war
   assert.match(logged.join("\n"), /pinned model gpt-6\.1-sol is not among the candidates/);
 });
 
+test("a pin names its own model's rows: a family row is another model (contract R1, X1)", async () => {
+  const flagship = "claude-opus-5-5";
+  const family = "claude-opus-9";
+  for (const pool of [[flagship, family], [family, flagship]]) {
+    for (const profile of [PROFILE, ROUTINE]) {
+      assert.equal(selectBestRoute(profile, { candidateModels: pool, constraintModel: flagship }).targetModel, flagship);
+      assert.equal(selectBestRoute(profile, { candidateModels: pool, constraintModel: `${flagship}:high` }).modelWithEffort, `${flagship}:high`);
+      assert.equal(selectBestRoute(profile, { candidateModels: pool, constraintModel: `${flagship}-20261001` }).targetModel, flagship);
+      assert.equal(selectBestRoute(profile, { candidateModels: pool, constraintModel: family }).targetModel, family);
+    }
+  }
+  // Alone in the pool, a family row does not answer to the flagship, and no row of it is made up
+  const alone = selectBestRoute(PROFILE, { candidateModels: [family], constraintModel: flagship });
+  assert.equal(alone.blocked, true);
+  assert.equal(alone.refusal, `pin_not_in_pool: pinned model ${flagship} is not among the candidates`);
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [family], constraintModel: `${flagship}:medium` }).blocked, true);
+  // An alias spelling of the row still is the row
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [`openai/${flagship}`], constraintModel: flagship }).ok, true);
+  // A session on the family row moves to the pinned flagship, in both hosts
+  const pool = [flagship, family];
+  const moved = twoTurns({ candidateModels: [family, flagship], constraintModel: family }, { candidateModels: pool, constraintModel: flagship });
+  assert.match(moved.first, /^claude-opus-9:/);
+  assert.match(moved.second, /^claude-opus-5-5:/);
+  assert.equal(moved.route.continuation.why, "user_pin_override");
+  const store = new SessionContinuityStore();
+  const first = turnOne();
+  await hooks.onRequest(first, { protocol: "chat", sessionId: "x1", options: { candidateModels: pool, constraintModel: family, continuityStore: store, now: NOW }, state: {} });
+  const ctx = { protocol: "chat", sessionId: "x1", options: { candidateModels: pool, constraintModel: flagship, continuityStore: store, now: NOW + 1000 }, state: {} };
+  await hooks.onRequest(followUp(first), ctx);
+  assert.equal(ctx.state.route.targetModel, flagship);
+  assert.equal(ctx.state.route.continuation.why, "user_pin_override");
+});
+
 test("a pinned model that is down is refused, with no family row standing in for it (review 2 M1)", async () => {
   const flagship = "claude-opus-5-5";
   const pool = [flagship, "claude-opus-9"];
@@ -679,11 +712,12 @@ test("a pinned model that is down is refused, with no family row standing in for
   await hooks.onRequest(turnOne(), hooked);
   assert.deepEqual(quietly(() => middleware.onRequest(turnOne(), hooked)).value, [503, `agentcompass: model_unhealthy: pinned model ${flagship} is marked unhealthy`]);
 
-  // A session the pin put on the family row does not hold through it
-  const held = twoTurns({ candidateModels: pool, constraintModel: flagship }, { ...options, constraintModel: flagship });
-  assert.match(held.first, /^claude-opus-9:/);
-  assert.equal(held.rejected[0]?.[0], 503);
-  assert.match(held.rejected[0][1], /^agentcompass: model_unhealthy: /);
+  // A session on the flagship, or on a family row with the pin arriving now, does not hold through it
+  for (const one of [{ candidateModels: pool, constraintModel: flagship }, { candidateModels: ["claude-opus-9"] }]) {
+    const held = twoTurns(one, { ...options, constraintModel: flagship });
+    assert.equal(held.rejected[0]?.[0], 503);
+    assert.match(held.rejected[0][1], /^agentcompass: model_unhealthy: /);
+  }
 
   // With no pin the family row serves (review M5), and a pin on the family name itself is that name's to answer
   assert.equal(selectBestRoute(PROFILE, options).targetModel, "claude-opus-9");
@@ -1013,10 +1047,9 @@ test("model_unhealthy says whose health it is (review 3 r3)", () => {
   // The pinned model itself
   assert.equal(refuse([flagship, family], [flagship], { constraintModel: flagship }).refusal, `model_unhealthy: pinned model ${flagship} is marked unhealthy`);
   assert.equal(refuse([family], [family], { constraintModel: family }).refusal, `model_unhealthy: pinned model ${family} is marked unhealthy`);
-  // A family row the pin also matches, with the flagship healthy: the name in the 503 stays the pinned one, the log has the row
-  const familyDown = refuse([family], [family], { constraintModel: flagship });
-  assert.equal(familyDown.refusal, `model_unhealthy: a family row of pinned model ${flagship} is marked unhealthy`);
-  assert.match(familyDown.warnings[0], new RegExp(`pinned model ${flagship} is unavailable: ${family}@\\w+: model is currently marked unhealthy`));
+  // A family row down says nothing of the flagship pinned: it is another model
+  assert.equal(refuse([family], [family], { constraintModel: flagship }).refusal, `pin_not_in_pool: pinned model ${flagship} is not among the candidates`);
+  assert.equal(refuse([flagship, family], [family], { constraintModel: flagship }).targetModel, flagship);
   // An effort pin has no model to blame, and a row left out by its effort is not the cause
   assert.match(refuse(["gpt-6.1-sol:high", "gpt-6-astra:high"], ["gpt-6.1-sol"], { constraintEffort: "low" }).refusal, /^pin_unavailable: pinned effort low /);
   assert.match(refuse(["gpt-6.1-sol:low"], ["gpt-6.1-sol"], { constraintEffort: "low" }).refusal, /^pin_unavailable: pinned effort low /);
@@ -1025,6 +1058,116 @@ test("model_unhealthy says whose health it is (review 3 r3)", () => {
   assert.equal(refuse([bundle], ["gpt-6.1-sol"], { pinnedBundle: "row" }).refusal, "model_unhealthy: the model of pinned bundle row is marked unhealthy");
   // Blocked for another reason, with nothing down: no health in the wording
   assert.match(refuse([`${flagship}:high`], [], { constraintModel: `${flagship}:low` }).refusal, /^pin_unavailable: /);
+});
+
+test("onProvider's route leaves out what the user disabled, though the provider's list has no such row (review 4 M1)", () => {
+  const sol = "gpt-6.1-sol";
+  const astra = "gpt-6-astra";
+  const off = (model, effort) => ({ model, effort, disabled: true });
+  const send = (options) => {
+    const body = turnOne("rename a variable in the README");
+    const ctx = { sessionId: "p", options: { continuityStore: new SessionContinuityStore(), now: NOW, ...options }, state: {}, provider: { id: "p" } };
+    quietly(() => middleware.onRequest(body, ctx));
+    quietly(() => middleware.onProvider(body, ctx));
+    return body.model;
+  };
+  assert.equal(send({ candidateModels: [sol, off(sol, "low")], routePerProvider: true, modelsByProvider: { p: [sol] } }), `${sol}:medium`);
+  assert.equal(send({ candidateModels: [sol, off(sol, "low")], routePerProvider: true, modelsByProvider: { p: [sol, off(sol, "low")] } }), `${sol}:medium`);
+  assert.equal(send({ candidateModels: [sol, astra, off(astra, "low")], modelsByProvider: { p: [astra] } }), `${astra}:medium`);
+  // The list keeps its own say: a disabled row stays out of what it offers
+  assert.equal(allocator.candidateOffers([sol, off(sol, "low")], sol, "low"), false);
+});
+
+test("an effort the user disabled stays out for a row off by default, pinned too (review 4 r1)", () => {
+  const sol = "gpt-6.1-sol";
+  const dflt = (extra) => ({ model: sol, disabled: true, disabled_by_default: true, ...extra });
+  const off = { id: "b", model: sol, effort: "medium", disabled: true };
+  for (const [pool, pin] of [
+    [[dflt({ id: "a", efforts: ["low", "medium", "high"] }), off], { constraintModel: `${sol}:medium` }],
+    [[dflt({ id: "a", efforts: ["low", "medium", "high"] }), off], { pinnedBundle: "a", constraintEffort: "medium" }],
+    [[dflt({ id: "a", effort: "medium" }), off], { constraintModel: `${sol}:medium` }],
+    [[dflt({ id: "a" }), off], { constraintModel: `${sol}:medium` }],
+  ]) {
+    const route = selectBestRoute(PROFILE, { candidateModels: pool, ...pin });
+    assert.equal(route.blocked, true, JSON.stringify(pin));
+    assert.match(route.refusal, /^pin_unavailable: /);
+  }
+  // Named, the row off by default still runs at the efforts left
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [dflt({ id: "a", efforts: ["medium", "high"] }), off], constraintModel: `${sol}:high` }).modelWithEffort, `${sol}:high`);
+});
+
+test("a disabled effort is that model's: a flagship and its family row keep their own (review 4 r2)", () => {
+  const flagship = "claude-opus-5-5";
+  const family = "claude-opus-9";
+  const off = (model, effort) => ({ model, effort, disabled: true });
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [flagship, family, off(flagship, "high")], constraintModel: `${family}:high` }).modelWithEffort, `${family}:high`);
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [flagship, family, off(family, "high")], constraintModel: `${flagship}:high` }).modelWithEffort, `${flagship}:high`);
+  // Its own row stays refused, and a spelling of the row is still the row
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [flagship, family, off(flagship, "high")], constraintModel: `${flagship}:high` }).blocked, true);
+  assert.equal(selectBestRoute(PROFILE, { candidateModels: [flagship, off(`${flagship}-20261001`, "high")], constraintModel: `${flagship}:high` }).blocked, true);
+  assert.equal(allocator.candidateOffers([flagship, family, off(flagship, "high")], family, "high"), true);
+  assert.equal(allocator.candidateOffers([flagship, family, off(flagship, "high")], flagship, "high"), false);
+});
+
+test("a short follow-up on /v1/systemone checks the effort locally, and only a disabled one routes (review 4 r3)", async () => {
+  const sol = "gpt-6.1-sol";
+  const questions = { effort: { type: "score", criteria: ["low", "medium", "high", "xhigh"] } };
+  let calls = 0;
+  const fetch = async () => {
+    calls++;
+    const content = JSON.stringify(SCORED());
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content } }] }) };
+  };
+  const scored = { allowExternalScorer: true, scorerType: "openai_compatible", scorerBaseUrl: "http://127.0.0.1:9/v1", scorerApiKey: "fake", scorerModel: "fake", useCache: false, fetch };
+  const follow = (pool) =>
+    index.handleSystemOneRequest(
+      { model: "m", state: { message: "继续", previous_message_kind: "general_implementation", previous_message_reasoning: "high" }, questions },
+      { candidateModels: pool, ...scored },
+    );
+  // Nothing disabled, or another effort: the fast path, with no call
+  assert.equal((await follow([sol])).agentcompass.targetEffort, "high");
+  assert.equal((await follow([sol, { model: sol, effort: "low", disabled: true }])).agentcompass.targetEffort, "high");
+  assert.equal(calls, 0);
+  // That effort disabled: a route, the classifier allowed, and it is not sent
+  const answer = await follow([sol, { model: sol, effort: "high", disabled: true }]);
+  assert.notEqual(answer.agentcompass.targetEffort, "high");
+  assert.notEqual(answer.answers.effort.score, 2);
+  assert.equal(allocator.effortUnchecked([sol, { model: sol, effort: "high", disabled: true }], "high"), true);
+  assert.equal(allocator.effortUnchecked([sol], "high"), false);
+  assert.equal(allocator.effortUnchecked(null, "high"), false);
+});
+
+test("a held bundle is a row that offers the effort, on an account that has it (review 4 r4)", async () => {
+  const sol = "gpt-6.1-sol";
+  const all = ["low", "medium", "high"];
+  const x = (extra) => ({ id: "xa", provider: "codex", account: "x", model: sol, ...extra });
+  const y = (extra) => ({ id: "ya", provider: "codex", account: "y", model: sol, ...extra });
+  const off = { id: "xb", provider: "codex", account: "x", model: sol, effort: "medium", disabled: true };
+  for (const pool of [[x({ efforts: all }), off, y({ efforts: all })], [off, x({ efforts: all }), y({ efforts: all })]]) {
+    const run = twoTurns({ candidateModels: [x({ effort: "medium" })] }, { candidateModels: pool });
+    assert.equal(run.second, `${sol}:medium`);
+    assert.equal(run.route.continuation.held, true);
+    assert.equal(run.route.bundle.account, "y");
+    assert.equal(run.route.bundle.disabled, undefined);
+    assert.equal(allocator.heldBundle(pool, sol, "medium").account, "y");
+
+    const store = new SessionContinuityStore();
+    const first = turnOne();
+    await hooks.onRequest(first, { protocol: "chat", sessionId: "b", options: { candidateModels: [x({ effort: "medium" })], continuityStore: store, now: NOW }, state: {} });
+    const ctx = { protocol: "chat", sessionId: "b", options: { candidateModels: pool, continuityStore: store, now: NOW + 1000 }, state: {} };
+    await hooks.onRequest(followUp(first), ctx);
+    assert.equal(ctx.state.route.continuation.held, true);
+    assert.equal(ctx.state.route.bundle.account, "y");
+  }
+});
+
+test("the docs say what a disabled row covers and what the log carries (review 4 r5)", () => {
+  const notes = fs.readFileSync(path.join(REPO, "docs", "RELEASE_NOTES.md"), "utf8");
+  assert.doesNotMatch(notes, /账号和配额不写。/);
+  assert.match(notes, /选不出时 `warnings` 可能带账号和配额/);
+  const readme = fs.readFileSync(path.join(REPO, "README.md"), "utf8");
+  assert.match(readme, /A disabled row with an `account` applies to that account only/);
+  assert.match(readme, /禁用行带 `account` 时只对该账户生效/);
 });
 
 test("the pools of the non-realtime report are in the repo", () => {

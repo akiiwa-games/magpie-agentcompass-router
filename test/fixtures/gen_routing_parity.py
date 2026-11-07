@@ -68,6 +68,9 @@ POOLS = [
     ["grok-bot", "gpt-6-pro", "claude-opus-5-5", "gpt-6-luna"],
     ["deepseek-v4.1-flash-free", "glm-5.3-flash-free", "minimax-m3.1-flash", "mimo-v2.6-flash-free"],
     ["gpt-6-luna", "gemini-3.8-flash-high"],
+    # A family row beside the model it folds to, each pinned in turn (contract R1): it is another model.
+    ["claude-opus-5-5", "claude-opus-9"],
+    ["claude-opus-9", "claude-opus-5-5"],
 ]
 EVERY_ROW = [k for k, v in base["models"].items() if isinstance(v, dict) and k != "basis"]
 KINDS = [k for k in capabilities["routes"]]

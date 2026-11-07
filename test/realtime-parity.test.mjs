@@ -209,19 +209,20 @@ test("M1-R3: slow models with a flat ability curve are excluded, models without 
   }
 });
 
-test("M2-R3: pin identity follows allocator.canonical: a pin never crosses 4-x and 5-5", () => {
+test("M2-R3: pin identity is each row's own key (contract R1): a pin never crosses 4-x and 5-5, nor reaches a family row", () => {
   const names = Object.keys(FIXTURE.canonical);
   const leaf = (name) => splitEffortSuffix(name).name.split("/").pop().toLowerCase();
   const diffs = [];
   for (const pin of names) {
-    // As `allocator.py:named_pin`: a name only a family guess could place stays itself.
+    // As `allocator.py:named_pin`, a name only a family guess could place stays itself. Unlike this pin of it, so does a row (X1).
     const { key, source, effort } = FIXTURE.resolutions[pin];
+    const isDirect = (name) => ["exact", "alias"].includes(FIXTURE.resolutions[name].source);
     const direct = source === "exact" || source === "alias";
     for (const model of names) {
       const bare = splitEffortSuffix(model).name;
       const js = isCandidatePinned({ model: bare, effort: effort || "high" }, canonicalModel(bare), { constraint_model: pin });
-      const py = direct ? key === FIXTURE.canonical[model] || key.toLowerCase() === leaf(model) : leaf(pin) === leaf(model);
-      if (js !== py) diffs.push(`pin=${pin} model=${model}: js=${js} py=${py}`);
+      const wanted = direct ? (isDirect(model) && key === FIXTURE.resolutions[model].key) || key.toLowerCase() === leaf(model) : leaf(pin) === leaf(model);
+      if (js !== wanted) diffs.push(`pin=${pin} model=${model}: js=${js} wanted=${wanted}`);
     }
   }
   assert.deepEqual(diffs.slice(0, 40), []);

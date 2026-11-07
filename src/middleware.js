@@ -377,7 +377,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         canonicalModel: canonicalModel(cont.model, options.catalog?.aliases),
         targetEffort: heldEffort,
         modelWithEffort: `${target}:${heldEffort}`,
-        bundle: pool ? heldBundle(pool, target, heldEffort, options.catalog) : null,
+        bundle: pool ? heldBundle(pool, target, heldEffort, options.catalog, pins) : null,
         canRewriteModel,
         hasExplicitCandidates,
         workKind: sessionState?.workKind || "general_implementation",
@@ -675,18 +675,21 @@ export function onProvider(body, ctx = {}) {
     prevDecision?.profile ||
     (prevDecision?.workKind ? { work_kind: prevDecision.workKind, difficulty: prevDecision.difficulty } : null);
   if (providerModels && providerModels.length > 0 && prevProfile) {
+    // The user unchecks an effort in the pool, and a provider's own list holds no such row (contract R2).
+    const unchecked = (explicitCandidateModels(options, ctx) || []).filter((entry) => entry?.disabled && !entry.disabled_by_default);
+    const providerPool = [...providerModels, ...unchecked];
     const needProviderRoute =
       isVirtualModelName(body.model, options) ||
       prevDecision.canRewriteModel === false ||
       prevDecision.hasExplicitCandidates === false ||
-      !candidateOffers(providerModels, prevDecision.targetModel, prevDecision.targetEffort || "high", options.catalog) ||
+      !candidateOffers(providerPool, prevDecision.targetModel, prevDecision.targetEffort || "high", options.catalog) ||
       options.routePerProvider === true;
 
     if (needProviderRoute) {
       const store = options.continuityStore || defaultContinuityStore;
       const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
       const routed = selectBestRoute(prevProfile, {
-        candidateModels: providerModels,
+        candidateModels: providerPool,
         catalog: options.catalog,
         unhealthyModels: [
           ...store.getUnhealthyModels(now),

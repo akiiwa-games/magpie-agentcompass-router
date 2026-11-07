@@ -975,29 +975,19 @@ export function detectTierEscalationOutgrowth(text, currentSpec) {
 /**
  * Whether the user now names something other than what the session runs (contract R3). A hold would hide that.
  */
-function pinOverridesSession(sessionState, currentModel, pins, options) {
+function pinOverridesSession(sessionState, pins, options) {
   if (!pins) return false;
   if (pins.pinnedBundle && pins.pinnedBundle !== sessionState.pinnedBundle) return true;
   let effort = pins.constraintEffort ? String(pins.constraintEffort).trim().toLowerCase() : null;
   if (pins.constraintModel) {
     const models = options.models || DEFAULT_MODELS;
     const aliases = options.aliases || MODEL_ALIASES;
-    const named = resolveModel(String(pins.constraintModel), models, aliases);
-    // A family name stays itself: only a session on that very name is on it, never one on the flagship it folds to.
-    const direct = named.source === "exact" || named.source === "alias";
-    const running = direct ? currentModel : healthKey(sessionState.target || sessionState.model, models, aliases);
-    const wanted = direct ? named.key : healthKey(String(pins.constraintModel), models, aliases);
-    if (wanted !== running) return true;
-    effort = effort || named.effort;
+    // Each row is its own model (contract R1): a session on a family row is not on the flagship it folds to, nor the other way round.
+    const running = healthKey(sessionState.target || sessionState.model, models, aliases);
+    if (healthKey(String(pins.constraintModel), models, aliases) !== running) return true;
+    effort = effort || resolveModel(String(pins.constraintModel), models, aliases).effort;
   }
   return Boolean(effort && effort !== sessionState.effort);
-}
-
-/** The row a pin names when it has one of its own. A family name stays itself (`healthKey`). */
-function pinnedRowKey(pins, options) {
-  if (!pins?.constraintModel) return null;
-  const named = resolveModel(String(pins.constraintModel), options.models || DEFAULT_MODELS, options.aliases || MODEL_ALIASES);
-  return named.source === "exact" || named.source === "alias" ? named.key : null;
 }
 
 export function evaluateProviderContinuation(facts = {}, sessionState = null, options = {}) {
@@ -1047,7 +1037,7 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     };
   }
 
-  if (pinOverridesSession(sessionState, currentModel, options.pins, options)) {
+  if (pinOverridesSession(sessionState, options.pins, options)) {
     return {
       shouldHold: false,
       why: "user_pin_override",
@@ -1087,21 +1077,19 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
   const unhealthySet = new Set(
     (options.unhealthyModels || []).map((m) => healthKey(m, options.models, options.aliases))
   );
-  const healthyInStore = (name) =>
-    options.store && typeof options.store.isModelHealthy === "function" ? options.store.isModelHealthy(name, now) : true;
-  // The pin matches family rows too, and a session on one of those is no way round its own row being down (contract R3).
-  const pinnedKey = pinnedRowKey(options.pins, options);
-  const pinnedDown = Boolean(pinnedKey) && (unhealthySet.has(pinnedKey) || !healthyInStore(pinnedKey));
+  const storeHealthy =
+    options.store && typeof options.store.isModelHealthy === "function"
+      ? options.store.isModelHealthy(runningName, now)
+      : true;
   if (
-    pinnedDown ||
     sessionState.healthy === false ||
-    !healthyInStore(runningName) ||
+    !storeHealthy ||
     unhealthySet.has(failedModel)
   ) {
     return {
       shouldHold: false,
       why: "provider_unhealthy",
-      failedModel: pinnedDown ? pinnedKey : failedModel,
+      failedModel,
       previousModel: currentModel,
       previousEffort: sessionState.effort,
       within: Boolean(facts.within),

@@ -2,7 +2,7 @@
  * Routes a row of the AgentCompass parity grid (fixtures/gen_routing_parity.py) with the JS port and names why it differs.
  */
 import { rankCandidates } from "../src/allocator.js";
-import { CANONICAL_ROUTES, canonicalModel, resolveModel } from "../src/catalog.js";
+import { CANONICAL_ROUTES, canonicalModel, healthKey, resolveModel } from "../src/catalog.js";
 import { MAGPIE_MODELS } from "../scripts/catalog-overlay.mjs";
 
 export function routeRow(fixture, row) {
@@ -33,6 +33,7 @@ export const REASONS = {
   thinkingOff: "listed: an effort that turns thinking off costs ability here; AgentCompass scores `none` at the High tier when the model has no curve for it",
   magpieRow: "listed: a model row only Magpie has (Spark); AgentCompass scores it as unmeasured",
   specialist: "listed: a specialist route with no specialist in the pool stays open in a gateway; AgentCompass excludes everything",
+  familyPin: "listed: a pin names its own model's rows, a family row being another model (contract R1); AgentCompass at this commit lets the family row answer to it",
 };
 
 /**
@@ -40,7 +41,7 @@ export const REASONS = {
  */
 export function classifyRow(fixture, row) {
   const py = row[5];
-  const { models, ranked, result: js } = routeRow(fixture, row);
+  const { models, mode, ranked, result: js } = routeRow(fixture, row);
   const realtime = Boolean(row[3]);
   const same = py && js ? py[0] === js[0] && py[1] === js[1] : !py && !js;
   if (same) return { reason: null, js, py, ranked };
@@ -49,7 +50,9 @@ export function classifyRow(fixture, row) {
   // Scores differ by a constant (AgentCompass's unknown capacity penalty, which has no quota source here), so compare inside JS.
   const pyRow = py && ranked.allCandidates.find((c) => c.eligible && c.model === py[0] && c.effort === py[1]);
   let reason = "unexplained";
-  if (route.restrict_models && !models.some((m) => named.includes(canonicalModel(m)))) reason = REASONS.specialist;
+  // Checked first: a pin on models[0], and the other side went to a family row of it.
+  if (mode !== "none" && py && py[0] !== models[0] && resolveModel(py[0]).source === "family" && healthKey(py[0]) !== healthKey(models[0]) && canonicalModel(py[0]) === canonicalModel(models[0])) reason = REASONS.familyPin;
+  else if (route.restrict_models && !models.some((m) => named.includes(canonicalModel(m)))) reason = REASONS.specialist;
   else if (models.some((m) => resolveModel(m).key in MAGPIE_MODELS)) reason = REASONS.magpieRow;
   else if (realtime && py && ["none", "off", "minimal"].includes(py[1])) reason = REASONS.thinkingOff;
   else if (js && pyRow && Math.abs(pyRow.score - js[2]) < 0.00015) reason = REASONS.tie;
