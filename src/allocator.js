@@ -29,7 +29,7 @@ import {
   resolveModelSpec,
   resolveResponsivenessModelKey,
 } from "./catalog.js";
-import { inferTaskProfile, validateProfile } from "./profiler-core.js";
+import { unroutedDecision, validateProfile } from "./profiler-core.js";
 import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
 
 export const EFFORT_SCALED_CAPABILITIES = [
@@ -1742,21 +1742,13 @@ export function rankCandidates(profileInput, options = {}) {
   const nowMs = Number.isFinite(options.now) ? Number(options.now) : Date.now();
 
   const callerNeeds = profileInput?.needs && typeof profileInput.needs === "object" ? profileInput.needs : {};
-  // A task wrapper (`{ profile, realtime_loop, constraints, ... }`) is a realtime-only input; anything else is inferred as on main.
+  // A task wrapper is `{ profile, realtime_loop, constraints, ... }`. Nothing here reads a task's text: no profile, no ranking.
   const wrappedProfile = !profileInput?.reasoning_depth && profileInput?.profile?.reasoning_depth ? profileInput.profile : null;
-  const wrapperRealtime =
-    wrappedProfile &&
-    (typeof options.realtime_loop === "boolean"
-      ? options.realtime_loop
-      : typeof callerNeeds.realtime_loop === "boolean"
-        ? callerNeeds.realtime_loop
-        : typeof profileInput.realtime_loop === "boolean"
-          ? profileInput.realtime_loop
-          : wrappedProfile.realtime_loop === true);
-  const rawProfile = profileInput?.reasoning_depth ? profileInput : wrapperRealtime ? wrappedProfile : null;
-  let profile = rawProfile
-    ? validateProfile(rawProfile)
-    : inferTaskProfile(profileInput || {}, routes);
+  const rawProfile = profileInput?.reasoning_depth ? profileInput : wrappedProfile;
+  if (!rawProfile) {
+    return { task: null, selected: null, ranking: [], allCandidates: [] };
+  }
+  let profile = validateProfile(rawProfile);
   const isTaskWrapper = Boolean(rawProfile && profileInput !== rawProfile);
   const explicitRealtimeLoop =
     typeof options.realtime_loop === "boolean"
@@ -1810,7 +1802,7 @@ export function rankCandidates(profileInput, options = {}) {
   const unhealthySet = new Set(
     (options.unhealthyModels || []).map((m) => canonicalModel(m, aliases)).filter(Boolean)
   );
-  const taskOpts = !rawProfile || isTaskWrapper ? profileInput : null;
+  const taskOpts = isTaskWrapper ? profileInput : null;
   const unavailableSet = new Set(options.unavailable || taskOpts?.unavailable || []);
   const continuity =
     options.continuity ||
@@ -2018,10 +2010,11 @@ export function pinOptionsOf(options = {}) {
 }
 
 /**
- * Convenience entry point: takes a raw request or task object + options and returns the winning route decision.
+ * Convenience entry point: takes a task profile (or a `{ profile }` wrapper) + options and returns the winning route decision.
  */
 export function selectBestRoute(taskOrProfile, options = {}) {
   const result = rankCandidates(taskOrProfile, options);
+  if (!result.task) return unroutedDecision("no_task_profile");
   const top = result.selected;
   const warnings = top?.components?.realtime_slow_pin_warning
     ? [top.components.realtime_slow_pin_warning]

@@ -6,8 +6,10 @@
  *
  * Capabilities in `src/middleware.js`:
  * 1. Evaluates `evaluateProviderContinuation` first (holding the current Provider/Model on
- *    `within: true` tool loops, warm KV cache, or short follow-up nudges), and only executes
- *    `inferTaskProfile` + `selectBestRoute` when selecting or switching a Provider/Model is needed.
+ *    `within: true` tool loops or warm KV cache), and only executes `selectBestRoute` when selecting or
+ *    switching a Provider/Model is needed. `moejs` has no network, so the task profile comes from the caller
+ *    (`ctx.state.profile`, `ctx.profile`, `body.profile`) or the hooks' `ctx.state.route`; without one the
+ *    request is not routed and goes on with the model the client asked for.
  * 2. Rewrites `body.model` (using either `<model>:<effort>` which `gateway.go:askedAt` natively
  *    splits, or bare `<model>` plus protocol-specific reasoning effort fields) within the
  *    configured `candidateModels` / `availableModels` / `allowedModels` (or `defaultModel`),
@@ -29,7 +31,7 @@ import {
   keepsEffort,
   recentUserTurns,
 } from "./continuity.js";
-import { extractRequestFacts, inferTaskProfile } from "./profiler-core.js";
+import { extractRequestFacts, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
 import { orderSeatsByQuotaEconomics } from "./quota.js";
 
 const ROUTE_CARRIER_KEY = "__agentcompass_route";
@@ -42,19 +44,27 @@ const DEFAULT_VIRTUAL_MODELS = [
 ];
 
 /**
- * `realtime_loop` in a request is for the router: an upstream may refuse a field it does not know. Whether one was dropped.
+ * `realtime_loop`, `needs.gui` and `profile` in a request are for the router: an upstream may refuse a field it does
+ * not know. Whether one was dropped.
  */
-function dropRealtimeFlag(body) {
+function dropRouterFields(body) {
   let dropped = false;
   if (typeof body.realtime_loop === "boolean") {
     delete body.realtime_loop;
     dropped = true;
   }
-  const needs = body.needs;
-  if (needs && typeof needs === "object" && typeof needs.realtime_loop === "boolean") {
-    delete needs.realtime_loop;
-    if (Object.keys(needs).length === 0) delete body.needs;
+  if (body.profile && typeof body.profile === "object") {
+    delete body.profile;
     dropped = true;
+  }
+  const needs = body.needs;
+  if (needs && typeof needs === "object") {
+    const flags = ["realtime_loop", "gui"].filter((flag) => typeof needs[flag] === "boolean");
+    for (const flag of flags) delete needs[flag];
+    if (flags.length > 0) {
+      if (Object.keys(needs).length === 0) delete body.needs;
+      dropped = true;
+    }
   }
   return dropped;
 }
@@ -216,32 +226,18 @@ const MAX_REPLAY_DEPTH = 4;
 
 /**
  * The turn a request belongs to, read from the history the client resent (`recentUserTurns`).
- * `stamp` is the turn whose decision this request carries: the current turn, or, within a tool
- * loop or on a short follow-up ("继续"), the turn that follow-up continues. `prior` is the turn
- * whose decision is the session's state before this request: that same turn for a hold (when it
- * is an earlier request than this one), the previous one for a new turn, `null` on the first.
+ * `stamp` is the current turn. `prior` is the turn whose decision is the session's state before
+ * this request: that same turn for a step of a tool loop, the previous one for a new turn, `null`
+ * on the first.
  */
 function turnChain(body, facts) {
   const turns = recentUserTurns(body, MAX_REPLAY_DEPTH + 2);
   if (turns.length === 0) return null;
-  const anchorAt = (from) => {
-    let at = from;
-    while (at < turns.length - 1 && turns[at].short) at += 1;
-    return at;
-  };
-  const holds = Boolean(facts.within || facts.isShortFollowup);
-  const at = holds ? anchorAt(0) : 0;
-  let prior = null;
-  if (holds) {
-    // a follow-up holds the turn it continues; a tool loop step, the request that began its turn
-    prior = at > 0 || facts.within ? turns[at] : null;
-  } else if (turns.length > 1) {
-    prior = turns[anchorAt(1)];
-  }
+  const prior = facts.within ? turns[0] : turns[1] || null;
   return {
-    stamp: turns[at].stamp,
+    stamp: turns[0].stamp,
     prior,
-    accepts: [turns[at].stamp, prior?.stamp].filter(Boolean),
+    accepts: [turns[0].stamp, prior?.stamp].filter(Boolean),
   };
 }
 
@@ -354,7 +350,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
       {
         ...options,
         ...realtimeOption,
-        isShortFollowup: facts.isShortFollowup,
       }
     );
     const target =
@@ -401,11 +396,11 @@ function routeClaimed(body, ctx, env, depth = 0) {
     };
   }
 
-  if (!facts.objective) {
-    return { facts, sessionKey, record: null, decision: null };
+  const caller = resolveCallerProfile(facts.callerProfile, facts.hasVisualInput);
+  if (!caller?.profile) {
+    return { facts, sessionKey, record: null, decision: unroutedDecision(caller?.error || "no_task_profile") };
   }
-
-  const profile = inferTaskProfile(facts);
+  const { profile } = caller;
   const unhealthyModels = [
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
@@ -417,7 +412,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
 
   const pins = pinOptionsOf(options);
   let decision = selectBestRoute(profile, {
-    objective: facts.objective,
     candidateModels,
     catalog: options.catalog,
     unhealthyModels,
@@ -437,7 +431,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
 
   if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || options.quotas)) {
     decision = selectBestRoute(profile, {
-      objective: facts.objective,
       candidateModels,
       catalog: options.catalog,
       now,
@@ -502,6 +495,23 @@ function routeClaimed(body, ctx, env, depth = 0) {
   };
 }
 
+/**
+ * Say that a request was not routed, in `ctx.state` (for `onResponse`) and Magpie's log, and send it on: with the model
+ * the client asked for, or, when that is only the router's own virtual name, the model the operator named for this.
+ * Whether the body changed.
+ */
+function sendUnrouted(body, ctx, decision, options) {
+  console.warn(`agentcompass: ${decision.notice} (${decision.reason})`);
+  ctx.state = ctx.state || {};
+  ctx.state.agentcompass = decision;
+  const fallback = String(options.defaultModel || options.fallbackModel || "").trim();
+  if (fallback && isVirtualModelName(body.model, options)) {
+    body.model = fallback;
+    return true;
+  }
+  return false;
+}
+
 export function onRequest(body, ctx = {}) {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return undefined;
@@ -519,7 +529,7 @@ export function onRequest(body, ctx = {}) {
       : null;
 
   if (!isClaimedModel && !stateRoute) {
-    return dropRealtimeFlag(body) ? body : undefined;
+    return dropRouterFields(body) ? body : undefined;
   }
 
   try {
@@ -580,8 +590,9 @@ export function onRequest(body, ctx = {}) {
     }
 
     if (!decision && isClaimedModel) {
-      // 2. Zero-latency (< 2 ms) synchronous execution inside `moejs`
-      const routed = routeClaimed(body, ctx, {
+      // 2. Zero-latency (< 2 ms) synchronous execution inside `moejs`. A hooks' route this pool can't take still
+      // carries the classifier's answer.
+      const routed = routeClaimed(body, stateRoute?.profile ? { ...ctx, profile: stateRoute.profile } : ctx, {
         options,
         store,
         now,
@@ -600,7 +611,8 @@ export function onRequest(body, ctx = {}) {
     }
 
     if (!decision || !decision.targetModel) {
-      return dropRealtimeFlag(body) ? body : undefined;
+      const changed = decision?.routed === false && sendUnrouted(body, ctx, decision, options);
+      return dropRouterFields(body) || changed ? body : undefined;
     }
 
     ctx.state = ctx.state || {};
@@ -617,7 +629,7 @@ export function onRequest(body, ctx = {}) {
         applyProtocolEffortOnly(body, decision.targetEffort, ctx);
         return body;
       }
-      return dropRealtimeFlag(body) ? body : undefined;
+      return dropRouterFields(body) ? body : undefined;
     }
 
     applyRoutedModelAndEffort(body, decision, ctx);
@@ -625,7 +637,7 @@ export function onRequest(body, ctx = {}) {
   } finally {
     if (body && typeof body === "object" && !Array.isArray(body)) {
       if (ROUTE_CARRIER_KEY in body) delete body[ROUTE_CARRIER_KEY];
-      dropRealtimeFlag(body);
+      dropRouterFields(body);
     }
   }
 }
@@ -658,7 +670,6 @@ export function onProvider(body, ctx = {}) {
 
     if (needProviderRoute) {
       const routed = selectBestRoute(prevDecision.profile, {
-        objective: "",
         candidateModels: providerModels,
         catalog: options.catalog,
         quotas: options.quotas,
@@ -690,6 +701,11 @@ export function onProvider(body, ctx = {}) {
     typeof prov?.model === "string" &&
     prov.model.trim()
   ) {
+    // The provider Magpie chose names its own model; an unrouted request takes it with no effort of ours.
+    if (prevDecision?.routed === false) {
+      body.model = prov.model.trim();
+      return body;
+    }
     const fallbackDecision = {
       ...(prevDecision || {}),
       targetModel: prov.model.trim(),
@@ -705,13 +721,19 @@ export function onProvider(body, ctx = {}) {
 /**
  * Middleware `onResponse(body, ctx)` hook (`internal/middleware/run.go`):
  * Shares the pooled request runtime with `onRequest`. Updates token/cache watermarks
- * on success and marks `healthy = false` on upstream error (`status >= 400`).
+ * on success and marks `healthy = false` on upstream error (`status >= 400`). An unrouted request
+ * records nothing, since it must not start a session that later turns hold, and its JSON reply says why.
  */
 export function onResponse(body, ctx = {}) {
   const options = ctx?.options || {};
   const store = options.continuityStore || defaultContinuityStore;
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const decision = ctx?.state?.agentcompass || ctx?.state?.route;
+  if (decision?.routed === false) {
+    return body && typeof body === "object" && !Array.isArray(body)
+      ? { ...body, agentcompass: { routed: false, notice: decision.notice, reason: decision.reason } }
+      : undefined;
+  }
   const sessionKey =
     decision?.continuation?.sessionKey ||
     ctx?.state?.sessionKey ||

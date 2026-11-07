@@ -3,7 +3,8 @@
  *
  * Used for programmatic / custom host integrations that opt into asynchronous external
  * System-One scoring (`allowExternalScorer: true`) and pass routing state via `ctx.state.route`
- * without mutating client request body fields.
+ * without mutating client request body fields. With no classifier and no caller profile it routes nothing
+ * and says so in `ctx.state.agentcompass` and the log.
  */
 
 import { pinOptionsOf, selectBestRoute } from "./allocator.js";
@@ -15,9 +16,9 @@ import {
   evaluateProviderContinuation,
   keepsEffort,
 } from "./continuity.js";
-import { extractRequestFacts } from "./profiler-core.js";
+import { extractRequestFacts, resolveCallerProfile, unroutedDecision } from "./profiler-core.js";
 import { loadLiveQuotas } from "./quota-loader.js";
-import { scoreTaskLive } from "./scorer-live.js";
+import { scoreTaskLive, scorerOptionsOf } from "./scorer-live.js";
 
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -137,7 +138,6 @@ export async function onRequest(body, ctx = {}) {
   }
 
   const options = ctx.options || {};
-  const scorerCfg = options.scorer && typeof options.scorer === "object" ? options.scorer : {};
   const facts = extractRequestFacts(body, ctx);
 
   if (!shouldRouteRequest(facts.model, options)) {
@@ -190,7 +190,6 @@ export async function onRequest(body, ctx = {}) {
       {
         ...options,
         ...realtimeOption,
-        isShortFollowup: facts.isShortFollowup,
       }
     );
     const canonical = canonicalModel(cont.model, options.catalog?.aliases);
@@ -256,35 +255,26 @@ export async function onRequest(body, ctx = {}) {
     return undefined;
   }
 
-  if (!facts.objective) {
+  const caller = resolveCallerProfile(facts.callerProfile, facts.hasVisualInput);
+  const { profile, meta } = caller?.error
+    ? { profile: null, meta: { source: "caller", reason: caller.error } }
+    : caller
+      ? { profile: caller.profile, meta: { source: "caller" } }
+      : await scoreTaskLive(facts, {
+          scorerTimeoutMs: Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
+          ...scorerOptionsOf(options),
+          signal: ctx.signal,
+        });
+
+  if (!profile) {
+    const unrouted = unroutedDecision(meta.reason);
+    console.warn(`agentcompass: ${unrouted.notice} (${unrouted.reason})`);
+    ctx.state = ctx.state || {};
+    ctx.state.sessionKey = sessionKey;
+    ctx.state.agentcompass = unrouted;
     ctx.report?.("empty");
     return undefined;
   }
-
-  const preferHeuristic =
-    options.prefer_local_heuristic === true || scorerCfg.prefer_local_heuristic === true;
-  const allowExternalScorer =
-    options.allowExternalScorer === true ||
-    scorerCfg.allowExternalScorer === true;
-
-  const { profile, meta } = await scoreTaskLive(facts, {
-    allowExternalScorer,
-    scorerType: preferHeuristic
-      ? "heuristic"
-      : options.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
-    scorerModel: options.scorerModel || scorerCfg.model,
-    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl,
-    scorerApiKey: options.scorerApiKey || scorerCfg.apiKey,
-    jevBaseUrl: options.jevBaseUrl || scorerCfg.jevBaseUrl,
-    jevApiKey: options.jevApiKey || scorerCfg.jevApiKey,
-    scorerTimeoutMs:
-      options.scorerTimeoutMs ||
-      scorerCfg.timeoutMs ||
-      Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
-    useCache: options.useCache !== false && scorerCfg.useCache !== false,
-    signal: ctx.signal,
-    fetch: options.fetch,
-  });
 
   const unhealthyModels = [
     ...store.getUnhealthyModels(now),
@@ -298,7 +288,6 @@ export async function onRequest(body, ctx = {}) {
     cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
   let decision = selectBestRoute(profile, {
-    objective: facts.objective,
     candidateModels,
     catalog: options.catalog,
     unhealthyModels,
@@ -319,7 +308,6 @@ export async function onRequest(body, ctx = {}) {
   // Graceful fallback if all candidates were filtered out by temporary unhealthy/context/quota constraints
   if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || liveQuotas)) {
     decision = selectBestRoute(profile, {
-      objective: facts.objective,
       candidateModels,
       catalog: options.catalog,
       now,
@@ -413,6 +401,8 @@ export async function onResponse(reply, ctx = {}) {
   const options = ctx?.options || {};
   const store = options.continuityStore || defaultContinuityStore;
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+  // An unrouted request was the client's own choice: it must not start a session that later turns hold.
+  if (ctx?.state?.agentcompass?.routed === false) return undefined;
   const sessionKey =
     ctx?.state?.sessionKey ||
     ctx?.state?.route?.continuation?.sessionKey ||

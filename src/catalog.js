@@ -32,23 +32,7 @@ export const INTERACTION_STYLES = [
 
 export const DIFFICULTY_ORDER = ["routine", "hard", "coupled", "frontier"];
 
-export const DEPTH_BY_DIFFICULTY = {
-  routine: 1,
-  hard: 2,
-  coupled: 3,
-  frontier: 4,
-};
-
 export const EFFORT_ORDER = ["none", "off", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"];
-
-export const HARD_BY_DEFAULT = [
-  "debug_review",
-  "general_implementation",
-  "frontend_implementation",
-  "computer_use",
-  "exploration_analysis",
-  "research_packet",
-];
 
 export const ROUTE_FIT_PEERS = {
   "grok-bot": "claude-opus-5-5",

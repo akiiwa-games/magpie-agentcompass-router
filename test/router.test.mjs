@@ -17,10 +17,10 @@ import {
   isCandidatePinned,
   lookupCurveResponsiveness,
   namedRoute,
-  rankCandidates,
+  rankCandidates as rankProfile,
   resolveRealtimeEffort,
   responsivenessConfig,
-  selectBestRoute,
+  selectBestRoute as selectForProfile,
   splitEffortFromModelId,
   turnSecondsToResponsiveness,
 } from "../src/allocator.js";
@@ -46,14 +46,13 @@ import {
   computeSessionKey,
   evaluateProviderContinuation,
   firstWords,
-  isShortFollowupMessage,
   keepsEffort,
   sha256Hex,
   userSaidFromText,
 } from "../src/continuity.js";
 import {
   ROUTE_CARRIER_KEY,
-  onRequest as hookOnRequest,
+  onRequest as hooksOnRequest,
   onResponse as hookOnResponse,
 } from "../src/hooks.js";
 import {
@@ -62,9 +61,8 @@ import {
   DECISION_MODEL_ID,
   PROVIDER_ID,
   clearQuotasCache,
-  evaluateLevelsProbe,
   evaluateModelQuota,
-  handleSystemOneRequest,
+  handleSystemOneRequest as systemOneForState,
   loadLiveQuotas,
   normalizeQuotaSnapshot,
   orderSeatsByQuotaEconomics,
@@ -72,7 +70,7 @@ import {
 import {
   onAccount as mwOnAccount,
   onProvider as mwOnProvider,
-  onRequest as mwOnRequest,
+  onRequest as middlewareOnRequest,
   onResponse as mwOnResponse,
   strategies,
 } from "../src/middleware.js";
@@ -80,11 +78,7 @@ import {
   PROFILE_FLAGS,
   REALTIME_LOOP_QUESTION,
   TASK_PROFILE_SCHEMA,
-  capProfileText,
   extractRequestFacts,
-  inferKindFromObjective,
-  inferTaskProfile,
-  profileTask,
   validateProfile,
 } from "../src/profiler-core.js";
 import {
@@ -95,10 +89,26 @@ import {
   scoreTaskLive,
 } from "../src/scorer-live.js";
 
+import { answerRequest, answerSystemOne, classifierAnswer } from "./classifier-stub.mjs";
+
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
+// Routing starts from a task profile: these send a text the way a client does, with the classifier's answer for it.
+const answered = (task) => (task?.reasoning_depth || task?.profile ? task : { ...task, profile: classifierAnswer(task) });
+const rankCandidates = (task, options) => rankProfile(answered(task ?? { objective: "" }), options);
+const selectBestRoute = (task, options) => selectForProfile(answered(task ?? { objective: "" }), options);
+const hookOnRequest = async (body, ctx = {}) => {
+  answerRequest(body, ctx);
+  return hooksOnRequest(body, ctx);
+};
+const mwOnRequest = (body, ctx = {}) => {
+  answerRequest(body, ctx);
+  return middlewareOnRequest(body, ctx);
+};
+const handleSystemOneRequest = async (body, options = {}) => systemOneForState(answerSystemOne(body, options), options);
+
 test("1.1 Routine bounded bulk work selects lightweight model (gemini-3.8-flash-high) and penalizes expensive overqualification", () => {
-    const profile = inferTaskProfile({
+    const profile = classifierAnswer({
       objective: "Perform a mechanical batch rename of `foo_bar` to `fooBar` across the JSON fixtures using a uniform rule.",
     });
     assert.equal(profile.work_kind, "bounded_bulk_work");
@@ -118,7 +128,7 @@ test("1.1 Routine bounded bulk work selects lightweight model (gemini-3.8-flash-
   });
 
 test("1.2 Convergent single-module production coding selects gpt-6.1-sol via module_precision DNA", () => {
-    const profile = inferTaskProfile({
+    const profile = classifierAnswer({
       objective: "Implement a standalone self-contained LRU cache algorithm module in TypeScript with unit tests.",
     });
     assert.equal(profile.work_kind, "self_contained_code");
@@ -128,7 +138,7 @@ test("1.2 Convergent single-module production coding selects gpt-6.1-sol via mod
   });
 
 test("1.3 Coupled cross-module deadlock & invariant audit selects claude-opus-5-5 via global_rigor + anti_hallucination", () => {
-    const profile = inferTaskProfile({
+    const profile = classifierAnswer({
       objective:
         "Conduct a read-only security audit and cross-module deadlock / race condition root-cause review across the gateway subsystem.",
     });
@@ -143,7 +153,7 @@ test("1.3 Coupled cross-module deadlock & invariant audit selects claude-opus-5-
   });
 
 test("1.4 Open-ended divergent architecture ideation selects gemini-4-argon-high via divergence DNA (0.96)", () => {
-    const profile = inferTaskProfile({
+    const profile = classifierAnswer({
       objective:
         "Brainstorm and formulate a novel creative gameplay scheme and first-principles roadmap for an AI agent simulation game.",
       work_kind: "direction_reasoning",
@@ -157,7 +167,7 @@ test("1.4 Open-ended divergent architecture ideation selects gemini-4-argon-high
   });
 
 test("1.5 Frontier mathematical proof (reasoning_depth=4, floor=4.2) selects claude-opus-5-5", () => {
-    const profile = inferTaskProfile({
+    const profile = classifierAnswer({
       objective: "Provide a formal mathematical proof or refute the optimal-stopping theorem bound for this Markov chain.",
     });
     assert.equal(profile.reasoning_depth, 4);
@@ -167,7 +177,7 @@ test("1.5 Frontier mathematical proof (reasoning_depth=4, floor=4.2) selects cla
   });
 
 test("1.6 GUI computer-use task routes to gpt-6-astra (#1 GUI grounding) and excludes text-only models", () => {
-    const profile = inferTaskProfile({
+    const profile = classifierAnswer({
       objective: "Operate the desktop app GUI: click the Settings button, take a screenshot, and toggle the proxy switch.",
     });
     assert.equal(profile.work_kind, "computer_use");
@@ -179,7 +189,7 @@ test("1.6 GUI computer-use task routes to gpt-6-astra (#1 GUI grounding) and exc
     assert.ok(grok.excluded.includes("task needs visual input"), "text-only grok-4.7 must be excluded on visual/GUI work");
     assert.equal(ranked.selected.canonicalModel, "gpt-6-astra");
 
-    const visualReview = inferTaskProfile({
+    const visualReview = classifierAnswer({
       objective: "Compare screenshots of the login dialog and inspect the screenshot for layout misalignment.",
     });
     assert.equal(visualReview.work_kind, "visual_analysis");
@@ -207,7 +217,6 @@ test("2. Gateway Middleware (`magpie.middleware` [`moejs` 250ms]) and optional `
     agent: "claude-code",
     options: {
       gatewayTimeoutMs: 8000,
-      scorerType: "heuristic",
       candidateModels: ["claude-opus-5-5", "gpt-6.1-sol", "gemini-3.8-flash-high"],
     },
     state: {},
@@ -321,7 +330,7 @@ test("3.1 Live OpenAI-compatible scorer parses 10-field JSON profile and caches 
     assert.equal(fetchCalls, 1);
   });
 
-test("3.2 Timeout or HTTP failure gracefully falls back to deterministic twin without failing closed", async () => {
+test("3.2 Timeout or HTTP failure leaves no profile, and says why", async () => {
     clearProfileCache();
     const failingFetch = async () => {
       throw new Error("Simulated timeout");
@@ -335,13 +344,14 @@ test("3.2 Timeout or HTTP failure gracefully falls back to deterministic twin wi
         fetch: failingFetch,
       },
     );
-    assert.equal(res.meta.source, "heuristic_fallback");
-    assert.equal(res.profile.work_kind, "debug_review");
+    assert.equal(res.meta.source, "unavailable");
+    assert.equal(res.meta.reason, "Simulated timeout");
+    assert.equal(res.profile, null);
 });
 
 test("4. Native Magpie `/v1/systemone` Decision Handler (`handleSystemOneRequest`)", async () => {
-  // 4a. Test `jevLevelled` probe (`decide.go:310`)
-  const levelProbe = await handleSystemOneRequest({
+  // 4a. Test `jevLevelled` probe (`decide.go:310`): whether the labels are a scale is the classifier's to say
+  const probe = {
     model: DECISION_MODEL_ID,
     state: { kinds: ["简单日常", "常规开发", "复杂跨模块架构"] },
     questions: {
@@ -349,6 +359,22 @@ test("4. Native Magpie `/v1/systemone` Decision Handler (`handleSystemOneRequest
       work0: { type: "score" },
       work1: { type: "score" },
       work2: { type: "score" },
+    },
+  };
+  const noClassifier = await handleSystemOneRequest(probe);
+  assert.ok(noClassifier.answers.levels.noul < 0.5, "without a classifier the labels are plain kinds");
+  assert.equal(noClassifier.answers.work0, undefined);
+  assert.equal(noClassifier.agentcompass.routed, false);
+  const levelProbe = await handleSystemOneRequest(probe, {
+    allowExternalScorer: true,
+    scorerType: "jev",
+    jevBaseUrl: "http://127.0.0.1:9999",
+    fetch: async (_url, init) => {
+      assert.deepEqual(JSON.parse(init.body).state.kinds, probe.state.kinds);
+      return new Response(
+        JSON.stringify({ answers: { levels: { noul: 0.9 }, work0: { score: 0 }, work1: { score: 1 }, work2: { score: 2 } } }),
+        { status: 200 },
+      );
     },
   });
   assert.ok(levelProbe.answers.levels.noul >= 0.5, "difficulty scale intents must be recognized as levels");
@@ -401,7 +427,10 @@ test("4. Native Magpie `/v1/systemone` Decision Handler (`handleSystemOneRequest
     method: "POST",
     body: JSON.stringify({
       model: DECISION_MODEL_ID,
-      state: { turn: "Batch rename all `old_id` fields to `new_id` across fixtures." },
+      state: {
+        turn: "Batch rename all `old_id` fields to `new_id` across fixtures.",
+        profile: classifierAnswer("Batch rename all `old_id` fields to `new_id` across fixtures."),
+      },
       questions: {
         intent: {
           type: "choice",
@@ -484,7 +513,10 @@ test("4d. Decision provider registers the way Magpie's host lists, signs in and 
     method: "POST",
     body: JSON.stringify({
       model: DECISION_MODEL_ID,
-      state: { task: "Find the root cause of a deadlock across three services" },
+      state: {
+        task: "Find the root cause of a deadlock across three services",
+        profile: classifierAnswer("Find the root cause of a deadlock across three services"),
+      },
       questions: { work_kind: { type: "choice" }, reasoning_depth: { type: "score" } },
     }),
   });
@@ -515,7 +547,6 @@ test("5. Pool strategy `agentcompass` / `agentcompass-pure` orders non-resting l
 });
 
 test("6. Magpie Plugin Market & Registry Contract (`package.json`, `icon`, `options`, `registry.json`)", async () => {
-  assert.equal(profileTask, inferTaskProfile);
   const pkg = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, "package.json"), "utf8"));
   assert.ok(["agentcompass", "@magpie-community/gateway-agentcompass"].includes(pkg.name));
   assert.equal(pkg.magpie.name, "AgentCompass");
@@ -659,7 +690,7 @@ test("7.1 Scenario 1 (`why: first` & subagent isolation): New session runs inten
         "x-session-id": "sess-main-1",
         "x-claude-code-agent-id": "subagent-haiku-worker",
       },
-      options: { continuityStore: store, now: t0 + 1000, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 + 1000 },
     });
 
     // Main session must still hold `claude-opus-5-5`, unaffected by subagent
@@ -693,7 +724,6 @@ test("7.2 Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected 
       options: {
         continuityStore: store,
         now: t0,
-        prefer_local_heuristic: true,
         allowUnconstrainedCatalog: true,
       },
     };
@@ -780,7 +810,7 @@ test("7.2 Scenario 2 (`why: turn` mid-turn lock): Tool results & agent-injected 
     assert.equal(ctx2b.state.route.continuation.why, "turn");
   });
 
-test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV cache and short follow-up nudges hold model and ratchet effort", async () => {
+test("7.3 Scenario 3 (`why: cache` + `keepsEffort`): Warm KV cache holds model and ratchets effort, and a short turn is classified like any other", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
     let scorerCalls = 0;
@@ -800,7 +830,7 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
       protocol: "anthropic",
       headers: { "x-session-id": "sess-warm-cache" },
       state: {},
-      options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 },
     };
     await hookOnRequest(turn1, ctx1);
     assert.equal(ctx1.state.route.modelWithEffort, "claude-opus-5-5:xhigh");
@@ -851,13 +881,9 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
     assert.equal(ctx2.state.route.continuation.why, "cache");
     assert.equal(ctx2.state.route.modelWithEffort, "claude-opus-5-5:xhigh");
 
-    // Turn 3 (short follow-up "继续" / "ok go ahead" even when token count < 1024):
-    assert.equal(isShortFollowupMessage("继续"), true);
-    assert.equal(isShortFollowupMessage("好的，按这个改"), true);
-    assert.equal(isShortFollowupMessage("ok, go ahead"), true);
-    assert.equal(isShortFollowupMessage("lgtm"), true);
-
-    // Verify `/v1/systemone` (`handleSystemOneRequest`) short follow-up inherits `previous_message_kind` & ratchets effort with 0 scorer calls
+    // `/v1/systemone`: nothing in the text says "follow-up". The classifier sees the previous turn and answers, and
+    // the effort still ratchets on the same kind.
+    let classified = null;
     const sysOneFollowup = await handleSystemOneRequest(
       {
         model: DECISION_MODEL_ID,
@@ -887,18 +913,23 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
         allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
-        fetch: async () => {
+        useCache: false,
+        fetch: async (_url, init) => {
           scorerCalls += 1;
-          throw new Error("Short follow-up in /v1/systemone must not call external scorer!");
+          classified = JSON.parse(JSON.parse(init.body).messages[1].content);
+          return new Response(
+            JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ...classifierAnswer("Audit the distributed lock manager."), work_kind: "debug_review" }) } }] }),
+            { status: 200 },
+          );
         },
       }
     );
-    assert.equal(scorerCalls, 0);
+    assert.equal(scorerCalls, 1);
+    assert.equal(classified.previous_user, "Audit the distributed lock manager.");
     assert.equal(sysOneFollowup.answers.intent.choice, "debug_review");
-    assert.ok(sysOneFollowup.answers.intent.confidence >= 0.9);
-    assert.equal(sysOneFollowup.answers.effort.score, 2.0, "Effort must stay ratcheted at high (2.0)");
-    assert.equal(sysOneFollowup.agentcompass.continuation.held, true);
-    assert.equal(sysOneFollowup.agentcompass.continuation.why, "followup");
+    assert.ok(sysOneFollowup.answers.effort.score >= 2.0, "Effort must stay ratcheted at high or above");
+    assert.equal(sysOneFollowup.agentcompass.continuation.held, false);
+    assert.equal(sysOneFollowup.agentcompass.continuation.why, "reclassified");
 
     // Verify `keepsEffort` directly: warm session on `xhigh` never drops to `low`
     const sessionSnap = store.get(ctx2.state.route.continuation.sessionKey, t0 + 2 * 60 * 1000);
@@ -944,7 +975,7 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
       protocol: "chat",
       session_id: sessKeyVis,
       state: {},
-      options: { continuityStore: store, now: t0 + 30_000, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 + 30_000 },
     };
     await hookOnRequest(visReq, ctxVis);
     assert.equal(ctxVis.state.route.continuation.held, false);
@@ -985,7 +1016,7 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
       protocol: "chat",
       headers: { "x-session-id": sessKeyTier },
       state: {},
-      options: { continuityStore: store, now: t0 + 20_000, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 + 20_000 },
     };
     await hookOnRequest(tierReq, ctxTier);
     assert.equal(ctxTier.state.route.continuation.held, false);
@@ -1020,7 +1051,7 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
       protocol: "chat",
       headers: { "x-session-id": "sess-ctx-outgrow" },
       state: {},
-      options: { continuityStore: store, now: t0 + 10_000, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 + 10_000 },
     };
     await hookOnRequest(outgrownReq, ctxOutgrown);
     assert.equal(ctxOutgrown.state.route.continuation.held, false);
@@ -1051,7 +1082,7 @@ test("7.4 Scenario 4 (`why: capability_outgrown` / `outgrown` / `worn`): Modalit
     assert.equal(wornCheck.why, "worn");
   });
 
-test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/compact` re-evaluates and cleanly downshifts on routine work", async () => {
+test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or a token drop re-evaluates and cleanly downshifts on routine work", async () => {
     const store = new SessionContinuityStore();
     const t0 = 1_700_000_000_000;
 
@@ -1094,7 +1125,6 @@ test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/com
       options: {
         continuityStore: store,
         now: t0 + 6 * 60 * 1000,
-        prefer_local_heuristic: true,
       },
     };
     await hookOnRequest(routineFollowupReq, ctxCold);
@@ -1127,7 +1157,6 @@ test("7.5 Scenario 5 (`why: cold` & `why: compacted`): Expired KV cache or `/com
       options: {
         continuityStore: store,
         now: t0 + 11 * 60 * 1000, // Only 1 minute later, but tokens dropped from 20k -> 2k!
-        prefer_local_heuristic: true,
       },
     };
     await hookOnRequest(compactedReq, ctxCompacted);
@@ -1155,7 +1184,7 @@ test("7.6 Scenario 6 (`why: provider_unhealthy`): Upstream 429/502 error in `onR
       protocol: "chat",
       headers: { "x-session-id": "sess-failover" },
       state: {},
-      options: { continuityStore: store, now: t0, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 },
     };
 
     await hookOnRequest(req, ctx);
@@ -1467,7 +1496,6 @@ test("8.4 Sticky session failover on quota exhaustion (`why: quota_exhausted`) &
           magpieConfigDir: tmpDir,
           candidateModels: ["gpt-5.3-codex", "claude-sonnet-4-6"],
           now: t0 + 15_000,
-          prefer_local_heuristic: true,
         },
       };
       await hookOnRequest(req, ctxQuota);
@@ -1521,13 +1549,7 @@ test("8.6 Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-acco
       frontier: 3.5,
     });
 
-    // Verify multi-task detection (`MULTI_TASK_MARK_RE`) and structured-only profile (no free-text `reason`)
-    const multiProfile = inferTaskProfile({
-      objective: "Task 1: Refactor the auth middleware.\nTask 2: Build the billing CSV exporter.",
-    });
-    assert.equal(multiProfile.multi_task, true);
-    assert.equal(multiProfile.task_count, "2");
-    assert.equal("reason" in multiProfile, false, "Structured task profile must omit free-text reason");
+    // Verify structured-only profile (no free-text `reason`)
     assert.equal(SCORER_SYSTEM_PROMPT.includes("- reason:"), false, "SCORER_SYSTEM_PROMPT must not request free-text reason");
 
     // Verify `parseJevScorerAnswer` produces structured-only profile without `reason`
@@ -1608,18 +1630,6 @@ test("8.6 Strict AgentCompass Main-Repo Parity (`allocator.py` + `reference-acco
     assert.deepEqual(DEFAULT_SCORING_POLICY.critical_headroom_by_difficulty, {
       frontier: 0.1,
     });
-
-    // D (54bb51e): computer_use action phrases, CODE_FILE_RE, and translation-of narrowing
-    for (const prompt of [
-      "Fix the keyboard shortcuts in editor.py.",
-      "Fix mouse event handler in app.ts",
-      "Fix translation.py.",
-      "Debug translation pipeline",
-      "修复翻译模块的 bug",
-    ]) {
-      assert.equal(inferKindFromObjective(prompt), "debug_review", `Expected debug_review for: ${prompt}`);
-    }
-    assert.equal(inferKindFromObjective("用鼠标点击设置里的保存"), "computer_use");
 
     // A3 (54bb51e): origin = max(floor, ability_score_origin[d]) so raising floor above origin does not hand out free ability score
     const raisedFloorRanked = rankCandidates(
@@ -1764,30 +1774,15 @@ test("8.11 `ability_score_origin` above the floor decides the pick (hard: origin
   assert.equal(`${ranked.selected.canonicalModel}:${ranked.selected.effort}`, "gpt-6-astra:medium");
 });
 
-test("8.12 Work-kind and GUI-fact guards from AgentCompass 54bb51e (v0.3.8)", () => {
-  // CODE_FILE_RE guard: an action phrase about a code file is not computer use
-  assert.equal(inferKindFromObjective("Click the Save button handler in settings.tsx is broken"), "general_implementation");
-  // Bare "keyboard" / "mouse" are not computer-use phrases
-  assert.equal(inferKindFromObjective("Add keyboard shortcuts to the settings dialog"), "general_implementation");
-  assert.equal(inferKindFromObjective("Add mouse wheel zoom to the chart"), "general_implementation");
-  // "translation of", not "translation"
-  assert.equal(inferKindFromObjective("Add a translation layer between the API and the DB"), "general_implementation");
-  assert.equal(inferKindFromObjective("Write a translation of the README into Japanese"), "text_in_text_out");
-  // A named code file skips text_in_text_out even with no debug word
-  assert.equal(inferKindFromObjective("Translate the error strings in i18n.ts"), "general_implementation");
-  assert.equal(inferKindFromObjective("Translate the release notes into Japanese"), "text_in_text_out");
-  // Phrases v0.3.8 does not have are not computer use on their own
-  for (const prompt of ["Take a screenshot of the report", "Capture a screenshot for the docs", "截取屏幕上的报表", "截屏操作说明"]) {
-    assert.notEqual(inferKindFromObjective(prompt), "computer_use", prompt);
-  }
-
-  // hasComputerUse: COMPUTER_USE_PHRASES with the code-file guard, not the older GUI_WORDS
-  const facts = (text) => extractRequestFacts({ messages: [{ role: "user", content: text }] }, { protocol: "chat" });
-  assert.equal(facts("Click the Save button in the desktop app and confirm the dialog closes").hasComputerUse, true);
-  assert.equal(facts("Click the Save button handler in settings.tsx is broken").hasComputerUse, false);
-  for (const text of ["Add keyboard shortcuts to the desktop app", "Open the gui and check the desktop app", "修改桌面版的键盘快捷键"]) {
+test("8.12 hasComputerUse comes from structured fields, never from the turn's words", () => {
+  const facts = (text, extra = {}, ctx = { protocol: "chat" }) =>
+    extractRequestFacts({ messages: [{ role: "user", content: text }], ...extra }, ctx);
+  for (const text of ["Click the Save button in the desktop app and confirm the dialog closes", "用鼠标点击设置里的保存"]) {
     assert.equal(facts(text).hasComputerUse, false, text);
   }
+  assert.equal(facts("x", { needs: { gui: true } }).hasComputerUse, true);
+  assert.equal(facts("x", { profile: { needs_gui: true } }).hasComputerUse, true);
+  assert.equal(facts("x", {}, { profile: { needs_gui: true } }).hasComputerUse, true);
 });
 
 test("8.13 Continuity: only a computer-use turn outgrows a model without GUI (`capability_outgrown` / `gui_capability_required`)", async () => {
@@ -1799,7 +1794,7 @@ test("8.13 Continuity: only a computer-use turn outgrows a model without GUI (`c
       protocol: "chat",
       session_id: "sess-gui",
       state: {},
-      options: { continuityStore: store, now: t0 + 30_000, prefer_local_heuristic: true },
+      options: { continuityStore: store, now: t0 + 30_000 },
     };
     await hookOnRequest({ model: "agentcompass/auto", session_id: "sess-gui", messages: [{ role: "user", content: text }] }, ctx);
     return ctx.state.route;
@@ -2149,7 +2144,7 @@ test("9.5 PR #670 Review Guard: Zero implicit external scorer calls and zero par
       }
     );
     assert.equal(globalFetchCalled, false);
-    assert.equal(res1.meta.source, "heuristic_twin");
+    assert.equal(res1.meta.source, "unavailable");
 
     const res2 = await scoreTaskLive(
       { objective: "Design a distributed consensus protocol." },
@@ -2160,7 +2155,7 @@ test("9.5 PR #670 Review Guard: Zero implicit external scorer calls and zero par
       }
     );
     assert.equal(globalFetchCalled, false);
-    assert.equal(res2.meta.source, "heuristic_twin");
+    assert.equal(res2.meta.source, "unavailable");
   } finally {
     globalThis.fetch = origFetch;
   }
@@ -2348,7 +2343,7 @@ test("9.8 PR #670 Round 2 Guard: `options.fetch` alone never enables external sc
     }
   );
   assert.equal(fetchCalled, false);
-  assert.equal(scoreRes.meta.source, "heuristic_twin");
+  assert.equal(scoreRes.meta.source, "unavailable");
 
   const hookReq = {
     model: "agentcompass",
@@ -2367,7 +2362,7 @@ test("9.8 PR #670 Round 2 Guard: `options.fetch` alone never enables external sc
   assert.equal(fetchCalled, false);
 });
 
-test("9.9 PR #670 Round 2 & 3 Guard: Single-pass bounded work (`scannedChars`, `extractedTurns`, `capProfileText`) as body grows", () => {
+test("9.9 PR #670 Round 2 & 3 Guard: Single-pass bounded work (`scannedChars`, `extractedTurns`) as body grows", () => {
   const messages = [];
   const hugeLogChunk = "x".repeat(50_000) + "\n<system-reminder>hook context reminder</system-reminder>\n";
   for (let i = 0; i < 25; i++) {
@@ -2410,7 +2405,7 @@ test("9.9 PR #670 Round 2 & 3 Guard: Single-pass bounded work (`scannedChars`, `
     messages,
   };
 
-  // 1. Verify work-boundedness invariants directly (raising MAX_PROFILE_CHARS, MAX_NOISE_STRIP_CHARS, or MAX_USER_TURN_CHARS turns these red)
+  // 1. Verify work-boundedness invariants directly (raising MAX_NOISE_STRIP_CHARS or MAX_USER_TURN_CHARS turns these red)
   const facts = extractRequestFacts(req, { protocol: "messages" });
   assert.ok(
     facts.extractedTurns <= 4,
@@ -2423,11 +2418,6 @@ test("9.9 PR #670 Round 2 & 3 Guard: Single-pass bounded work (`scannedChars`, `
   assert.ok(
     facts.objective.length <= 4_001,
     `Expected extracted objective capped at <= 4,001 chars (MAX_USER_TURN_CHARS), got ${facts.objective.length}`
-  );
-  const cappedProfileInput = capProfileText("audit concurrency ".repeat(4_000));
-  assert.ok(
-    cappedProfileInput.length <= 4_001,
-    `Expected capProfileText output bounded at <= 4,001 chars (MAX_PROFILE_CHARS), got ${cappedProfileInput.length}`
   );
 
   // 2. Generous smoke ceiling (200ms) for end-to-end `mwOnRequest`
@@ -2473,7 +2463,7 @@ test("9.9 PR #670 Round 2 & 3 Guard: Single-pass bounded work (`scannedChars`, `
 
 
 
-test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-1 route, the tool loop and the short follow-up", () => {
+test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-1 route, the tool loop and the next turn", () => {
   // Magpie hands each request a moejs runtime from a sync.Pool, and middleware has no storage across requests
   // (internal/middleware/middleware.go). Each store below is one runtime's module state; Magpie's ctx carries no
   // headers, so the session is known only by its body.
@@ -2492,7 +2482,7 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
     "deepseek-v4.1-flash-free",
   ].map((m) => `upstream/${m}`);
   const t0 = 1_700_000_000_000;
-  const runtime = (store, now) => ({ protocol: "chat", state: {}, options: { candidateModels, continuityStore: store, now } });
+  const runtime = (store, now, profile) => ({ protocol: "chat", state: {}, ...(profile ? { profile } : {}), options: { candidateModels, continuityStore: store, now } });
   const first = {
     role: "user",
     content: "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.",
@@ -2515,13 +2505,15 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
 
   // The tool loop and the follow-up each land on a runtime that never saw the session
   const loopB = mwOnRequest({ model: "agentcompass/auto", messages: toolLoop }, runtime(new SessionContinuityStore(), t0 + 1_000));
-  const followB = mwOnRequest({ model: "agentcompass/auto", messages: followup }, runtime(new SessionContinuityStore(), t0 + 2_000));
+  // A short turn is a turn like any other: the classifier, which sees the previous turn, answers for it
+  const sameTask = classifierAnswer(first.content);
+  const followB = mwOnRequest({ model: "agentcompass/auto", messages: followup }, runtime(new SessionContinuityStore(), t0 + 2_000, sameTask));
   // ... and on the runtime that did
-  const followA = mwOnRequest({ model: "agentcompass/auto", messages: followup }, runtime(storeA, t0 + 2_000));
+  const followA = mwOnRequest({ model: "agentcompass/auto", messages: followup }, runtime(storeA, t0 + 2_000, sameTask));
 
   assert.equal(loopB.model, turn1.model, "a fresh runtime holds the turn's model and effort in the tool loop");
-  assert.equal(followB.model, turn1.model, "a fresh runtime holds the model and effort on the short follow-up");
-  assert.equal(followA.model, turn1.model, "the runtime that routed turn 1 holds it on the follow-up");
+  assert.equal(followB.model, turn1.model, "a fresh runtime routes the next turn the same for the same answer");
+  assert.equal(followA.model, turn1.model, "the runtime that routed turn 1 agrees on the next turn");
 
   // A runtime whose record is of an earlier turn doesn't take its record for the current turn's
   const storeC = new SessionContinuityStore();
@@ -2595,7 +2587,6 @@ test("10.1 v0.4.1 Schema & validateProfile: `realtime_loop` is in schema, scorer
         realtime_loop: { type: "noul", instructions: REALTIME_LOOP_QUESTION },
       },
     },
-    { scorerType: "heuristic" },
   );
   assert.equal(sysOneRes.answers.realtime_loop.noul, 0.95);
 });
@@ -2692,7 +2683,7 @@ test("10.2 v0.4.1 Classifier missing `realtime_loop` field defaults to `false` (
   assert.equal(trueRes.profile.realtime_loop, true);
 
   // Jev parser: missing `realtime_loop` defaults to false; explicit `noul >= 0.5` parses as true
-  const fallback = inferTaskProfile({ objective: "Implement real-time WebSocket polling." });
+  const fallback = {};
   const baseJevAnswers = {
     work_kind: { choice: "general_implementation" },
     interaction_style: { choice: "engineering" },
@@ -2715,45 +2706,11 @@ test("10.2 v0.4.1 Classifier missing `realtime_loop` field defaults to `false` (
   assert.equal(jevTrue.realtime_loop, true);
 });
 
-test("10.3 v0.4.1 Highest Principle: heuristic `inferTaskProfile` returns `realtime_loop: false` on ALL prompts (zero keyword heuristics) and `realtime_loop=true` never auto-promotes `needs_gui`/`needs_visual`/`local_only`", () => {
-  const contrastivePrompts = [
-    // Live observe-act prompts (which ONLY the LLM classifier marks true; heuristic must still output false!)
-    "打开游戏客户端，帮我把今日日常任务、体力副本和公会签到清完，卡关了就截图看状态调整阵容继续打。",
-    "在手机模拟器里挂机刷活动关卡，每局结束后点再次挑战，体力不够就吃体力药，掉落金装时截图保存。",
-    "盯着 12306 候补和余票页面，一放出今晚 G20 二等座就立刻下单锁定席位。",
-    "守着教务系统选课页面，一旦《机器学习导论》有人退课出现余量，马上点选课并提交确认。",
-    "盯着今晚 8 点秒杀页面，倒计时归零按钮变红的瞬间立刻点击抢购并完成提交。",
-    "持续轮询线上抢号接口，一旦返回可预约时段就立即发请求锁号并把结果回报。",
-    "连接测试盘实时行情流，盯盘观察五档盘口变化，触发价差阈值时立刻下限价单并根据成交回报撤补单。",
-    // Lookalike software engineering / analysis prompts
-    "帮我写一个 12306 自动抢票脚本，支持配置车次、席别和候补监控，带单元测试。",
-    "修复抢课脚本里选课接口返回 429 后没有退避重试的 bug，并补测试。",
-    "设计并实现一个实时看盘前端面板，展示 K 线、五档盘口和逐笔成交动画。",
-    "给后台管理系统加一个每 5 秒轮询任务状态并自动刷新表格的逻辑。",
-    "排查一下为什么客户端主循环在等待服务器响应时会卡顿 3 秒。",
-    "分析昨晚挂机脚本的运行日志，统计每局耗时、掉线次数和体力消耗异常的原因。",
-    "修复秒杀活动页面的倒计时弹窗样式错位问题。",
-    "打开系统设置看一眼当前代理端口是多少，截图发我。",
-  ];
-
-  for (const prompt of contrastivePrompts) {
-    const p = inferTaskProfile({ objective: prompt });
-    assert.equal(
-      p.realtime_loop,
-      false,
-      `inferTaskProfile must NEVER use keywords to set realtime_loop=true (failed on: ${prompt})`,
-    );
-  }
-
-  // Explicit caller `realtime_loop: true` or `needs.realtime_loop: true` is respected
-  const explicitTask = inferTaskProfile({
-    objective: "Poll the reservation API and lock the slot immediately when available.",
-    work_kind: "tool_execution",
+test("10.3 v0.4.1 `realtime_loop` is the classifier's or the caller's, and `realtime_loop=true` never auto-promotes `needs_gui`/`needs_visual`/`local_only`", () => {
+  const explicitTask = rankCandidates({
+    profile: { ...REALTIME_BASE_PROFILE, needs_gui: false, needs_visual: false, local_only: false },
     realtime_loop: true,
-    local_only: false,
-    needs_gui: false,
-    needs_visual: false,
-  });
+  }).task.profile;
   assert.equal(explicitTask.realtime_loop, true);
   // realtime_loop=true must NOT auto-promote needs_gui, needs_visual, or local_only
   assert.equal(explicitTask.needs_gui, false, "realtime_loop=true must not auto-set needs_gui");
@@ -3099,7 +3056,7 @@ test("10.8 v0.4.1 Non-realtime routing invariance: `realtime_loop: false` leaves
   const { responsiveness: _unusedRespPolicy, ...strippedPolicy } = DEFAULT_SCORING_POLICY;
 
   for (const input of testObjectives) {
-    const profile = inferTaskProfile(input);
+    const profile = classifierAnswer(input);
     assert.equal(profile.realtime_loop, false);
 
     const currentRanked = rankCandidates(profile);
@@ -4194,7 +4151,7 @@ test("10.19 Round-2 M5 & m2: User pin canonicalization matches aliases/prefixes/
   assert.equal(smuggledRes.modelWithEffort, "claude-sonnet-5-5:medium");
 });
 
-test("10.20 Round-2 m1, m3, m4, m7: Strict boolean `realtime_loop` & non-object `body.needs`, prefix-invariant `bundleHarness`, case-insensitive effort, and `inferTaskProfile` origin/main parity", async () => {
+test("10.20 Round-2 m1, m3, m4: Strict boolean `realtime_loop` & non-object `body.needs`, prefix-invariant `bundleHarness`, and case-insensitive effort", async () => {
   // m1: Non-object body.needs does not throw; non-boolean realtime_loop ("false", 0, null) is never coerced to true
   for (const badNeeds of ["visual", 1, null, true, []]) {
     const facts = extractRequestFacts({
@@ -4225,9 +4182,8 @@ test("10.20 Round-2 m1, m3, m4, m7: Strict boolean `realtime_loop` & non-object 
 
   for (const falsyNonBool of ["false", "0", 0, null, undefined, {}, []]) {
     assert.equal(extractRequestFacts({ messages: [], realtime_loop: falsyNonBool }).realtime_loop, undefined);
-    assert.equal(inferTaskProfile({ objective: "test", realtime_loop: falsyNonBool }).realtime_loop, false);
     const liveRes = await scoreTaskLive({ objective: "test", realtime_loop: falsyNonBool }, { allowExternalScorer: false });
-    assert.equal(liveRes.profile.realtime_loop, false);
+    assert.equal(liveRes.profile, null);
   }
 
   // m3: bundleHarness inspects leaf model name so provider prefix never changes harness inference
@@ -4267,27 +4223,4 @@ test("10.20 Round-2 m1, m3, m4, m7: Strict boolean `realtime_loop` & non-object 
     assert.equal(c.eligible, false, `claude-opus-5-5 with effort=${rawEff} on antigravity-resilient must be < 0.50 and excluded`);
   }
 
-  // m7: inferTaskProfile preserves origin/main behavior for needs_gui / needs_visual / local_only
-  const pGuiFalseOnCu = inferTaskProfile({
-    objective: "click the settings button in the GUI",
-    work_kind: "computer_use",
-    needs: { gui: false },
-  });
-  assert.equal(pGuiFalseOnCu.needs_gui, true);
-
-  const pFlatNeedsGui = inferTaskProfile({
-    objective: "fix the bug",
-    needs_gui: true,
-  });
-  assert.equal(pFlatNeedsGui.needs_gui, false);
-  assert.equal(pFlatNeedsGui.needs_visual, false);
-
-  const pVisualOverride = inferTaskProfile({
-    objective: "fix the bug",
-    needs: { visual: false },
-    hasVisualInput: true,
-  });
-  assert.equal(pVisualOverride.needs_visual, true);
 });
-
-

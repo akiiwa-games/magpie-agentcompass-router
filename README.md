@@ -4,6 +4,8 @@ A [Magpie](https://github.com/yetone/magpie) gateway plugin powered by [AgentCom
 
 By default it runs synchronously inside Magpie's `moejs` gateway middleware (`magpie.middleware`) in under 1 ms with zero network calls, and optionally registers an on-demand Magpie Decision Provider (`agentcompass/agentcompass-systemone`, `/v1/systemone`) for Routing Groups.
 
+**It routes on a classifier's structured answer, never on the words of a task.** Without a task profile a request is not routed: see [Without a classifier](#without-a-classifier).
+
 ## Quickstart
 
 ### 1. Install
@@ -47,6 +49,7 @@ magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","clau
 - Requests to `agentcompass` or `agentcompass/*` rewrite `body.model` to `<targetModel>:<targetEffort>` (which Magpie's gateway splits natively) and set protocol-specific effort fields (`reasoning_effort`, `reasoning.effort`, `output_config.effort`).
 - If a virtual model (`agentcompass` / `agentcompass/*`) is requested without `candidateModels` or `defaultModel`, the middleware rejects the call with HTTP 400 (`agentcompass: set candidateModels in the plugin's options`) rather than guessing models.
 - If `routeAllModels: true` is set without `candidateModels`, concrete model names are kept as-is and only the reasoning effort is injected.
+- `moejs` has no network, so **the middleware cannot call a classifier**: it routes only a request that brings its profile (`body.profile`, see below). Every other request is forwarded unrouted. To have requests classified, use Mode B with a scorer.
 
 ### 3. Account-pool seat strategy (`routings`)
 
@@ -64,7 +67,34 @@ magpie plugin list   # shows: agentcompass (AgentCompass, 1 models)  signed in
 magpie group set <group> effort=auto classifier=agentcompass/agentcompass-systemone
 ```
 
+Give it a classifier model, or it answers `none of these` on every turn:
+
+```sh
+magpie plugin options <plugin-spec> '{"enableDecisionProvider": true, "allowExternalScorer": true, "scorer": {"kind": "openai_compatible", "baseUrl": "http://127.0.0.1:4096/v1", "apiKey": "<key>", "model": "gemini-3.8-flash-high"}}'
+```
+
+A group's intent or level is answered directly when its label is exactly the route's `work_kind`, `difficulty` or model. Any other label is the operator's own words, and the classifier is asked which one fits (one more call on that turn).
+
 *(Requires plugin `0.1.1+`; `0.1.0` did not register the `auth` hook required by Magpie's provider list — see [issue #1](https://github.com/akiiwa-games/magpie-agentcompass-router/issues/1)).*
+
+### Without a classifier
+
+Where a request gets its task profile, in order:
+
+1. The caller: `ctx.state.profile`, `ctx.profile` or `body.profile` (`state.task.profile` / `state.profile` on `/v1/systemone`), with the schema's integer fields present (`divergence` may be left out). The middleware removes `body.profile` before the upstream sees it. A profile that does not validate counts as none (`invalid_caller_profile`).
+2. The classifier (`allowExternalScorer: true` and a `scorer`), from `src/hooks.js` and `/v1/systemone`. The middleware can't reach one.
+
+With neither, or when the classifier fails or times out, **there is no routing decision and no guess**, and no error either:
+
+| Entry | What the request does | Where it says so |
+|---|---|---|
+| Middleware (Mode A) | Goes on with `body.model` as the client sent it, with no effort added. A virtual name (`agentcompass/auto`) becomes `defaultModel` if one is set; otherwise it stays, and `onProvider` takes the model of the provider Magpie picked, if Magpie gets that far | `ctx.state.agentcompass`, Magpie's log (`agentcompass: 未路由：分类不可用 (<reason>)`), and an `agentcompass` field on a JSON reply |
+| Hooks | No `ctx.state.route`, so the middleware above decides | `ctx.state.agentcompass`, the log |
+| `/v1/systemone` (Mode B) | `intent` / `level` answer `none of these`, so the group's fallback rule applies; no `effort`. The levels probe answers "not a scale" | `agentcompass: { routed: false, notice, reason }` in the response, the log |
+
+An unrouted request records nothing in the session store, so it starts no session that later turns would hold. A virtual model with neither `candidateModels` nor `defaultModel` is still refused with HTTP 400: that is a configuration error, not a classification one.
+
+**What this changes if you upgrade with no classifier configured:** requests to `agentcompass` / `agentcompass/*` are no longer sent to a model picked from `candidateModels`. Set `defaultModel` so that they still reach a model of your choice, or configure Mode B with a scorer, or have your client send `body.profile`. `scorerType: "heuristic"` and `prefer_local_heuristic` no longer exist and count as no classifier.
 
 ### Names by install source
 
@@ -84,11 +114,12 @@ Run `magpie plugin list` to inspect the exact names on your machine.
 
 ```text
 Request ──▶ Session continuity check (src/continuity.js)
-             ├─ hold current <model>:<effort> on tool loops, warm KV cache, or short follow-ups
+             ├─ hold current <model>:<effort> on tool loops or warm KV cache
              └─ otherwise:
-                  10D task profiler (src/profiler-core.js)
-                    ──▶ 7D capability + 3D Model DNA + quota allocator (src/allocator.js, src/quota.js)
-                    ──▶ <targetModel>:<targetEffort>
+                  task profile from the caller or the classifier (src/scorer-live.js)
+                    ├─ none: not routed, the client's model goes on as it asked
+                    └─ 7D capability + 3D Model DNA + quota allocator (src/allocator.js, src/quota.js)
+                         ──▶ <targetModel>:<targetEffort>
 ```
 
 ### 1. Session continuity (`src/continuity.js`)
@@ -96,13 +127,13 @@ Request ──▶ Session continuity check (src/continuity.js)
 The router avoids re-classifying every HTTP request and preserves prompt caches and reasoning signatures:
 
 - **In-turn tool loops (`within: true` → `why: "turn"`)**: When the latest message is a tool result (`role: "tool"`, `tool_result`, `function_call_output`) or an injected system reminder with no new user text, the session's `<model>:<effort>` is held unconditionally.
-- **Warm KV cache & short follow-ups (`why: "cache" | "followup"`)**: While a session's prefix cache is warm (`5m` for Anthropic/Gemini, `1h` for ChatGPT/Codex Responses and DeepSeek) or when the user sends a short continuation nudge (`"继续"`, `"go ahead"`, `"lgtm"`), the current model is kept and `keepsEffort` prevents effort from dropping mid-session.
-- **History replay across pooled VMs (`replayedState`)**: Magpie runs each request on a pooled `moejs` runtime (`sync.Pool`). When a follow-up or tool loop lands on a runtime that did not serve the earlier turn, the middleware slices the anchor turn out of the resent conversation history and replays its decision (up to 4 turns back) so every runtime produces the same route.
-- **Re-route triggers**: Re-evaluates only on `first` (new session), `provider_unhealthy` (upstream `status >= 400` recorded by `onResponse`), `quota_exhausted`, `capability_outgrown` (new visual/GUI input or complex work on a light model), `outgrown` (input exceeds 95% of `context_window`), `worn` (`compacted + live >= 2M` tokens), or `cold` / `compacted`.
+- **Warm KV cache (`why: "cache"`)**: While a session's prefix cache is warm (`5m` for Anthropic/Gemini, `1h` for ChatGPT/Codex Responses and DeepSeek), the current model is kept and `keepsEffort` prevents effort from dropping mid-session. A short turn (`"继续"`) is a turn like any other: nothing reads its words, and if the cache is cold it is classified with the previous turn beside it.
+- **History replay across pooled VMs (`replayedState`)**: Magpie runs each request on a pooled `moejs` runtime (`sync.Pool`). When a later turn or tool loop lands on a runtime that did not serve the earlier turn, the middleware slices the anchor turn out of the resent conversation history and replays its decision (up to 4 turns back) so every runtime produces the same route. A request with no profile has nothing to replay.
+- **Re-route triggers**: Re-evaluates only on `first` (new session), `provider_unhealthy` (upstream `status >= 400` recorded by `onResponse`), `quota_exhausted`, `capability_outgrown` (an image part; `needs.gui: true` or a profile with `needs_gui` on a model without GUI; a profile with `reasoning_depth >= 3` on a light model), `outgrown` (input exceeds 95% of `context_window`), `worn` (`compacted + live >= 2M` tokens), `compacted` (the request's tokens dropped by more than half), or `cold`. Holds run before the classifier, so a warm session on a light model does not move on the words of a harder turn unless the caller's profile says so.
 
-### 2. Task profiling & Model DNA allocation (`src/profiler-core.js`, `src/allocator.js`)
+### 2. Task profiling & Model DNA allocation (`src/profiler-core.js`, `src/scorer-live.js`, `src/allocator.js`)
 
-Single-pass bounded extraction over Anthropic `/v1/messages`, OpenAI `/v1/responses`, `/v1/chat/completions`, and Gemini payloads builds a task profile (`work_kind` across 16 canonical routes, `difficulty`, `reasoning_depth`, `code_complexity`, `context_scale`, `divergence`, `hallucination_risk`, `error_cost`, `needs_visual`, `needs_gui`, `realtime_loop`).
+Single-pass bounded extraction over Anthropic `/v1/messages`, OpenAI `/v1/responses`, `/v1/chat/completions`, and Gemini payloads gives the structured facts of a request: turns, tool loops, image and video content parts (never words like "screenshot"), and token estimates. The task profile comes from the classifier or the caller (`work_kind` across 16 canonical routes, `difficulty`, `reasoning_depth`, `code_complexity`, `context_scale`, `divergence`, `hallucination_risk`, `error_cost`, `needs_visual`, `needs_gui`, `realtime_loop`). `test/no-hardcode.test.mjs` holds this to it: a static scan of `src/`, and the same answer routed across a corpus of trigger words.
 
 Each `<model, effort>` pair in `candidateModels` is scored on:
 
@@ -113,12 +144,12 @@ pure_intent_score(m, e) = fit_score(m, e) - overqual_penalty(m, e) - effort_sele
 - **7D convergent fit**: Weighted match over `reasoning`, `code`, `context`, `tool_use`, `rigor`, `speed`, and `autonomy`, scaled by per-model `EFFORT_CURVES` (`minimal` / `low` / `medium` / `high` / `xhigh` / `max`), with a steep deficit penalty below the task's ability floor.
 - **3D Model DNA**: Matches `divergence` (creative/architectural exploration), `global_rigor` (cross-module invariants and deep debugging), and `module_precision` (self-contained code and schema accuracy).
 - **Over-qualification & effort selectivity**: Penalizes frontier models and `xhigh` / `max` effort on routine tasks unless unlocked by high demand or pre-reset quota sprint.
-- **Live observe-act responsiveness (`realtime_loop`)**: When the classifier (`src/scorer-live.js`) or explicit caller input marks `realtime_loop: true` (the worker itself acts inside a live observe → decide → act loop against a changing external system; deterministic `inferTaskProfile` never guesses `realtime_loop` from keywords and always sets `false` unless explicitly passed):
+- **Live observe-act responsiveness (`realtime_loop`)**: When the classifier (`src/scorer-live.js`) or explicit caller input marks `realtime_loop: true` (the worker itself acts inside a live observe → decide → act loop against a changing external system):
   - **Responsiveness floor (`0.50`) & effort step-down (`resolveRealtimeEffort`)**: Candidates below the per-turn responsiveness floor step down to the highest provider-dispatchable effort (`DISPATCH_EFFORTS`) that clears both the task's ability gate and the responsiveness floor (skipping models whose effort is baked into the model ID, or deferring when a healthy, applicable sibling candidate already covers that lower effort). Quota burn and cost are computed at the stepped-down effort.
   - **Exclusion & conservative default**: Candidates that still fall below `0.50` after step-down are excluded with `"responsiveness X.XX below realtime_loop floor 0.50 (too slow per turn for a live loop)"`. Names AgentCompass has no calibrated row for default to `0.52` (`responsiveness_source: "default"`). A name resolves to its speed data as AgentCompass's `resolve_canonical_model` does (`resolveResponsivenessModelKey`), which is a separate mapping from the one routing uses: `claude-opus-4-6` routes as `claude-opus-5-5` but has its own responsiveness, its own pin identity, and no `none` step-down.
   - **Responsiveness blend & user pins**: Eligible candidates blend `0.35 * responsiveness` into `fit_score`. Explicitly pinned models/efforts are never stepped down or excluded for responsiveness, emitting a warning instead. On Magpie a pin is the plugin options `pinnedModel` / `pinnedEffort` / `pinnedBundle`, and the warning goes to Magpie's log. Non-`realtime_loop` routing is completely unchanged.
   - **The flag on Magpie**: `realtime_loop` stops at the gateway: the middleware removes it from the body before the upstream sees it. Magpie's pooled runtimes share nothing between requests, so send it on every turn or set the plugin option `realtime_loop: true`; a turn sent without it routes as non-realtime on a runtime that has not seen the session.
-  - **Warm-session hold boundary (by design)**: Continuation holds (`why: "cache" | "turn" | "followup" | "realtime_loop"`) are evaluated before calling the external scorer (`scoreTaskLive`), so an already-running warm session does not invoke the classifier mid-hold. `realtime_loop` is decided by the classifier on the session's first turn (or when a hold expires/reroutes) and persisted in session state, or can be passed explicitly (`realtime_loop: true` in the request payload or plugin options) on any turn to break a non-realtime hold (`capability_outgrown: realtime_loop_required`) without relying on any text heuristics.
+  - **Warm-session hold boundary (by design)**: Continuation holds (`why: "cache" | "turn" | "realtime_loop"`) are evaluated before calling the external scorer (`scoreTaskLive`), so an already-running warm session does not invoke the classifier mid-hold. `realtime_loop` is decided by the classifier on the session's first turn (or when a hold expires/reroutes) and persisted in session state, or can be passed explicitly (`realtime_loop: true` in the request payload or plugin options) on any turn to break a non-realtime hold (`capability_outgrown: realtime_loop_required`) without relying on any text heuristics.
 
 ### 3. Quota economics & seat ordering (`src/quota.js`, `src/quota-loader.js`)
 
@@ -136,7 +167,7 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | Option | Default | Description |
 |---|---|---|
 | `candidateModels` | — | Candidate model IDs the middleware may route to (aliases: `availableModels`, `allowedModels`, `models`). |
-| `defaultModel` | — | Fallback model when no `candidateModels` list is set (alias: `fallbackModel`). |
+| `defaultModel` | — | Fallback model when no `candidateModels` list is set, and the model an unrouted request to a virtual name goes to (alias: `fallbackModel`). |
 | `routeAllModels` | `false` | Route every incoming model request, not only `agentcompass` virtual models. |
 | `routeModelTriggers` | `["agentcompass", "agentcompass/auto", "agentcompass/intent", "agentcompass/system-one-0.5"]` | Virtual model names that trigger routing when `routeAllModels` is `false` (alias: `triggerModels`). |
 | `injectProtocolEffort` | `true` | Write the selected effort into protocol fields (`reasoning_effort`, `reasoning.effort`, `output_config.effort`). |
@@ -148,7 +179,7 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | `quotas` / `quotasPath` | — | Inline quota snapshot object or explicit path to a quota JSON file (`quotaFile`). No implicit directory scanning. |
 | `meteredOk` | `true` | Allow metered API keys when scoring candidates. |
 | `enableDecisionProvider` | `false` | Register the `agentcompass/agentcompass-systemone` Decision Provider (`/v1/systemone`) for Routing Groups. |
-| `allowExternalScorer` | `false` | Allow Mode B (`src/index.js`) or `src/hooks.js` to call an external `scorer` (`{ kind, baseUrl, apiKey, model, timeoutMs }`) with heuristic fallback on timeout/error. |
+| `allowExternalScorer` | `false` | Allow Mode B (`src/index.js`) or `src/hooks.js` to call an external `scorer` (`{ kind, baseUrl, apiKey, model, timeoutMs }`). On timeout or error the request is not routed. |
 
 ## Repository layout
 
@@ -157,12 +188,13 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | `src/middleware.js` | Synchronous `moejs` gateway middleware (`onRequest`, `onProvider`, `onAccount`, `onResponse`) and pool `strategies`. |
 | `src/index.js` | Mode B Decision Provider (`agentcompass/agentcompass-systemone`, `/v1/systemone`, `jevLevelled` and `jevBody`). |
 | `src/continuity.js` | Session key fingerprinting, tool-loop lock, KV cache TTLs, monotonic effort ratchet, and stateless history replay. |
-| `src/profiler-core.js` | Single-pass multi-protocol request fact extractor and deterministic 10D task profiler. |
+| `src/profiler-core.js` | Single-pass multi-protocol request fact extractor, the task profile schema and its validation. |
 | `src/allocator.js` | 7D capability + 3D Model DNA + effort-curve candidate ranker. |
 | `src/quota.js`, `src/quota-loader.js` | 5h/7d window opportunity-cost model, pre-reset surplus sprint, and Magpie pool seat ordering. |
 | `src/catalog.js` | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. |
-| `src/scorer-live.js`, `src/hooks.js` | Optional external System-One scorer client (LRU + timeout fallback) and programmatic Bun hook helper. |
+| `src/scorer-live.js`, `src/hooks.js` | External System-One classifier client (LRU cache) and programmatic Bun hook helper. |
 | `test/router.test.mjs` | Unit test suite (`npm test` / `bun test`). |
+| `test/no-hardcode.test.mjs` | The rule against classifying by text: static scan of `src/` with its written exceptions, and same-answer-any-wording routing over `test/task_text_corpus.mjs`. |
 
 ## Tests
 
@@ -175,6 +207,8 @@ npm test                       # or: bun test
 ## 中文说明
 
 基于 [AgentCompass](https://github.com/akiiwa-games/AgentCompass) 的 [Magpie](https://github.com/yetone/magpie) 网关路由插件：按任务意图、7 维客观能力、3 维模型禀赋（`divergence` 发散创意、`global_rigor` 全局严密、`module_precision` 单模块精准）、会话连续性与 5h/7d 订阅配额经济学选出 `<model>:<effort>` 并对号池席位排序。默认在 `moejs` 网关中间件内同步运行（`< 1 ms`，零网络请求），并可按需开启 `/v1/systemone` 决策 Provider 供路由组（Routing Groups）使用。
+
+**路由只依据分类模型或调用方给出的结构化画像，绝不根据任务文本判断。** 拿不到画像时不做路由，见下面的"没有分类模型时"。
 
 ### 快速上手
 
@@ -198,6 +232,7 @@ magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","clau
 - 请求虚拟模型 `agentcompass` / `agentcompass/*` 时，中间件将 `body.model` 改写为 `<targetModel>:<targetEffort>`，并按协议注入思考档位字段（`reasoning_effort`、`reasoning.effort`、`output_config.effort`）。
 - 未配置 `candidateModels` 或 `defaultModel` 时请求虚拟模型会返回 HTTP 400（`agentcompass: set candidateModels in the plugin's options`），不猜测模型列表。
 - 开启 `routeAllModels: true` 且未配置候选列表时，具体模型名保持不变，仅自动注入思考档位。
+- `moejs` 没有网络，**中间件调用不了分类模型**：只有带了画像（`body.profile`）的请求才会被路由，其余请求一律不路由、直接转发。要让请求被分类，请用配了分类模型的模式 B。
 
 #### 3. 账号池席位排序（`routings`）
 
@@ -214,6 +249,22 @@ magpie plugin login agentcompass
 magpie group set <group> effort=auto classifier=agentcompass/agentcompass-systemone
 ```
 
+需要同时配置分类模型（`allowExternalScorer: true` + `scorer`，写法见英文部分），否则每一轮都回答 `none of these`。路由组的 intent/level 标签恰好等于路由的 `work_kind`、`difficulty` 或模型名时直接回答；其他标签是操作者自己的措辞，交给分类模型判断（这一轮多调用一次）。
+
+#### 没有分类模型时
+
+画像的来源依次是：调用方显式传入（`ctx.state.profile`、`ctx.profile`、`body.profile`，`/v1/systemone` 上是 `state.task.profile` / `state.profile`；中间件转发前会移除 `body.profile`；校验不过视为没有，原因 `invalid_caller_profile`），然后是分类模型（`src/hooks.js` 与 `/v1/systemone` 可调用，中间件不能）。
+
+都拿不到，或分类模型失败、超时时，**不做路由决策、不猜测、也不报错**：
+
+- 中间件：`body.model` 原样转发，不附加档位。虚拟模型名（`agentcompass/auto`）在配置了 `defaultModel` 时改用它；否则保持原样，由 `onProvider` 取 Magpie 选中的 Provider 自己的模型（前提是 Magpie 能走到这一步）。写明在 `ctx.state.agentcompass`、Magpie 日志（`agentcompass: 未路由：分类不可用 (<原因>)`）和 JSON 响应的 `agentcompass` 字段里。
+- Hooks：不写 `ctx.state.route`，交给上面的中间件；写明在 `ctx.state.agentcompass` 和日志里。
+- `/v1/systemone`：`intent` / `level` 回答 `none of these`，由路由组的兜底规则处理，不回答 `effort`；量表探测回答"不是量表"。响应里带 `agentcompass: { routed: false, notice, reason }`，并写日志。
+
+未路由的请求不写入会话状态，不会形成后续轮次要保持的会话。虚拟模型既没有 `candidateModels` 也没有 `defaultModel` 时仍返回 HTTP 400：这是配置错误，不是分类问题。
+
+**没有配置分类模型时升级的影响：** 发给 `agentcompass` / `agentcompass/*` 的请求不再从 `candidateModels` 里选模型。请设置 `defaultModel` 让它们仍能到达你指定的模型，或配置带分类模型的模式 B，或让客户端传 `body.profile`。`scorerType: "heuristic"` 和 `prefer_local_heuristic` 已删除，等同于没有分类模型。
+
 #### 各安装来源下的名称
 
 Magpie 会用包名前缀命名号池策略（`routings`），而客户端请求的虚拟模型（`agentcompass` / `agentcompass/auto`）与分类器模型（`agentcompass/agentcompass-systemone`）与安装来源无关：
@@ -228,8 +279,8 @@ Magpie 会用包名前缀命名号池策略（`routings`），而客户端请求
 
 ### 决策流程简述
 
-1. **会话连续性优先（`src/continuity.js`）**：轮内工具循环（`within: true`）、KV 缓存温热期内（Anthropic/Gemini `5m`，ChatGPT/Codex Responses 与 DeepSeek `1h`）或短追问（`"继续"`、`"go ahead"`、`"lgtm"`）直接保持当前 `<model>:<effort>` 且思考档位单调不降级（`keepsEffort`；实时会话不触发抬档棘轮）。跨 `sync.Pool` 池化 `moejs` 实例时，自动从客户端重发的对话历史回溯锚点轮次（最多 4 轮）重放决策，确保任意实例结果一致。仅在新会话、上游报错（`status >= 400`）、配额耗尽、新增视觉/GUI 或显式传入 `realtime_loop: true`、任务复杂度越界、输入超窗口 95%、累计上下文达 2M、或缓存冷化/压缩后重新路由。（设计边界：温会话的 hold 发生在外部评分器调用之前，对已在跑的温会话不会在 hold 期间重跑分类器；`realtime_loop` 判定在会话首回合或重路由时由分类器给出并随会话状态保存，或由调用方在任意回合显式传入 `realtime_loop: true` 触发重路由，不做任何基于任务文本的硬编码判断。）
-2. **任务画像与能力选型（`src/profiler-core.js`、`src/allocator.js`）**：单遍有界解析 Anthropic / OpenAI Responses / Chat / Gemini 请求体，生成任务画像（含 `realtime_loop` 实时观察→动作循环标记，仅由分类器 `src/scorer-live.js` 或调用方显式传入，启发式画像恒为 `false`），结合 7 维客观能力、Effort 投入曲线、3 维 Model DNA、实时循环响应速度（`responsiveness` 下限 `0.50`、自动降档到过能力门限与响应下限的最高可派发档位、兄弟候选礼让、慢模型排除、未测速模型保守默认 `0.52`、用户点名仅告警：Magpie 上通过插件选项 `pinnedModel` / `pinnedEffort` / `pinnedBundle` 点名，告警写入 Magpie 日志）。`realtime_loop` 标记由中间件在转发前从请求体移除，不会发给上游；Magpie 的池化运行时之间不共享状态，客户端需每轮都带上该标记或设置插件选项 `realtime_loop: true`，否则未见过该会话的运行时会按非实时路由与防杀鸡用牛刀惩罚对 `candidateModels` 评分。
+1. **会话连续性优先（`src/continuity.js`）**：轮内工具循环（`within: true`）或 KV 缓存温热期内（Anthropic/Gemini `5m`，ChatGPT/Codex Responses 与 DeepSeek `1h`）直接保持当前 `<model>:<effort>` 且思考档位单调不降级（`keepsEffort`；实时会话不触发抬档棘轮）。短追问（`"继续"`）是普通的一轮，不读它的措辞；缓存已冷时连同上一轮一起交给分类模型。跨 `sync.Pool` 池化 `moejs` 实例时，自动从客户端重发的对话历史回溯锚点轮次（最多 4 轮）重放决策，确保任意实例结果一致。仅在新会话、上游报错（`status >= 400`）、配额耗尽、新增图片内容或显式传入 `needs.gui` / `realtime_loop: true`、调用方画像的复杂度超出轻量模型、输入超窗口 95%、累计上下文达 2M、或缓存冷化/请求 token 骤降（压缩）后重新路由。（设计边界：温会话的 hold 发生在外部评分器调用之前，对已在跑的温会话不会在 hold 期间重跑分类器；`realtime_loop` 判定在会话首回合或重路由时由分类器给出并随会话状态保存，或由调用方在任意回合显式传入 `realtime_loop: true` 触发重路由，不做任何基于任务文本的硬编码判断。）
+2. **任务画像与能力选型（`src/profiler-core.js`、`src/allocator.js`）**：单遍有界解析 Anthropic / OpenAI Responses / Chat / Gemini 请求体，取出轮次、工具循环、图片/视频内容类型等结构化事实；任务画像只来自分类模型 `src/scorer-live.js` 或调用方显式传入（含 `realtime_loop` 实时观察→动作循环标记）；结合 7 维客观能力、Effort 投入曲线、3 维 Model DNA、实时循环响应速度（`responsiveness` 下限 `0.50`、自动降档到过能力门限与响应下限的最高可派发档位、兄弟候选礼让、慢模型排除、未测速模型保守默认 `0.52`、用户点名仅告警：Magpie 上通过插件选项 `pinnedModel` / `pinnedEffort` / `pinnedBundle` 点名，告警写入 Magpie 日志）。`realtime_loop` 标记由中间件在转发前从请求体移除，不会发给上游；Magpie 的池化运行时之间不共享状态，客户端需每轮都带上该标记或设置插件选项 `realtime_loop: true`，否则未见过该会话的运行时会按非实时路由与防杀鸡用牛刀惩罚对 `candidateModels` 评分。
 3. **订阅配额精算（`src/quota.js`）**：过滤低于安全水位（长窗口 `5%`、短窗口 `10%`）或限流的窗口，计算期望短缺机会成本，并在距重置 36 小时内对富余额度给予冲刺加分（`reset_bonus` / `sprint_sunk`）。
 
 ---

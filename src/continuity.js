@@ -233,48 +233,6 @@ export function userSaidFromText(rawText) {
   return stripAgentNoise(rawText);
 }
 
-/**
- * Detect whether a user turn is a short conversational follow-up / continuation nudge
- * (e.g. "继续", "好的", "按这个改", "continue", "ok go ahead", "lgtm", "do it").
- */
-export function isShortFollowupMessage(text) {
-  if (!text || typeof text !== "string" || text.length > MAX_NOISE_STRIP_CHARS) return false;
-  const cleaned = stripAgentNoise(text).trim();
-  if (!cleaned || cleaned.length > 96) return false;
-  if (cleaned.includes("```") || cleaned.includes("\n\n")) return false;
-
-  const compact = cleaned
-    .toLowerCase()
-    .replace(/^[.!?,;:，。！？、；：'"`~()[\]{}\s-]+|[.!?,;:，。！？、；：'"`~()[\]{}\s-]+$/g, "")
-    .trim();
-  if (!compact) return false;
-
-  const exactPatterns = /^(继续|接着|接着写|接着做|往下|往下写|好的|好|行|可以|没问题|对|是的|没错|照做|按这个来|按这个改|按你说的做|就这么改|开始吧|动手吧|改吧|修吧|试一下|再试一次|确认|同意|再来|ok|okay|k|yes|yep|yeah|sure|continue|go on|keep going|proceed|do it|go ahead|sounds good|looks good|lgtm|ship it|fix it|apply it|try again|next|please continue|yes please|go for it|run it)$/i;
-  if (exactPatterns.test(compact)) return true;
-
-  const prefixPatterns = /^(继续|好的|好，|行，|可以，|没问题，|按这个|照这个|就按|ok[, ]|okay[, ]|yes[, ]|sure[, ]|please continue|go ahead and|continue with)/i;
-  const wordCount = compact.split(/\s+/).filter(Boolean).length;
-  if (prefixPatterns.test(compact) && compact.length <= 48 && wordCount <= 10) {
-    return true;
-  }
-  return false;
-}
-
-/**
- * Detect whether the request is a context compaction / summarization turn (`/compact`).
- */
-export function isCompactionText(text) {
-  if (!text || typeof text !== "string") return false;
-  const sample = text.length > MAX_USER_TURN_CHARS ? capTextSlice(text, MAX_USER_TURN_CHARS) : text;
-  return (
-    /(?:^|\s)\/compact(?:\s|$)/i.test(sample) ||
-    /<compact_instruction\b/i.test(sample) ||
-    /Provide a detailed summary of the conversation so far/i.test(sample) ||
-    /Summarize the conversation so far/i.test(sample) ||
-    /Your task is to create a detailed summary of the conversation/i.test(sample)
-  );
-}
-
 function extractPartText(part) {
   if (!part) return "";
   if (typeof part === "string") return part;
@@ -566,7 +524,7 @@ export function firstWords(body) {
 
 /**
  * The latest genuine user turns of the conversation the client resent, newest first:
- * `{ index, stamp, short }`. `index` is the item's position, so the body cut after it is the
+ * `{ index, stamp }`. `index` is the item's position, so the body cut after it is the
  * request that turn began with; `stamp` names the turn (`<index>:<hash>`) and stays the same as
  * the conversation grows, since history is only appended to. Scans back from the end and stops
  * after `max` turns, so a long conversation costs no more than its last few turns.
@@ -574,8 +532,7 @@ export function firstWords(body) {
 export function recentUserTurns(body, max = 6) {
   const items = getNormalizedItems(body);
   const turns = [];
-  let i = items.length - 1;
-  for (; i >= 0 && turns.length < max; i--) {
+  for (let i = items.length - 1; i >= 0 && turns.length < max; i--) {
     const item = items[i];
     if (!item || typeof item !== "object" || String(item.role || "").toLowerCase() !== "user") {
       continue;
@@ -585,12 +542,7 @@ export function recentUserTurns(body, max = 6) {
     turns.push({
       index: i,
       stamp: `${i}:${sha256Hex(info.userSaid.slice(0, MAX_FIRST_WORDS_HASH_CHARS)).slice(0, 16)}`,
-      short: isShortFollowupMessage(info.userSaid),
     });
-  }
-  // the conversation's opening turn is never a follow-up of anything
-  if (i < 0 && turns.length > 0) {
-    turns[turns.length - 1].short = false;
   }
   return turns;
 }
@@ -776,13 +728,6 @@ export function analyzeTurnState(body = {}, ctx = {}) {
     within = true;
   }
 
-  const isShortFollowup =
-    !within &&
-    Boolean(lastUserText) &&
-    (turn > 1 || Boolean(previousAssistantText) || Boolean(body?.previous_response_id)) &&
-    isShortFollowupMessage(lastUserText);
-
-  const isCompacting = isCompactionText(lastUserText);
   const fw = firstUserSaid
     ? sha256Hex(firstUserSaid.slice(0, MAX_FIRST_WORDS_HASH_CHARS)).slice(0, 24)
     : "";
@@ -799,8 +744,6 @@ export function analyzeTurnState(body = {}, ctx = {}) {
     previousAssistantText,
     hasAnyVisual,
     hasCurrentTurnVisual,
-    isShortFollowup,
-    isCompacting,
     firstWords: fw,
     sessionKey: computeSessionKey(body, ctx, fw),
   };
@@ -891,7 +834,6 @@ export function keepsEffort(
   const prevTokens = Number(sessionState.tokens || 0);
   const prevReqTokens = Number(sessionState.requestTokens || 0);
   const compacted =
-    Boolean(options?.isCompacting) ||
     (options?.hasExplicitEstimatedTokens &&
       prevTokens >= CACHE_WORTH_TOKENS &&
       currentTokens > 0 &&
@@ -904,8 +846,7 @@ export function keepsEffort(
     ageMs <= ttlMs &&
     (sessionState.cached === true ||
       prevTokens >= CACHE_WORTH_TOKENS ||
-      currentTokens >= CACHE_WORTH_TOKENS ||
-      options?.isShortFollowup === true);
+      currentTokens >= CACHE_WORTH_TOKENS);
 
   if (!isWarm) {
     return wantedEffort || "medium";
@@ -926,33 +867,11 @@ export function effectiveRealtimeLoop(facts = {}, sessionState = null, options =
 }
 
 /**
- * Detect whether a new user message clearly outgrows a lightweight tier model (`tier < 3.5`,
- * e.g. `claude-haiku-5-5`, `gpt-6-luna`, `gemini-3.8-flash-high`, `deepseek-v4.1-flash-free`, `grok-4.7`)
- * by requesting deep multi-module architecture, cross-runtime refactoring, or frontier debugging.
- */
-export function detectTierEscalationOutgrowth(text, currentSpec) {
-  if (!text || !currentSpec || (currentSpec.tier ?? 3.5) >= 3.5) {
-    return false;
-  }
-  const cleaned = stripAgentNoise(text);
-  if (!cleaned || isShortFollowupMessage(cleaned)) {
-    return false;
-  }
-  const hasHighRiskSignals =
-    /architecture|trade-?off|consensus|distributed|cap theorem|zero-downtime|migration|root cause|deadlock|race condition|memory corruption|heisenbug|formal verification|security audit|cryptograph|multi-runtime|cross-module|重构|架构|死锁|并发|根因|全链路|跨模块|分布式/i.test(
-      cleaned
-    );
-  const isLongComplexPrompt = cleaned.length >= 260 && (cleaned.match(/\n/g) || []).length >= 3;
-  return hasHighRiskSignals || isLongComplexPrompt;
-}
-
-/**
  * Evaluate whether the router should HOLD the current session's Provider/Model (`shouldHold: true`)
  * or execute intent routing to select/switch a Provider/Model (`shouldHold: false`).
  *
  * Hold reasons (`shouldHold: true`):
  *   - `"turn"`: mid-turn tool call / tool result loop (`within === true`)
- *   - `"followup"`: short user continuation nudge while session is active
  *   - `"cache"`: KV cache is worth holding (`>= 1024` tokens or `cached: true`) and still warm
  *   - `"session"`: `affinityMode === "session"` and model is healthy & within limits
  *   - `"realtime_loop"`: the session was routed as `realtime_loop` and is still within its cache TTL
@@ -1203,13 +1122,14 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
 
   const realtimeSession = sessionState.realtimeLoop === true && reqRealtimeLoopFact !== false;
 
-  // Tier escalation outgrowth: lightweight model (`tier < 3.5`) hit with a frontier/coupled task.
-  // The text heuristic stays out of a realtime session, which stays on its fast model.
+  // Tier escalation outgrowth: lightweight model (`tier < 3.5`) hit with a frontier/coupled task, as the caller's
+  // profile says. A realtime session stays on its fast model.
   if (
     affinityMode !== "strict" &&
     affinityMode !== "session" &&
-    (facts.demandsFrontierEscalation ||
-      (!realtimeSession && detectTierEscalationOutgrowth(facts.turnText || facts.lastUserText || "", spec)))
+    facts.demandsFrontierEscalation &&
+    !realtimeSession &&
+    (spec?.tier ?? 3.5) < 3.5
   ) {
     return {
       shouldHold: false,
@@ -1222,7 +1142,7 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     };
   }
 
-  // Check context compaction (`/compact` or request token drop > 50% from warm state)
+  // Check context compaction (request token drop > 50% from warm state)
   const prevReqTokens = Number(sessionState.requestTokens || 0);
   const tokenDroppedByHalf =
     (facts.hasExplicitEstimatedTokens &&
@@ -1235,7 +1155,7 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
   if (
     affinityMode !== "strict" &&
     affinityMode !== "session" &&
-    (facts.isCompacting || tokenDroppedByHalf)
+    tokenDroppedByHalf
   ) {
     return {
       shouldHold: false,
@@ -1266,21 +1186,6 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     ...options,
   });
   const withinCacheTtl = ageMs <= ttlMs;
-
-  // Short follow-up nudge ("继续", "ok go ahead", "lgtm") while session is still within TTL
-  if (facts.isShortFollowup && withinCacheTtl) {
-    return {
-      shouldHold: true,
-      why: "followup",
-      model: currentModel,
-      effort: sessionState.effort || "high",
-      provider: sessionState.provider || "",
-      previousModel: currentModel,
-      previousEffort: sessionState.effort || "high",
-      within: false,
-      turn: facts.turn || sessionState.turn || 1,
-    };
-  }
 
   // Warm KV cache hold (`tokens >= 1024` or `cached === true` within TTL)
   const cacheWorthHolding =
@@ -1416,7 +1321,6 @@ export class SessionContinuityStore {
     const prevReqTokens = Number(existing?.requestTokens || 0);
 
     const dropped =
-      Boolean(facts.isCompacting) ||
       (facts.hasExplicitEstimatedTokens &&
         prevTokens >= CACHE_WORTH_TOKENS &&
         estTokens > 0 &&

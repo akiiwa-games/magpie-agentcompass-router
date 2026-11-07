@@ -29,10 +29,22 @@ import {
   selectBestRoute,
 } from "../src/allocator.js";
 import { SessionContinuityStore, evaluateProviderContinuation, keepsEffort } from "../src/continuity.js";
-import { onRequest as hooksOnRequest } from "../src/hooks.js";
-import { onProvider as middlewareOnProvider, onRequest as middlewareOnRequest } from "../src/middleware.js";
-import { handleSystemOneRequest } from "../src/index.js";
+import { onRequest as hooksForProfile } from "../src/hooks.js";
+import { onProvider as middlewareOnProvider, onRequest as middlewareForProfile } from "../src/middleware.js";
+import { handleSystemOneRequest as systemOneForState } from "../src/index.js";
 import { SCORER_SYSTEM_PROMPT, scoreTaskLive } from "../src/scorer-live.js";
+import { answerRequest, answerSystemOne } from "./classifier-stub.mjs";
+
+// The baseline profiled a text by itself; here the classifier answers what the baseline said for it.
+const hooksOnRequest = async (body, ctx = {}) => {
+  answerRequest(body, ctx);
+  return hooksForProfile(body, ctx);
+};
+const middlewareOnRequest = (body, ctx = {}) => {
+  answerRequest(body, ctx);
+  return middlewareForProfile(body, ctx);
+};
+const handleSystemOneRequest = async (body, options = {}) => systemOneForState(answerSystemOne(body, options), options);
 
 const ROOT = path.dirname(path.dirname(fileURLToPath(import.meta.url)));
 const FIXTURE = JSON.parse(fs.readFileSync(path.join(ROOT, "test/fixtures/agentcompass-realtime-parity.json"), "utf8"));
@@ -188,12 +200,6 @@ test("R3 parity: non-realtime options and inputs main ignores or treats its own 
     routingDiffs(["kimi-k2.6-preview", "glm-5.2-latest", "claude-sonnet-5-5"], SAMPLED_GRID, { unhealthyModels: ["kimi-k2.6", "glm-5.2"] }),
     [],
   );
-  // A `{ profile }` wrapper with no realtime answer stays what main made of it: an inferred task.
-  const wrapper = { objective: "fix a bug", profile: GRID[100] };
-  assert.deepEqual(
-    withoutAddedKeys(rankCandidates(wrapper, { candidateModels: pool, now: NOW })),
-    withoutAddedKeys(baseline.allocator.rankCandidates(wrapper, { candidateModels: pool, now: NOW })),
-  );
 });
 
 test("R3 parity: canonicalModel and resolveModelSpec match origin/main on every spelling", (t) => {
@@ -216,7 +222,6 @@ const E2E_TEXTS = [
   "Write a short poem about autumn",
   "Look at this screenshot and tell me what is wrong with the layout",
   "Search the web for the latest pricing of hosted vector databases",
-  "继续",
 ];
 const E2E_POOLS = { README: README_POOL, modern: NON_REALTIME_POOLS["modern bare strings"], dated: NON_REALTIME_POOLS["dated openai and anthropic"] };
 
@@ -298,7 +303,13 @@ test("R3 parity: the decision provider answers non-realtime requests identically
 test("R3 parity: the scorer cache and prompt only gain what realtime_loop needs", async (t) => {
   if (!baseline) return t.skip(baselineSkip);
   // Main caches by objective alone, whatever other fields the task carries; only an explicit realtime_loop splits an entry.
-  const options = { scorerType: "heuristic" };
+  const options = {
+    allowExternalScorer: true,
+    scorerType: "openai_compatible",
+    scorerBaseUrl: "http://127.0.0.1:9999",
+    fetch: async () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ ...GRID[100], expected_hours: 1, task_count: "1" }) } }] }), { status: 200 }),
+  };
   const run = async (score, salt) => {
     const objective = `cache parity ${salt}`;
     const first = await score({ objective, needs: { visual: true } }, options);
@@ -306,7 +317,8 @@ test("R3 parity: the scorer cache and prompt only gain what realtime_loop needs"
     return [first.meta.source, second.meta.source, withoutAddedKeys(first.profile), withoutAddedKeys(second.profile)];
   };
   assert.deepEqual(await run(scoreTaskLive, "a"), await run(baseline.scorer.scoreTaskLive, "a"));
-  const prompt = (text) => text.split("\n").filter((line) => !line.includes("realtime_loop") && line !== "CRITICAL RULES:").join("\n").trim();
+  const prompt = (text) =>
+    text.split("\n").filter((line) => !line.includes("realtime_loop") && !line.includes("previous_user") && line !== "CRITICAL RULES:").join("\n").trim();
   assert.equal(prompt(SCORER_SYSTEM_PROMPT), prompt(baseline.scorer.SCORER_SYSTEM_PROMPT));
 });
 
@@ -319,8 +331,6 @@ test("R3 parity: continuation decisions and keepsEffort match origin/main withou
   ];
   const facts = [
     { turnText: "ok thanks, next", estimatedInputTokens: 50 },
-    { turnText: "Redesign the distributed architecture and find the root cause of this deadlock", estimatedInputTokens: 50 },
-    { isShortFollowup: true, turnText: "继续" },
     { within: true },
   ];
   for (const affinityMode of ["cache", "turn", "session", "strict"]) {
@@ -595,15 +605,20 @@ test("M3-R3: an explicit realtime_loop:false ends the realtime hold; a non-realt
   assert.equal(store.get(first.state.sessionKey, NOW).realtimeLoop, false);
 });
 
-test("M3-R3: a realtime session is not moved off its fast model by the tier-escalation text heuristic", () => {
+test("M3-R3: a realtime session is not moved off its fast model by tier escalation", () => {
   const session = { model: "gpt-6-luna", effort: "high", tokens: 5000, cached: true, realtimeLoop: true, updatedAt: NOW - 1000 };
-  const facts = { turnText: "Redesign the distributed architecture and find the root cause of this deadlock" };
+  const facts = { demandsFrontierEscalation: true };
   const held = evaluateProviderContinuation(facts, session, { now: NOW });
   assert.equal(held.shouldHold, true);
   assert.equal(held.why, "cache");
   const notRealtime = evaluateProviderContinuation(facts, { ...session, realtimeLoop: false }, { now: NOW });
   assert.equal(notRealtime.shouldHold, false);
   assert.equal(notRealtime.reasonDetail, "tier_escalation_required");
+  // A session's words alone never move it
+  assert.equal(
+    evaluateProviderContinuation({ turnText: "Redesign the distributed architecture and find the root cause of this deadlock" }, { ...session, realtimeLoop: false }, { now: NOW }).why,
+    "cache",
+  );
   // An explicit false, and the real reasons to move, still move it.
   assert.equal(evaluateProviderContinuation({ ...facts, realtime_loop: false }, session, { now: NOW }).reasonDetail, "tier_escalation_required");
   assert.equal(evaluateProviderContinuation({ hasCurrentTurnVisual: true }, { ...session, model: "grok-4.7" }, { now: NOW }).why, "capability_outgrown");
@@ -778,10 +793,11 @@ test("P1: a Tandem middleware with its own store follows a classifier-only realt
     assert.equal(own.stored, true, name);
     assert.doesNotMatch(own.final, /^gemini-4-argon-high/, name);
   }
-  // Without realtime the middleware routes for itself on a suffixed pool, as it does on origin/main
+  // Without realtime the middleware routes for itself on a suffixed pool, as it does on origin/main, from the classifier's answer
+  const noRealtime = await tandem(pools.suffixed, false, false);
   const solo = { model: "agentcompass/auto", messages: [{ role: "user", content: "Find the root cause of the race in the scheduler across modules" }] };
-  middlewareOnRequest(solo, { state: {}, options: { candidateModels: pools.suffixed, now: NOW, continuityStore: new SessionContinuityStore() } });
-  assert.equal((await tandem(pools.suffixed, false, false)).final, solo.model);
+  middlewareOnRequest(solo, { state: {}, profile: noRealtime.route.profile, options: { candidateModels: pools.suffixed, now: NOW, continuityStore: new SessionContinuityStore() } });
+  assert.equal(noRealtime.final, solo.model);
 });
 
 test("m2-R4: onProvider and the decision provider honor pins, and only under realtime_loop", async (t) => {
@@ -800,7 +816,7 @@ test("m2-R4: onProvider and the decision provider honor pins, and only under rea
   assert.match(await provider({ realtime_loop: true }, {}), /^gpt-6-astra:/);
   assert.equal(await provider({}, pin), await provider({}, {}));
 
-  const questions = { effort: { type: "level" }, intent: { criteria: { argon: "gemini-4-argon-high", astra: "gpt-6-astra", none: "none of these" } } };
+  const questions = { effort: { type: "level" }, intent: { criteria: { "gemini-4-argon-high": "Argon", "gpt-6-astra": "Astra", none: "none of these" } } };
   const effort = async (state, pins) =>
     (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", ...state }, questions }, { candidateModels: pool, ...pins })).answers.effort;
   assert.deepEqual(await effort({ realtime_loop: true }, { ...pin, pinnedEffort: "high" }), await effort({ realtime_loop: true }, { candidateModels: ["gemini-4-argon-high"], ...pin }));
@@ -812,8 +828,8 @@ test("m2-R4: onProvider and the decision provider honor pins, and only under rea
   const quotas = Object.fromEntries(["codex", "gemini", "antigravity", "openai", "google"].map((p) => [`${p}/a@example.com`, spent]));
   const intent = async (pins) =>
     (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", realtime_loop: true, quotas }, questions }, { candidateModels: pool, ...pins })).answers.intent.choice;
-  assert.equal(await intent(pin), "argon");
-  assert.equal(await intent({}), "astra");
+  assert.equal(await intent(pin), "gemini-4-argon-high");
+  assert.equal(await intent({}), "gpt-6-astra");
 });
 
 test("m3-R4: the slow pin warning names the model the speed was read for", () => {
