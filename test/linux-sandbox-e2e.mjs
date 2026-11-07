@@ -1863,6 +1863,12 @@ async function main() {
       assert.equal(fs.existsSync("/mnt/host/c/Windows") || fs.existsSync("/mnt/c/Windows"), false, "A real sign-in must not see the host's drives");
       assert.equal(/(^|:)\/mnt\//.test(realEnv.PATH), false, "A real sign-in must not reach a program on the host");
       const isolation = JSON.parse(fs.readFileSync(path.join(SANDBOX_ROOT, "isolation.json"), "utf8"));
+      assert.equal(isolation.mountDrvfs, "refused", "mount.drvfs must be refused inside the sandbox");
+      assert.equal(isolation.umountWsl, "refused", "umount /run/WSL must be refused inside the sandbox");
+      assert.equal(isolation.writeCorePattern, "refused", "writing core_pattern must be refused inside the sandbox");
+      assert.equal(isolation.x11SocketVisible, false, "/tmp/.X11-unix must be masked inside the sandbox");
+      assert.equal(isolation.coreLimit, "1:1", "RLIMIT_CORE must be 1:1 inside the sandbox");
+      assert.ok(typeof isolation.uid === "number" && isolation.uid !== 0, "Scenario 13 must run as a non-root uid");
       const observerDir = path.join(PLUGIN_DIR, "test", "fixtures", "route-observer");
       const realLogs = [];
       let realProc = null;
@@ -1901,7 +1907,9 @@ async function main() {
           });
           // A new Claude Code stops at its first-run screens and at trusting its folder, and no one is here to answer them
           const projects = {};
-          for (let i = 0; i < 8; i++) projects[path.join(realEnv.TMPDIR, `magpie-claude-work-${i}`)] = { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true };
+          for (const id of [process.getuid(), ...Array.from({ length: 8 }, (_, i) => i)]) {
+            projects[path.join(realEnv.TMPDIR, `magpie-claude-work-${id}`)] = { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true };
+          }
           fs.writeFileSync(path.join(realEnv.HOME, ".claude.json"), JSON.stringify({ hasCompletedOnboarding: true, projects }), { mode: 0o600 });
         }
         if (REAL_ACCOUNTS.some((a) => a.name === "grok")) {
@@ -2080,7 +2088,10 @@ async function main() {
         console.log(`[PASS] Scenario 13 (real upstream): accounts ${REAL_ACCOUNTS.map((a) => a.name).join(", ")}; isolation ${JSON.stringify(isolation)}`);
       } catch (err) {
         report.scenarios.scenario13_real_upstream = { pass: false };
-        console.error(`[Linux Sandbox] Scenario 13 observer lines: ${realLogs.join("").split("\n").filter((l) => l.includes("route-observer {")).slice(-8).join(" | ")}`);
+        const logLines = realLogs.join("").split("\n");
+        console.error(`[Linux Sandbox] Scenario 13 observer lines: ${logLines.filter((l) => l.includes("route-observer {")).slice(-8).join(" | ")}`);
+        const diagLines = logLines.filter((l) => /(?:^|\s)(?:claude|gateway):/.test(l)).slice(-12).map((l) => redactSecrets(l));
+        console.error(`[Linux Sandbox] Scenario 13 claude/gateway lines: ${diagLines.join(" | ")}`);
         throw err;
       } finally {
         if (realProc && !realProc.killed) {
