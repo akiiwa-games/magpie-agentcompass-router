@@ -23,7 +23,8 @@
  *   (specific intent rules, `"none of these"` fallback rule, and `effort=auto` 4-level Jev logprobs scaling)
  * - Scenario 8: Mode A session affinity, mid-turn tool lock (`within: true`) & short follow-up hold
  * - Scenario 9: Non-realtime requests reach the upstream exactly as a second Magpie running the origin/main build sends
- *   them (`BASELINE_PLUGIN_DIR`; pools, name spellings, protocols, sessions)
+ *   them (`BASELINE_PLUGIN_DIR`; pools, name spellings, protocols, sessions). A branch that moves the AgentCompass pin
+ *   changes non-realtime routing on purpose; give it a baseline at the same pin
  * - Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down, on every protocol
  * - Scenario 11: A realtime session's later turns hold, with no reroute and no effort ratchet
  * - Scenario 12: A pinned slow model is kept, with a warning in Magpie's log

@@ -18,7 +18,17 @@
  *    and filter accounts, and exports `strategies["agentcompass"]` / `strategies["agentcompass-pure"]`.
  */
 
-import { pinOptionsOf, selectBestRoute } from "./allocator.js";
+import {
+  candidateModelName,
+  candidateOffers,
+  dropPinFields,
+  explicitCandidateModels,
+  extractModelList,
+  mergePinOptions,
+  pinOptionsOf,
+  pinsFixEffort,
+  selectBestRoute,
+} from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
   bodyUpTo,
@@ -59,6 +69,11 @@ function dropRealtimeFlag(body) {
   return dropped;
 }
 
+function dropRoutingFields(body) {
+  const dropped = dropRealtimeFlag(body);
+  return dropPinFields(body) || dropped;
+}
+
 function stripEffortSuffix(rawModel) {
   if (!rawModel || typeof rawModel !== "string") return "";
   const trimmed = rawModel.trim();
@@ -85,38 +100,8 @@ function isVirtualModelName(model, options = {}) {
   return DEFAULT_VIRTUAL_MODELS.includes(clean);
 }
 
-function extractModelList(source) {
-  if (!source) return null;
-  if (Array.isArray(source)) {
-    const list = source
-      .map((item) => {
-        if (typeof item === "string") return item.trim();
-        if (item && typeof item === "object") {
-          return String(item.id || item.name || item.model || "").trim();
-        }
-        return "";
-      })
-      .filter(Boolean);
-    return list.length > 0 ? list : null;
-  }
-  if (typeof source === "object") {
-    const keys = Object.keys(source)
-      .map((k) => k.trim())
-      .filter(Boolean);
-    return keys.length > 0 ? keys : null;
-  }
-  return null;
-}
-
 function resolveCandidateModels(body, ctx = {}, options = {}) {
-  const explicit =
-    extractModelList(options.candidateModels) ||
-    extractModelList(options.allowedModels) ||
-    extractModelList(options.availableModels) ||
-    extractModelList(options.models) ||
-    extractModelList(ctx?.models) ||
-    extractModelList(ctx?.availableModels) ||
-    extractModelList(options.modelMap);
+  const explicit = explicitCandidateModels(options, ctx);
 
   if (explicit) {
     return { candidateModels: explicit, hasExplicitCandidates: true, canRewriteModel: true };
@@ -126,7 +111,8 @@ function resolveCandidateModels(body, ctx = {}, options = {}) {
     return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: true };
   }
 
-  const rawModel = stripEffortSuffix(body?.model || ctx?.model || "");
+  // A `:effort` here is the user fixing the effort: it stays on the candidate.
+  const rawModel = String(body?.model || ctx?.model || "").trim();
   if (rawModel && !isVirtualModelName(rawModel, options)) {
     return {
       candidateModels: [rawModel],
@@ -253,9 +239,10 @@ function turnChain(body, facts) {
  */
 function heldTarget(model, sessionState, candidateModels, aliases) {
   if (!Array.isArray(candidateModels) || candidateModels.length === 0) return model;
-  if (sessionState?.target && candidateModels.includes(sessionState.target)) return sessionState.target;
+  const names = candidateModels.map(candidateModelName);
+  if (sessionState?.target && names.includes(sessionState.target)) return sessionState.target;
   const canonical = canonicalModel(model, aliases);
-  return candidateModels.find((m) => canonicalModel(m, aliases) === canonical) || model;
+  return names.find((m) => canonicalModel(m, aliases) === canonical) || model;
 }
 
 /**
@@ -286,6 +273,8 @@ function replayedState(body, ctx, env, chain, stale, depth) {
     workKind: d.workKind || "general_implementation",
     difficulty: d.difficulty || "routine",
     realtimeLoop: Boolean(d.realtimeLoop),
+    profile: d.profile || null,
+    pinnedBundle: d.pins?.pinnedBundle || null,
     tokens,
     requestTokens: tokens,
     compactedTokens: Number(stale?.compactedTokens || 0),
@@ -323,9 +312,11 @@ function routeClaimed(body, ctx, env, depth = 0) {
   const anchor = chain?.stamp || "";
   const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
+  const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
   const cont = evaluateProviderContinuation(facts, sessionState, {
     now,
+    pins,
     affinityMode,
     availableModels: candidateModels,
     unhealthyModels: options.unhealthyModels,
@@ -374,6 +365,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         why: cont.why,
         held: true,
         anchor,
+        pinnedBundle: pins.pinnedBundle,
       },
       decision: {
         ok: true,
@@ -386,6 +378,9 @@ function routeClaimed(body, ctx, env, depth = 0) {
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
         realtimeLoop: heldRealtime,
+        profile: sessionState?.profile || null,
+        pins,
+        warnings: [],
         continuation: {
           held: true,
           why: cont.why,
@@ -415,8 +410,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
   }
   const minContextTokens = cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
-  const pins = pinOptionsOf(options);
-  let decision = selectBestRoute(profile, {
+  const decision = selectBestRoute(profile, {
     objective: facts.objective,
     candidateModels,
     catalog: options.catalog,
@@ -435,17 +429,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
     },
   });
 
-  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || options.quotas)) {
-    decision = selectBestRoute(profile, {
-      objective: facts.objective,
-      candidateModels,
-      catalog: options.catalog,
-      now,
-      ...realtimeOption,
-      ...pins,
-    });
-  }
-
   if (!decision || !decision.targetModel) {
     return { facts, sessionKey, record: null, decision };
   }
@@ -458,20 +441,24 @@ function routeClaimed(body, ctx, env, depth = 0) {
     cont.why !== "cold" &&
     cont.why !== "compacted" &&
     cont.why !== "first" &&
-    cont.why !== "worn"
+    cont.why !== "worn" &&
+    !pinsFixEffort(pins)
   ) {
-    finalEffort = keepsEffort(
+    const kept = keepsEffort(
       sessionState,
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
       { ...options, ...realtimeOption }
     );
+    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept)) finalEffort = kept;
   }
   decision.targetEffort = finalEffort;
   decision.modelWithEffort = `${decision.targetModel}:${finalEffort}`;
   decision.canRewriteModel = canRewriteModel;
   decision.hasExplicitCandidates = hasExplicitCandidates;
+  decision.pins = pins;
+  decision.minContextTokens = minContextTokens;
   decision.continuation = {
     held: false,
     why: cont.why,
@@ -498,8 +485,24 @@ function routeClaimed(body, ctx, env, depth = 0) {
       why: cont.why,
       held: false,
       anchor,
+      profile: decision.profile,
+      pinnedBundle: pins.pinnedBundle,
     },
   };
+}
+
+/**
+ * Refuse a claimed request nothing may serve, naming why, rather than send it on to some other model. A concrete model
+ * under `routeAllModels` with no pin is the one case with a target of its own: routing found nothing better, it goes as asked.
+ */
+function rejectBlocked(body, ctx, blocked) {
+  const options = ctx?.options || {};
+  const pinned = Object.keys(mergePinOptions(pinOptionsOf(options), body, body.task)).length > 0;
+  if (!pinned && !isVirtualModelName(body.model, options)) return null;
+  const reason = (blocked.warnings || []).join("; ") || blocked.error || "no route";
+  ctx.state = ctx.state || {};
+  ctx.state.routeBlocked = blocked;
+  return typeof ctx?.reject === "function" ? { rejected: ctx.reject(503, `agentcompass: ${reason}`) } : null;
 }
 
 export function onRequest(body, ctx = {}) {
@@ -542,18 +545,28 @@ export function onRequest(body, ctx = {}) {
       return undefined;
     }
 
+    const hooksBlocked = isClaimedModel && !stateRoute && ctx?.state?.routeBlocked;
+    if (hooksBlocked) {
+      for (const warning of hooksBlocked.warnings || []) {
+        console.warn(`agentcompass: ${warning}`);
+      }
+      const refused = rejectBlocked(body, ctx, hooksBlocked);
+      if (refused) return refused.rejected;
+      return dropRoutingFields(body) ? body : undefined;
+    }
+
     let decision = null;
 
     if (stateRoute) {
       if (
         !hasExplicitCandidates ||
         !Array.isArray(candidateModels) ||
-        candidateModels.includes(stateRoute.targetModel) ||
-        // A pool may spell the model with an effort suffix, and when only the classifier called this realtime the
-        // hooks' route is all there is to say so
-        (stateRoute.realtimeLoop === true && candidateModels.some((m) => stripEffortSuffix(m) === stateRoute.targetModel))
+        candidateOffers(candidateModels, stateRoute.targetModel, stateRoute.targetEffort || "high")
       ) {
         decision = stateRoute;
+        for (const warning of decision.warnings || []) {
+          console.warn(`agentcompass: ${warning}`);
+        }
       }
 
       if (decision && decision.targetModel) {
@@ -571,6 +584,8 @@ export function onRequest(body, ctx = {}) {
               realtimeLoop: Boolean(decision.realtimeLoop),
               why: decision.continuation?.why || "first",
               held: Boolean(decision.continuation?.held),
+              profile: decision.profile,
+              pinnedBundle: decision.pins?.pinnedBundle,
             },
             facts,
             now
@@ -597,10 +612,14 @@ export function onRequest(body, ctx = {}) {
       if (routed.record && routed.sessionKey && decision?.targetModel) {
         store.recordRequest(routed.sessionKey, routed.record, routed.facts, now);
       }
+      if (decision?.blocked) {
+        const refused = rejectBlocked(body, ctx, { error: decision.error || "no_route", warnings: decision.warnings });
+        if (refused) return refused.rejected;
+      }
     }
 
     if (!decision || !decision.targetModel) {
-      return dropRealtimeFlag(body) ? body : undefined;
+      return dropRoutingFields(body) ? body : undefined;
     }
 
     ctx.state = ctx.state || {};
@@ -617,7 +636,7 @@ export function onRequest(body, ctx = {}) {
         applyProtocolEffortOnly(body, decision.targetEffort, ctx);
         return body;
       }
-      return dropRealtimeFlag(body) ? body : undefined;
+      return dropRoutingFields(body) ? body : undefined;
     }
 
     applyRoutedModelAndEffort(body, decision, ctx);
@@ -625,7 +644,7 @@ export function onRequest(body, ctx = {}) {
   } finally {
     if (body && typeof body === "object" && !Array.isArray(body)) {
       if (ROUTE_CARRIER_KEY in body) delete body[ROUTE_CARRIER_KEY];
-      dropRealtimeFlag(body);
+      dropRoutingFields(body);
     }
   }
 }
@@ -647,24 +666,41 @@ export function onProvider(body, ctx = {}) {
     extractModelList(options.modelsByProvider?.[prov?.id]) ||
     extractModelList(options.modelsByProvider?.[prov?.name]);
 
+  if (ctx?.state?.routeBlocked) return undefined;
+
   const prevDecision = ctx?.state?.agentcompass || ctx?.state?.route;
-  if (providerModels && providerModels.length > 0 && prevDecision?.profile) {
+  // A held turn has no profile from this request: the session's own, else the kind and difficulty it was routed on.
+  const prevProfile =
+    prevDecision?.profile ||
+    (prevDecision?.workKind ? { work_kind: prevDecision.workKind, difficulty: prevDecision.difficulty } : null);
+  if (providerModels && providerModels.length > 0 && prevProfile) {
     const needProviderRoute =
       isVirtualModelName(body.model, options) ||
       prevDecision.canRewriteModel === false ||
       prevDecision.hasExplicitCandidates === false ||
-      !providerModels.includes(prevDecision.targetModel) ||
+      !candidateOffers(providerModels, prevDecision.targetModel, prevDecision.targetEffort || "high") ||
       options.routePerProvider === true;
 
     if (needProviderRoute) {
-      const routed = selectBestRoute(prevDecision.profile, {
-        objective: "",
+      const store = options.continuityStore || defaultContinuityStore;
+      const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
+      const routed = selectBestRoute(prevProfile, {
         candidateModels: providerModels,
         catalog: options.catalog,
+        unhealthyModels: [
+          ...store.getUnhealthyModels(now),
+          ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
+        ],
+        minContextTokens: prevDecision.minContextTokens || 0,
         quotas: options.quotas,
         meteredOk: options.meteredOk,
-        ...pinOptionsOf(options),
+        now,
+        realtime_loop: Boolean(prevDecision.realtimeLoop),
+        ...mergePinOptions(pinOptionsOf(options), prevDecision.pins),
       });
+      for (const warning of routed.warnings || []) {
+        console.warn(`agentcompass: ${warning}`);
+      }
       if (routed.ok && routed.targetModel) {
         const updated = {
           ...prevDecision,
@@ -672,6 +708,9 @@ export function onProvider(body, ctx = {}) {
           canonicalModel: routed.canonicalModel,
           targetEffort: routed.targetEffort || prevDecision.targetEffort || "high",
           modelWithEffort: `${routed.targetModel}:${routed.targetEffort || prevDecision.targetEffort || "high"}`,
+          bundle: routed.bundle,
+          profile: routed.profile,
+          warnings: [...(prevDecision.warnings || []), ...(routed.warnings || [])],
           canRewriteModel: true,
           hasExplicitCandidates: true,
         };

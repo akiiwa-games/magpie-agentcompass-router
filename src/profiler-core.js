@@ -740,6 +740,16 @@ export function inferReasoningDepth(objective, kind, explicitDifficulty = null) 
   return 1;
 }
 
+const TASK_COUNTS = ["1", "2", "3", ">3"];
+
+function taskCountBucket(value) {
+  if (TASK_COUNTS.includes(value)) return value;
+  if (typeof value === "number" && Number.isInteger(value) && value >= 1) {
+    return TASK_COUNTS[Math.min(value, 4) - 1];
+  }
+  throw new Error(`task.profile.task_count must be one of ${TASK_COUNTS.join(", ")} or a positive whole number`);
+}
+
 export function validateProfile(raw) {
   if (!raw || typeof raw !== "object") {
     throw new Error("task.profile must be an object");
@@ -792,8 +802,16 @@ export function validateProfile(raw) {
   if (typeof raw.reason === "string" && raw.reason.trim()) {
     profile.reason = raw.reason.trim().slice(0, 300);
   }
-  profile.multi_task = Boolean(raw.multi_task);
-  profile.task_count = ["1", "2", "3", ">3"].includes(raw.task_count) ? raw.task_count : "1";
+  if (typeof raw.multi_task !== "boolean") {
+    throw new Error("task.profile.multi_task must be true or false");
+  }
+  profile.multi_task = raw.multi_task;
+  profile.task_count = taskCountBucket(raw.task_count);
+  if (profile.multi_task !== (profile.task_count !== "1")) {
+    throw new Error(
+      `task.profile.multi_task ${profile.multi_task} contradicts task.profile.task_count ${profile.task_count}`
+    );
+  }
   return profile;
 }
 
@@ -862,7 +880,7 @@ export function inferTaskProfile(task = {}, routes = CANONICAL_ROUTES) {
     task.multi_task !== undefined ? Boolean(task.multi_task) : marks.length >= 2;
   const taskCount =
     task.task_count ||
-    (!multiTask ? "1" : marks.length === 2 ? "2" : marks.length === 3 ? "3" : ">3");
+    (!multiTask ? "1" : marks.length <= 2 ? "2" : marks.length === 3 ? "3" : ">3");
 
   return validateProfile({
     work_kind: kind,

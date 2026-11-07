@@ -15,6 +15,7 @@ import {
   DEFAULT_SCORING_POLICY,
   MODEL_ALIASES,
   canonicalModel,
+  splitEffortSuffix,
   resolveModelSpec,
 } from "./catalog.js";
 import { isModelQuotaExhausted } from "./quota.js";
@@ -970,6 +971,22 @@ export function detectTierEscalationOutgrowth(text, currentSpec) {
  *   - `"turn_mode"`: `affinityMode === "turn"` and request is a new user turn (`within === false`)
  *   - `"off"`: `affinityMode === "off"`
  */
+/**
+ * Whether the user now names something other than what the session runs (contract R3). A hold would hide that.
+ */
+function pinOverridesSession(sessionState, currentModel, pins, options) {
+  if (!pins) return false;
+  if (pins.pinnedBundle && pins.pinnedBundle !== sessionState.pinnedBundle) return true;
+  let effort = pins.constraintEffort ? String(pins.constraintEffort).trim().toLowerCase() : null;
+  if (pins.constraintModel) {
+    const named = splitEffortSuffix(String(pins.constraintModel));
+    const key = canonicalModel(named.name, options.aliases || MODEL_ALIASES, options.models || DEFAULT_MODELS);
+    if (key !== currentModel) return true;
+    effort = named.effort || effort;
+  }
+  return Boolean(effort && effort !== sessionState.effort);
+}
+
 export function evaluateProviderContinuation(facts = {}, sessionState = null, options = {}) {
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const affinityMode = String(options.affinityMode || "cache").toLowerCase();
@@ -992,7 +1009,11 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     };
   }
 
-  const currentModel = canonicalModel(sessionState.model, options.aliases || MODEL_ALIASES);
+  const currentModel = canonicalModel(
+    sessionState.model,
+    options.aliases || MODEL_ALIASES,
+    options.models || DEFAULT_MODELS
+  );
   const { spec } = resolveModelSpec(
     currentModel,
     options.models || DEFAULT_MODELS,
@@ -1013,6 +1034,17 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     };
   }
 
+  if (pinOverridesSession(sessionState, currentModel, options.pins, options)) {
+    return {
+      shouldHold: false,
+      why: "user_pin_override",
+      previousModel: currentModel,
+      previousEffort: sessionState.effort,
+      within: Boolean(facts.within),
+      turn: facts.turn || 1,
+    };
+  }
+
   // 2. Check candidate pool membership (if candidate list is explicitly provided)
   const candidateList = Array.isArray(options.availableModels)
     ? options.availableModels
@@ -1021,7 +1053,7 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
       : [];
   if (candidateList.length > 0) {
     const canonicalCandidates = candidateList.map((m) =>
-      canonicalModel(typeof m === "string" ? m : m?.model || m?.id || "", options.aliases)
+      canonicalModel(typeof m === "string" ? m : m?.model || m?.id || "", options.aliases, options.models)
     );
     if (!canonicalCandidates.includes(currentModel)) {
       return {
@@ -1037,7 +1069,7 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
 
   // 3. Check provider/model health
   const unhealthySet = new Set(
-    (options.unhealthyModels || []).map((m) => canonicalModel(m, options.aliases))
+    (options.unhealthyModels || []).map((m) => canonicalModel(m, options.aliases, options.models))
   );
   const storeHealthy =
     options.store && typeof options.store.isModelHealthy === "function"
@@ -1464,6 +1496,9 @@ export class SessionContinuityStore {
         lastWhy: decision.why || "first",
         lastHeld: Boolean(decision.held),
         realtimeLoop: decision.realtimeLoop ?? existing?.realtimeLoop ?? false,
+        // What a later provider route of a held turn profiles with, and which pin the session is on.
+        profile: decision.profile ?? existing?.profile ?? null,
+        pinnedBundle: decision.pinnedBundle ?? existing?.pinnedBundle ?? null,
       },
       now
     );

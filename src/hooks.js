@@ -6,7 +6,15 @@
  * without mutating client request body fields.
  */
 
-import { pinOptionsOf, selectBestRoute } from "./allocator.js";
+import {
+  candidateOffers,
+  explicitCandidateModels,
+  extractModelList,
+  mergePinOptions,
+  pinOptionsOf,
+  pinsFixEffort,
+  selectBestRoute,
+} from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
   computeSessionKey,
@@ -18,6 +26,8 @@ import {
 import { extractRequestFacts } from "./profiler-core.js";
 import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
+
+export { extractModelList };
 
 export const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -54,38 +64,8 @@ export function isVirtualModelName(model, options = {}) {
   return DEFAULT_VIRTUAL_MODELS.includes(clean);
 }
 
-export function extractModelList(source) {
-  if (!source) return null;
-  if (Array.isArray(source)) {
-    const list = source
-      .map((item) => {
-        if (typeof item === "string") return item.trim();
-        if (item && typeof item === "object") {
-          return String(item.id || item.name || item.model || "").trim();
-        }
-        return "";
-      })
-      .filter(Boolean);
-    return list.length > 0 ? list : null;
-  }
-  if (typeof source === "object") {
-    const keys = Object.keys(source)
-      .map((k) => k.trim())
-      .filter(Boolean);
-    return keys.length > 0 ? keys : null;
-  }
-  return null;
-}
-
 export function resolveCandidateModels(body, ctx = {}, options = {}) {
-  const explicit =
-    extractModelList(options.candidateModels) ||
-    extractModelList(options.allowedModels) ||
-    extractModelList(options.availableModels) ||
-    extractModelList(options.models) ||
-    extractModelList(ctx?.models) ||
-    extractModelList(ctx?.availableModels) ||
-    extractModelList(options.modelMap);
+  const explicit = explicitCandidateModels(options, ctx);
 
   if (explicit) {
     return { candidateModels: explicit, hasExplicitCandidates: true, canRewriteModel: true };
@@ -95,7 +75,8 @@ export function resolveCandidateModels(body, ctx = {}, options = {}) {
     return { candidateModels: null, hasExplicitCandidates: false, canRewriteModel: true };
   }
 
-  const rawModel = stripEffortSuffix(body?.model || ctx?.model || "");
+  // A `:effort` here is the user fixing the effort: it stays on the candidate.
+  const rawModel = String(body?.model || ctx?.model || "").trim();
   if (rawModel && !isVirtualModelName(rawModel, options)) {
     return {
       candidateModels: [rawModel],
@@ -124,6 +105,14 @@ export function shouldRouteRequest(model, options = {}) {
   if (!model || typeof model !== "string") return false;
   if (options.routeAllModels === true) return true;
   return isVirtualModelName(model, options);
+}
+
+/** Nothing may route this request: the middleware rejects it rather than deciding again. */
+function blockRoute(ctx, sessionKey, error, warnings) {
+  ctx.state = ctx.state || {};
+  ctx.state.sessionKey = sessionKey;
+  ctx.state.routeBlocked = { error, warnings };
+  ctx.report?.("empty");
 }
 
 export async function onRequest(body, ctx = {}) {
@@ -158,9 +147,11 @@ export async function onRequest(body, ctx = {}) {
 
   const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
   const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
+  const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
   const cont = evaluateProviderContinuation(facts, sessionState, {
     now,
+    pins,
     affinityMode: options.affinityMode || options.affinity || "cache",
     availableModels: candidateModels,
     unhealthyModels: options.unhealthyModels,
@@ -208,6 +199,7 @@ export async function onRequest(body, ctx = {}) {
           realtimeLoop: heldRealtime,
           why: cont.why,
           held: true,
+          pinnedBundle: pins.pinnedBundle,
         },
         facts,
         now
@@ -228,7 +220,9 @@ export async function onRequest(body, ctx = {}) {
       requiredAbility: null,
       score: null,
       components: null,
-      profile: null,
+      profile: sessionState?.profile || null,
+      pins,
+      warnings: [],
       scorer: {
         kind: "continuity_hold",
         held: true,
@@ -286,6 +280,11 @@ export async function onRequest(body, ctx = {}) {
     fetch: options.fetch,
   });
 
+  if (!profile) {
+    blockRoute(ctx, sessionKey, meta.error, [`task profile unavailable: ${meta.detail || meta.error}`]);
+    return undefined;
+  }
+
   const unhealthyModels = [
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
@@ -297,7 +296,7 @@ export async function onRequest(body, ctx = {}) {
   const minContextTokens =
     cont.why === "outgrown" ? Number(facts.estimatedInputTokens || 0) : 0;
 
-  let decision = selectBestRoute(profile, {
+  const decision = selectBestRoute(profile, {
     objective: facts.objective,
     candidateModels,
     catalog: options.catalog,
@@ -307,7 +306,7 @@ export async function onRequest(body, ctx = {}) {
     meteredOk: options.meteredOk,
     now,
     ...realtimeOption,
-    ...pinOptionsOf(options),
+    ...pins,
     continuity: {
       previousModel: cont.previousModel || null,
       previousEffort: cont.previousEffort || null,
@@ -316,20 +315,8 @@ export async function onRequest(body, ctx = {}) {
     },
   });
 
-  // Graceful fallback if all candidates were filtered out by temporary unhealthy/context/quota constraints
-  if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || liveQuotas)) {
-    decision = selectBestRoute(profile, {
-      objective: facts.objective,
-      candidateModels,
-      catalog: options.catalog,
-      now,
-      ...realtimeOption,
-      ...pinOptionsOf(options),
-    });
-  }
-
   if (!decision.ok || !decision.targetModel) {
-    ctx.report?.("empty");
+    blockRoute(ctx, sessionKey, decision.error || "no_route", decision.warnings);
     return undefined;
   }
 
@@ -341,15 +328,17 @@ export async function onRequest(body, ctx = {}) {
     cont.why !== "cold" &&
     cont.why !== "compacted" &&
     cont.why !== "first" &&
-    cont.why !== "worn"
+    cont.why !== "worn" &&
+    !pinsFixEffort(pins)
   ) {
-    finalEffort = keepsEffort(
+    const kept = keepsEffort(
       sessionState,
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
       { ...options, ...realtimeOption }
     );
+    if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept)) finalEffort = kept;
   }
 
   if (sessionKey) {
@@ -363,6 +352,8 @@ export async function onRequest(body, ctx = {}) {
         realtimeLoop: Boolean(decision.realtimeLoop),
         why: cont.why,
         held: false,
+        profile: decision.profile,
+        pinnedBundle: pins.pinnedBundle,
       },
       facts,
       now
@@ -386,6 +377,10 @@ export async function onRequest(body, ctx = {}) {
     score: decision.score,
     components: decision.components,
     profile: decision.profile,
+    bundle: decision.bundle,
+    pins,
+    minContextTokens,
+    warnings: decision.warnings || [],
     scorer: meta,
     continuation: {
       held: false,

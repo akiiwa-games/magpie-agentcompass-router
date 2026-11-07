@@ -11,7 +11,14 @@
  */
 
 import { CANONICAL_ROUTES, INTERACTION_STYLES, KIND_TRAITS } from "./catalog.js";
-import { PROFILE_INTEGERS, REALTIME_LOOP_QUESTION, inferTaskProfile, validateProfile } from "./profiler-core.js";
+import {
+  MULTI_TASK_QUESTION,
+  PROFILE_INTEGERS,
+  REALTIME_LOOP_QUESTION,
+  TASK_COUNT_QUESTION,
+  inferTaskProfile,
+  validateProfile,
+} from "./profiler-core.js";
 
 const SCORE_CACHE = new Map();
 const SCORE_CACHE_MAX = 256;
@@ -111,16 +118,33 @@ function extractExplicitRealtimeLoop(task, options = {}) {
   return undefined;
 }
 
-function cacheKeyOf(task, config) {
+export function cacheKeyOf(task, config) {
   return JSON.stringify([
-    task.objective?.slice(0, 4000) || "",
+    task.objective || "",
+    task.previousUser || "",
     Boolean(task.hasVisualInput),
+    task.toolCount || 0,
+    task.work_kind ?? null,
+    task.difficulty ?? null,
+    task.needs ?? null,
+    task.context ?? null,
+    task.cwd ?? null,
+    task.multi_task ?? null,
+    task.task_count ?? null,
+    task.expected_hours ?? task.hours ?? null,
     config.scorerType || "heuristic",
     config.scorerModel || "",
+    config.scorerBaseUrl || config.scorerUrl || config.jevBaseUrl || "",
+    config.routes ?? null,
     extractExplicitRealtimeLoop(task, config) ?? null,
   ]);
 }
 
+const copied = (value) => (value === undefined ? undefined : JSON.parse(JSON.stringify(value)));
+
+/**
+ * A cached profile, which no caller can change for the next one. An entry that no longer validates is a miss.
+ */
 export function getCachedProfile(key) {
   const entry = SCORE_CACHE.get(key);
   if (!entry) return null;
@@ -128,7 +152,12 @@ export function getCachedProfile(key) {
     SCORE_CACHE.delete(key);
     return null;
   }
-  return entry;
+  try {
+    return { at: entry.at, profile: validateProfile(copied(entry.profile)), meta: copied(entry.meta) };
+  } catch {
+    SCORE_CACHE.delete(key);
+    return null;
+  }
 }
 
 export function putCachedProfile(key, profile, meta) {
@@ -136,7 +165,7 @@ export function putCachedProfile(key, profile, meta) {
     const oldest = SCORE_CACHE.keys().next().value;
     if (oldest !== undefined) SCORE_CACHE.delete(oldest);
   }
-  SCORE_CACHE.set(key, { at: Date.now(), profile, meta });
+  SCORE_CACHE.set(key, { at: Date.now(), profile: copied(profile), meta: copied(meta) });
 }
 
 export function clearProfileCache() {
@@ -182,6 +211,20 @@ export function buildJevScorerPayload(task, model = "jev-latest", routes = CANON
     realtime_loop: {
       type: "noul",
       instructions: REALTIME_LOOP_QUESTION,
+    },
+    multi_task: {
+      type: "noul",
+      instructions: MULTI_TASK_QUESTION,
+    },
+    task_count: {
+      type: "choice",
+      instructions: TASK_COUNT_QUESTION,
+      criteria: {
+        1: "One task.",
+        2: "Two separate tasks.",
+        3: "Three separate tasks.",
+        ">3": "More than three separate tasks.",
+      },
     },
   };
   for (const [name, [instructions, criteria]] of Object.entries(JEV_SCORE_QUESTIONS)) {
@@ -234,6 +277,8 @@ export function parseJevScorerAnswer(response, fallbackTask = {}) {
       ? rtAns.noul ?? rtAns.probabilities?.yes ?? rtAns.yes
       : rtAns;
   raw.realtime_loop = typeof rtVal === "number" && Number.isFinite(rtVal) ? rtVal >= 0.5 : false;
+  raw.multi_task = Number(pick("multi_task", "noul")) >= 0.5;
+  raw.task_count = pick("task_count", "choice");
   return validateProfile(raw);
 }
 
@@ -259,10 +304,120 @@ function extractLastProfileJson(text) {
   return null;
 }
 
+/** The classifier answered, but not with a valid profile (contract R4): never repaired, and never replaced by a guess. */
+class InvalidClassifierOutput extends Error {}
+
+function classifierProfile(build) {
+  try {
+    return build();
+  } catch (err) {
+    throw new InvalidClassifierOutput(String(err?.message || err));
+  }
+}
+
+async function askScorer(task, options, { scorerType, baseUrl, fetchFn, signal, explicitRt }) {
+  let modelUsed = options.scorerModel || "";
+  let profile;
+  if (scorerType === "jev") {
+    const url = baseUrl.endsWith("/v1/systemone") ? baseUrl : `${baseUrl}/v1/systemone`;
+    modelUsed = modelUsed || "jev-latest";
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (options.jevApiKey) {
+      headers.Authorization = `Bearer ${options.jevApiKey}`;
+    }
+    const res = await fetchFn(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(buildJevScorerPayload(task, modelUsed, options.routes || CANONICAL_ROUTES)),
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`Jev scorer HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    profile = classifierProfile(() => parseJevScorerAnswer(data, task));
+    if (explicitRt !== undefined) {
+      profile = { ...profile, realtime_loop: explicitRt };
+    }
+  } else if (scorerType === "openai_compatible") {
+    const url = baseUrl.endsWith("/chat/completions")
+      ? baseUrl
+      : baseUrl.endsWith("/v1")
+        ? `${baseUrl}/chat/completions`
+        : `${baseUrl}/v1/chat/completions`;
+    modelUsed = modelUsed || "gemini-3.8-flash-high";
+    const headers = {
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    };
+    if (options.scorerApiKey) {
+      headers.Authorization = `Bearer ${options.scorerApiKey}`;
+    }
+    const payload = {
+      model: modelUsed,
+      temperature: 0,
+      response_format: { type: "json_object" },
+      messages: [
+        { role: "system", content: SCORER_SYSTEM_PROMPT },
+        {
+          role: "user",
+          content: JSON.stringify({
+            objective: task.objective.slice(0, 12000),
+            has_visual_input: Boolean(task.hasVisualInput),
+            tool_count: task.toolCount || 0,
+          }),
+        },
+      ],
+    };
+    const res = await fetchFn(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!res.ok) {
+      throw new Error(`OpenAI-compatible scorer HTTP ${res.status}`);
+    }
+    const data = await res.json();
+    const content = data?.choices?.[0]?.message?.content;
+    const rawObj = extractLastProfileJson(typeof content === "string" ? content : JSON.stringify(content));
+    if (!rawObj) {
+      throw new InvalidClassifierOutput("Scorer returned no valid task profile JSON");
+    }
+    if (task.hasVisualInput) rawObj.needs_visual = true;
+    if (explicitRt !== undefined) {
+      rawObj.realtime_loop = explicitRt;
+    } else if (rawObj.realtime_loop === undefined || rawObj.realtime_loop === null) {
+      rawObj.realtime_loop = false;
+    }
+    profile = classifierProfile(() => validateProfile(rawObj));
+  } else {
+    throw new Error(`Unsupported scorerType: ${scorerType}`);
+  }
+  return { profile, modelUsed };
+}
+
+function heuristicResult(task, options, explicitRt, meta) {
+  let profile;
+  try {
+    profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
+  } catch (err) {
+    return { profile: null, meta: { ...meta, error: "invalid_caller_profile", detail: String(err?.message || err) } };
+  }
+  if (explicitRt !== undefined) {
+    profile = { ...profile, realtime_loop: explicitRt };
+  }
+  return { profile, meta };
+}
+
 /**
  * Score a task using the deterministic in-process `inferTaskProfile` twin by default.
  * External System-One HTTP scoring is strictly opt-in and only runs when the caller
  * explicitly sets `allowExternalScorer: true` AND provides an explicit `scorerBaseUrl` / `jevBaseUrl`.
+ * `profile` is `null` when the classifier twice answered with an invalid profile (`meta.error`).
  */
 export async function scoreTaskLive(task, options = {}) {
   const started = Date.now();
@@ -286,17 +441,13 @@ export async function scoreTaskLive(task, options = {}) {
   const externalAllowed = options.allowExternalScorer === true;
 
   if (scorerType === "heuristic" || !task?.objective?.trim() || !externalAllowed || !rawBaseUrl) {
-    let profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
-    if (explicitRt !== undefined) {
-      profile = { ...profile, realtime_loop: explicitRt };
-    }
-    const meta = {
+    const result = heuristicResult(task, options, explicitRt, {
       source: "heuristic_twin",
       scorerType: "heuristic",
       durationMs: Date.now() - started,
-    };
-    putCachedProfile(cacheKey, profile, meta);
-    return { profile, meta };
+    });
+    if (result.profile) putCachedProfile(cacheKey, result.profile, result.meta);
+    return result;
   }
 
   const timeoutMs = Math.min(Math.max(Number(options.scorerTimeoutMs) || 6500, 100), 55000);
@@ -304,113 +455,50 @@ export async function scoreTaskLive(task, options = {}) {
   const ctl = new AbortController();
   const timer = setTimeout(() => ctl.abort(), timeoutMs);
   const signal = options.signal ? AbortSignal.any([options.signal, ctl.signal]) : ctl.signal;
+  const call = {
+    scorerType,
+    baseUrl: rawBaseUrl.replace(/\/+$/, ""),
+    fetchFn,
+    signal,
+    explicitRt,
+  };
 
   try {
-    let profile;
-    let modelUsed = options.scorerModel || "";
-    const baseUrl = rawBaseUrl.replace(/\/+$/, "");
-
-    if (scorerType === "jev") {
-      const url = baseUrl.endsWith("/v1/systemone") ? baseUrl : `${baseUrl}/v1/systemone`;
-      modelUsed = modelUsed || "jev-latest";
-      const headers = {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      };
-      if (options.jevApiKey) {
-        headers.Authorization = `Bearer ${options.jevApiKey}`;
-      }
-      const res = await fetchFn(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(buildJevScorerPayload(task, modelUsed, options.routes || CANONICAL_ROUTES)),
-        signal,
-      });
-      if (!res.ok) {
-        throw new Error(`Jev scorer HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      profile = parseJevScorerAnswer(data, task);
-      if (explicitRt !== undefined) {
-        profile = { ...profile, realtime_loop: explicitRt };
-      }
-    } else if (scorerType === "openai_compatible") {
-      const url = baseUrl.endsWith("/chat/completions")
-        ? baseUrl
-        : baseUrl.endsWith("/v1")
-          ? `${baseUrl}/chat/completions`
-          : `${baseUrl}/v1/chat/completions`;
-      modelUsed = modelUsed || "gemini-3.8-flash-high";
-      const headers = {
-        "Content-Type": "application/json",
-        Accept: "application/json",
-      };
-      if (options.scorerApiKey) {
-        headers.Authorization = `Bearer ${options.scorerApiKey}`;
-      }
-      const payload = {
-        model: modelUsed,
-        temperature: 0,
-        response_format: { type: "json_object" },
-        messages: [
-          { role: "system", content: SCORER_SYSTEM_PROMPT },
-          {
-            role: "user",
-            content: JSON.stringify({
-              objective: task.objective.slice(0, 12000),
-              has_visual_input: Boolean(task.hasVisualInput),
-              tool_count: task.toolCount || 0,
-            }),
-          },
-        ],
-      };
-      const res = await fetchFn(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(payload),
-        signal,
-      });
-      if (!res.ok) {
-        throw new Error(`OpenAI-compatible scorer HTTP ${res.status}`);
-      }
-      const data = await res.json();
-      const content = data?.choices?.[0]?.message?.content;
-      const rawObj = extractLastProfileJson(typeof content === "string" ? content : JSON.stringify(content));
-      if (!rawObj) {
-        throw new Error("Scorer returned no valid task profile JSON");
-      }
-      if (task.hasVisualInput) rawObj.needs_visual = true;
-      if (explicitRt !== undefined) {
-        rawObj.realtime_loop = explicitRt;
-      } else if (rawObj.realtime_loop === undefined || rawObj.realtime_loop === null) {
-        rawObj.realtime_loop = false;
-      }
-      profile = validateProfile(rawObj);
-    } else {
-      throw new Error(`Unsupported scorerType: ${scorerType}`);
+    let answer;
+    try {
+      answer = await askScorer(task, options, call);
+    } catch (err) {
+      if (!(err instanceof InvalidClassifierOutput)) throw err;
+      answer = await askScorer(task, options, call);
     }
-
     const meta = {
       source: "system_one_live",
       scorerType,
-      model: modelUsed,
+      model: answer.modelUsed,
       durationMs: Date.now() - started,
     };
-    putCachedProfile(cacheKey, profile, meta);
-    return { profile, meta };
+    putCachedProfile(cacheKey, answer.profile, meta);
+    return { profile: answer.profile, meta };
   } catch (err) {
-    // Graceful deadline/error fallback to the <1ms deterministic twin so requests never fail closed
-    let profile = inferTaskProfile(task, options.routes || CANONICAL_ROUTES);
-    if (explicitRt !== undefined) {
-      profile = { ...profile, realtime_loop: explicitRt };
+    if (err instanceof InvalidClassifierOutput) {
+      return {
+        profile: null,
+        meta: {
+          source: "classifier_invalid",
+          scorerType,
+          error: "classifier_invalid_output",
+          detail: String(err.message).slice(0, 200),
+          durationMs: Date.now() - started,
+        },
+      };
     }
-    const meta = {
+    // Graceful deadline/error fallback to the <1ms deterministic twin so requests never fail closed
+    return heuristicResult(task, options, explicitRt, {
       source: "heuristic_fallback",
       scorerType,
       fallbackReason: String(err?.message || err).slice(0, 120),
       durationMs: Date.now() - started,
-    };
-    return { profile, meta };
+    });
   } finally {
     clearTimeout(timer);
   }

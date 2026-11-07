@@ -25,7 +25,9 @@
     }
   },
   "scripts": {
-    "test": "node --test test/router.test.mjs test/realtime-parity.test.mjs test/sign-in-copy.test.mjs"
+    "test": "node --test test/router.test.mjs test/realtime-parity.test.mjs test/routing-contract.test.mjs test/routing-parity.test.mjs test/sign-in-copy.test.mjs",
+    "catalog:sync": "node scripts/sync-catalog.mjs",
+    "catalog:check": "node scripts/sync-catalog.mjs --check"
   },
   "keywords": [
     "magpie",

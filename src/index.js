@@ -15,7 +15,14 @@
  *    - Shape C (Direct AgentCompass 10-field `/v1/systemone` query): `state.task` + `questions.work_kind` / `reasoning_depth` / etc.
  */
 
-import { pinOptionsOf, rankCandidates, selectBestRoute } from "./allocator.js";
+import {
+  explicitCandidateModels,
+  mergePinOptions,
+  pinOptionsOf,
+  pinsFixEffort,
+  rankCandidates,
+  selectBestRoute,
+} from "./allocator.js";
 import { CANONICAL_ROUTES, canonicalModel } from "./catalog.js";
 import {
   SessionContinuityStore,
@@ -297,10 +304,19 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
             ? rawTaskObj.needs.realtime_loop
             : undefined;
 
+  const pins = mergePinOptions(pinOptionsOf(pluginOptions), state, rawTaskObj);
+  const blockedAnswer = (error, warnings) => ({
+    model,
+    answers: {},
+    agentcompass: { targetModel: null, blocked: true, error, warnings },
+    usage: { input_tokens: Math.max(16, Math.ceil(turnText.length / 4)), output_tokens: 16 },
+  });
+
   // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)
   // when Magpie's `decide.go` passes `previous_message_kind` / `previous_message_reasoning`.
   if (
     !explicitStateRt &&
+    Object.keys(pins).length === 0 &&
     (prevKind || prevReasoning) &&
     isShortFollowupMessage(turnText) &&
     !isCompactionText(turnText)
@@ -397,24 +413,26 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   });
 
+  if (!profile) {
+    return blockedAnswer(meta.error, [`task profile unavailable: ${meta.detail || meta.error}`]);
+  }
+
   const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions);
-  let decision = selectBestRoute(profile, {
+  const decision = selectBestRoute(profile, {
     objective: turnText,
-    candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
+    candidateModels: explicitCandidateModels(pluginOptions) || undefined,
     catalog: pluginOptions.catalog,
     quotas: liveQuotas,
+    unhealthyModels: [
+      ...(pluginOptions.continuityStore?.getUnhealthyModels?.(Date.now()) || []),
+      ...(Array.isArray(pluginOptions.unhealthyModels) ? pluginOptions.unhealthyModels : []),
+    ],
     meteredOk: pluginOptions.meteredOk,
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
-    ...pinOptionsOf(pluginOptions),
+    ...pins,
   });
-  if (!decision.ok && liveQuotas) {
-    decision = selectBestRoute(profile, {
-      objective: turnText,
-      candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
-      catalog: pluginOptions.catalog,
-      ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
-      ...pinOptionsOf(pluginOptions),
-    });
+  if (decision.blocked) {
+    return blockedAnswer(decision.error || "no_route", decision.warnings);
   }
 
   const answers = {};
@@ -434,6 +452,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   let effectiveEffort = decision.targetEffort;
   if (
     !decision.realtimeLoop &&
+    !pinsFixEffort(pins) &&
     prevReasoning &&
     !isCompactionText(turnText) &&
     ((prevKind && matchedChoice && prevKind === matchedChoice) ||
@@ -490,6 +509,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       difficulty: decision.difficulty,
       requiredAbility: decision.requiredAbility,
       realtimeLoop: Boolean(decision.realtimeLoop),
+      warnings: decision.warnings,
       continuation: {
         held: false,
         why: prevKind ? "reclassified" : "first",

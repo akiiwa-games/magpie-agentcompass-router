@@ -25,13 +25,13 @@ Configure `candidateModels` (or `availableModels` / `allowedModels`) in the plug
     "agentcompass": {
       "routeAllModels": false,
       "candidateModels": [
-        "claude-opus-4-6",
-        "claude-sonnet-4-6",
-        "claude-haiku-4-5",
-        "gpt-5.4",
-        "gpt-5.3-codex",
-        "gemini-2.5-pro",
-        "gemini-2.5-flash"
+        "claude-opus-5-5",
+        "claude-sonnet-5-5",
+        "claude-haiku-5-5",
+        "gpt-6.1-sol",
+        "gpt-6-astra",
+        "gemini-4-argon-high",
+        "gemini-3.8-flash-high"
       ]
     }
   }
@@ -41,7 +41,7 @@ Configure `candidateModels` (or `availableModels` / `allowedModels`) in the plug
 Or from the CLI:
 
 ```sh
-magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","claude-sonnet-4-6","gpt-5.4","gemini-2.5-pro","gemini-2.5-flash"]}'
+magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-5-5","claude-sonnet-5-5","gpt-6.1-sol","gemini-4-argon-high","gemini-3.8-flash-high"]}'
 ```
 
 - Requests to `agentcompass` or `agentcompass/*` rewrite `body.model` to `<targetModel>:<targetEffort>` (which Magpie's gateway splits natively) and set protocol-specific effort fields (`reasoning_effort`, `reasoning.effort`, `output_config.effort`).
@@ -160,9 +160,11 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 | `src/profiler-core.js` | Single-pass multi-protocol request fact extractor and deterministic 10D task profiler. |
 | `src/allocator.js` | 7D capability + 3D Model DNA + effort-curve candidate ranker. |
 | `src/quota.js`, `src/quota-loader.js` | 5h/7d window opportunity-cost model, pre-reset surplus sprint, and Magpie pool seat ordering. |
-| `src/catalog.js` | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. |
+| `src/catalog.js` | 16 `work_kind` routes, model capability/DNA catalog, aliases, and `EFFORT_CURVES`. Generated from AgentCompass's `accounts.json` at the commit in `test/fixtures/agentcompass-pin.json` (`npm run catalog:sync`, `npm run catalog:check`). |
 | `src/scorer-live.js`, `src/hooks.js` | Optional external System-One scorer client (LRU + timeout fallback) and programmatic Bun hook helper. |
 | `test/router.test.mjs` | Unit test suite (`npm test` / `bun test`). |
+| `test/realtime-parity.test.mjs`, `test/routing-parity.test.mjs` | The port against AgentCompass's `allocator.py` at the pinned commit; regenerate with `test/fixtures/gen_realtime_parity.py` and `gen_routing_parity.py`. |
+| `test/routing-contract.test.mjs` | One regression test per finding of the routing review. |
 
 ## Tests
 
@@ -192,7 +194,7 @@ magpie plugin list
 在插件选项中配置 `candidateModels`（或 `availableModels` / `allowedModels`），客户端请求 `model: "agentcompass"`（或 `"agentcompass/auto"`，或设 `"routeAllModels": true`）：
 
 ```sh
-magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-4-6","claude-sonnet-4-6","gpt-5.4","gemini-2.5-pro","gemini-2.5-flash"]}'
+magpie plugin options <plugin-spec> '{"candidateModels":["claude-opus-5-5","claude-sonnet-5-5","gpt-6.1-sol","gemini-4-argon-high","gemini-3.8-flash-high"]}'
 ```
 
 - 请求虚拟模型 `agentcompass` / `agentcompass/*` 时，中间件将 `body.model` 改写为 `<targetModel>:<targetEffort>`，并按协议注入思考档位字段（`reasoning_effort`、`reasoning.effort`、`output_config.effort`）。

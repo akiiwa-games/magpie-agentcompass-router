@@ -307,7 +307,7 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
 
 AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 实现的规范名就是它自己，responsiveness 用默认值 `[0.52, "default"]`。而 `origin/main` 的 `resolveModelSpec` 因名字含 `codex` 把它解析成 `gpt-6.1-sol`（tier 3.6）。现在它有独立条目：所有数值都是不高于 `gpt-6-luna` 的保守占位，并在 `basis` 中注明；`disabled_by_default: true` 使默认候选池不变，只有候选池点名时才参与路由。其他含 `codex` 的名字仍走原有的家族回退。
 
-这是非实时路由相对 `origin/main` 唯一的有意差异。下表是 2304 个任务画像的逐条比较（`test/realtime-parity.test.mjs` 中的 `Spark: non-realtime differences…`，每条差异必须归入一种原因，否则测试失败）；不点名 Spark 的候选池差异为 0。
+这是当时（固定 AgentCompass 目录之前）非实时路由相对 `origin/main` 唯一的有意差异，现状见 4.6。下表是 2304 个任务画像的逐条比较（`test/realtime-parity.test.mjs` 中的 `Spark: non-realtime differences…`，每条差异必须归入一种原因，否则测试失败）；不点名 Spark 的候选池差异为 0。
 
 | 候选池 | 低于任务门槛 | 被同池模型超过 | 档位不在列表内 | 没有努力曲线 |
 |---|---:|---:|---:|---:|
@@ -322,6 +322,33 @@ AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 
 - **没有努力曲线**：条目没有 ability/burn 曲线，选出的档位随之不同。
 
 ---
+
+
+### 4.6 与 AgentCompass 的对齐（三仓路由契约 R1–R6）
+
+`src/catalog.js` 的 GENERATED 段由 `scripts/sync-catalog.mjs` 从 AgentCompass `accounts.json` 生成，版本固定在 `test/fixtures/agentcompass-pin.json`，读取方式是 `git show <sha>:...`，不读任何工作树。`MAGPIE_AGENTCOMPASS_COMMIT` 可以临时改用其他提交。AgentCompass 没有的条目在 `scripts/catalog-overlay.mjs`，每条都写了理由。
+
+对拍数据由 `test/fixtures/gen_routing_parity.py` 生成：模型写法 × 档位子集 × 是否实时 × 点名方式 × 画像边界，共 180064 行。仓库里提交的是抽样（每 23 行取 1 行，共 7829 行）；`--out` 可以输出全量，再用 `MAGPIE_ROUTING_PARITY_FIXTURE` 指向它跑测试。AgentCompass 45637c6 上，全量结果如下（只比较选中的模型和档位）：
+
+| 行数 | 占比 | 分类 | 原因 |
+|---:|---:|---|---|
+| 170292 | 94.57% | 一致 | |
+| 9357 | 5.20% | 专项路由 | 候选池里没有该路由的专项模型时，Magpie 不封死路由（`specialist_available`）：网关的候选池由用户配置，不像 AgentCompass 那样来自账户。AgentCompass 排除全部候选 |
+| 220 | 0.12% | Spark | `gpt-5.3-codex-spark` 只有 Magpie 有条目（见 4.5），AgentCompass 按未测量模型评分 |
+| 167 | 0.09% | 关闭思考 | Magpie 让 `none` 损失能力值（`catalog-overlay.mjs` 的 `effort_ability`）；AgentCompass 在模型没有该档曲线时按 High 的 tier 计算，所以降到 `none` 也过得了门槛 |
+| 28 | 0.02% | 同分 | 两边分数相同，顺序不同：Magpie 按候选池顺序，AgentCompass 按账户遍历 |
+
+未解释的差异是 0 行。选中结果一致时分数仍差一个常数 0.03：AgentCompass 对没有容量观测的订阅账户加 `unknown_capacity_penalty`，Magpie 没有这个数据来源，所以不加，这不影响排序。
+
+非实时路由相对对齐之前（ab8baba）有变化，这是 R6 允许的。按裸模型名的 20 个候选池 × 全部画像比较（3520 行），1579 行不变（44.86%），其余按类说明：
+
+| 行数 | 分类 | 原因 |
+|---:|---|---|
+| 699 | Magpie 自有别名去掉了 | `gpt-5.4`、`gpt-5.3-codex`、`o3`、`gpt-4o` 不在 `accounts.json` 里，现在按未知或 family 评分。README 的示例候选池已换成目录里有的名字 |
+| 395 | family、未知名字 | 按 AgentCompass 的做法收缩 tier 和能力向量、不用目标模型的曲线、价格按估算的 3 美元每小时 |
+| 148 | 模型不变、档位变了 | 裸模型名展开成 `dispatch_efforts` 的行（例如 Haiku 只有 high）；曲线来自 `accounts.json` |
+| 404 | 有一侧选不出 | 包含裸名候选池里只有弱模型的情况：`accounts.json` 的 tier 和门槛低于 hard floor |
+| 295 | 换了模型 | 目录表整体更新：59 个模型条目、53 条曲线、14 条路由都和旧的手抄版本不同 |
 
 ## 5. 与 [AgentCompass 本体 (`akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass) 的生态协同
 
