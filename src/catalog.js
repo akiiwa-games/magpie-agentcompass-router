@@ -555,6 +555,30 @@ export const DEFAULT_MODELS = {
       module_precision: 0.67,
     },
   },
+  "gpt-5.3-codex-spark": {
+    basis:
+      "Not in AgentCompass accounts.json and never benchmarked there: every value is a conservative placeholder, none above gpt-6-luna, so a name holding \"codex\" stops being scored as gpt-6.1-sol. No responsiveness: realtime routing uses the 0.52 default, as AgentCompass does for this name. Only used when a pool names it.",
+    disabled_by_default: true,
+    tier: 3.0,
+    cost: 1,
+    visual: 0,
+    usd_per_hour: 0.8,
+    context_window: 128000,
+    efforts: ["low", "medium", "high"],
+    capabilities: {
+      reasoning: 0.5,
+      coding: 0.6,
+      exploration: 0.5,
+      anti_hallucination: 0.5,
+      visual: 0,
+      gui: 0,
+    },
+    subjective: {
+      divergence: 0.3,
+      global_rigor: 0.3,
+      module_precision: 0.6,
+    },
+  },
   "gpt-6-luna": {
     tier: 3.2,
     cost: 1,
@@ -1917,6 +1941,9 @@ export function resolveModelSpec(rawModel, models = DEFAULT_MODELS, aliases = MO
   if (models[name]) return { canonical: name, spec: models[name] };
   // Fuzzy family fallback for provider-specific or date-suffixed model IDs
   const lower = name.toLowerCase();
+  if (lower.includes("codex-spark") && models["gpt-5.3-codex-spark"]) {
+    return { canonical: "gpt-5.3-codex-spark", spec: models["gpt-5.3-codex-spark"] };
+  }
   if (lower.includes("opus")) return { canonical: "claude-opus-5-5", spec: models["claude-opus-5-5"] };
   if (lower.includes("fable")) return { canonical: "claude-fable-5-1", spec: models["claude-fable-5-1"] };
   if (lower.includes("sonnet")) return { canonical: "claude-sonnet-5-5", spec: models["claude-sonnet-5-5"] };

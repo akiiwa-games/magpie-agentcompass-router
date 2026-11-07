@@ -35,6 +35,9 @@ if [ -n "${BASELINE_SRC:-}" ]; then
   export BASELINE_PLUGIN_DIR="$SANDBOX/agentcompass-main"
 fi
 
+# REAL_CODEX_AUTH: a Codex auth.json, for Scenario 13's real upstream. It is only read: Scenario 13 keeps a copy without the
+# refresh token on this tmpfs and deletes it. Without it Scenario 13 is reported as skipped.
+
 export HOME="$SANDBOX/home"
 export TMPDIR="$SANDBOX/tmp"
 export XDG_CONFIG_HOME="$SANDBOX/config"

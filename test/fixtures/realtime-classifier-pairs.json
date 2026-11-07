@@ -1,0 +1,78 @@
+{
+  "source": "AgentCompass skills/agent-compass/references/classifier-cases.json",
+  "version": "2026-11-06",
+  "cases": [
+    {
+      "id": "realtime_loop_ticket_sniping_cn",
+      "task": "守着浏览器里的演出票务页面，盯着12:00开售倒计时，一旦放票或有人退票回流出现余票，第一时间点击选座并立即提交抢票订单。",
+      "realtime_loop": true,
+      "work_kind": "computer_use"
+    },
+    {
+      "id": "realtime_loop_flash_sale_en",
+      "task": "Keep watching the limited-edition product page in the open browser window and click Add to Cart and Checkout immediately as soon as the flash sale countdown hits zero.",
+      "realtime_loop": true,
+      "work_kind": "computer_use"
+    },
+    {
+      "id": "realtime_loop_orderbook_watch_cn",
+      "task": "在本地行情客户端持续实时盯盘，观察买卖盘口价差与挂单量变化，当价差收窄到阈值以内时立刻点击下单按钮完成成交。",
+      "realtime_loop": true,
+      "work_kind": "computer_use"
+    },
+    {
+      "id": "realtime_loop_course_polling_click_cn",
+      "task": "每隔几秒轮询刷新教务选课网页，持续盯着目标课程名额列，一旦名额从0变成有空位立刻点击选课并确认提交。",
+      "realtime_loop": true,
+      "work_kind": "computer_use"
+    },
+    {
+      "id": "realtime_loop_api_orderbook_arbitrage_cn",
+      "task": "通过 WebSocket 持续监听币安 BTC/USDT 盘口深度，一旦你观察到跨市场价差达到阈值立即调用本地 REST API 下单套利（由你在循环中持续盯盘决策下单，不操作 GUI）。",
+      "realtime_loop": true,
+      "work_kind": "tool_execution"
+    },
+    {
+      "id": "realtime_loop_cli_ticket_api_polling_cn",
+      "task": "在命令行中循环调用 curl 轮询票务余票接口，一旦返回余票大于 0 立即发送 POST 请求锁单完成抢票（由你亲自在循环中轮询并立即执行，不打开浏览器）。",
+      "realtime_loop": true,
+      "work_kind": "tool_execution"
+    },
+    {
+      "id": "non_realtime_write_ticket_script_cn",
+      "task": "编写一个 Python 抢票脚本 `scripts/ticket_sniper.py`，支持并发轮询票务接口、解析放票状态并在发现余票时立即发送下单请求，附带单元测试。",
+      "realtime_loop": false,
+      "work_kind": "general_implementation"
+    },
+    {
+      "id": "non_realtime_fix_flash_sale_bot_en",
+      "task": "Fix the token-refresh race condition in the flash-sale sniping bot `bots/flash_buyer.py` so concurrent polling workers do not overwrite the session cookie, and add a regression test.",
+      "realtime_loop": false,
+      "work_kind": "debug_review"
+    },
+    {
+      "id": "non_realtime_analyze_orderbook_latency_en",
+      "task": "Analyze the live order-book watcher telemetry in `logs/order_watcher.jsonl` to identify why p99 tick-to-order latency spiked during the market open.",
+      "realtime_loop": false,
+      "work_kind": "exploration_analysis"
+    },
+    {
+      "id": "non_realtime_implement_realtime_page_refresh_cn",
+      "task": "实现实时刷新页面與修复页面轮询逻辑，并在前端设计盯盘看板、排查客户端循环等待异常。",
+      "realtime_loop": false,
+      "work_kind": "frontend_implementation"
+    },
+    {
+      "id": "non_realtime_design_realtime_trading_dashboard_cn",
+      "task": "设计一个实时看盘界面",
+      "realtime_loop": false,
+      "work_kind": "frontend_implementation"
+    },
+    {
+      "id": "non_realtime_oneoff_browser_click_save_cn",
+      "task": "打开浏览器页面立刻点击保存按钮",
+      "realtime_loop": false,
+      "work_kind": "computer_use"
+    }
+  ]
+}

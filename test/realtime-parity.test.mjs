@@ -30,7 +30,7 @@ import {
 } from "../src/allocator.js";
 import { SessionContinuityStore, evaluateProviderContinuation, keepsEffort } from "../src/continuity.js";
 import { onRequest as hooksOnRequest } from "../src/hooks.js";
-import { onRequest as middlewareOnRequest } from "../src/middleware.js";
+import { onProvider as middlewareOnProvider, onRequest as middlewareOnRequest } from "../src/middleware.js";
 import { handleSystemOneRequest } from "../src/index.js";
 import { SCORER_SYSTEM_PROMPT, scoreTaskLive } from "../src/scorer-live.js";
 
@@ -200,6 +200,7 @@ test("R3 parity: canonicalModel and resolveModelSpec match origin/main on every 
   const names = [...Object.keys(FIXTURE.canonical), "claude-opus-5-5:default", "openrouter/qwen/foo", "qwen/foo", "OpenRouter/OpenAI/GPT-5-Mini"];
   for (const name of names) {
     assert.equal(canonicalModel(name), baseline.catalog.canonicalModel(name), name);
+    if (name.includes("codex-spark")) continue; // has its own entry now; see the Spark tests
     const head = resolveModelSpec(name);
     const base = baseline.catalog.resolveModelSpec(name);
     assert.equal(head.canonical, base.canonical, name);
@@ -353,7 +354,9 @@ test("m1-R3 Python: responsiveness key equals allocator.canonical on every spell
   for (const [name, canonical] of Object.entries(FIXTURE.canonical)) {
     const { key, known } = resolveResponsivenessModelKey(name);
     if (key !== canonical) diffs.push(`${name}: js=${key} py=${canonical}`);
-    if (known !== FIXTURE.models.includes(canonical)) diffs.push(`${name}: known=${known}`);
+    // Spark has a catalog entry here and none in accounts.json; its speed is the same default either way
+    const pyKnown = FIXTURE.models.includes(canonical) || canonical === "gpt-5.3-codex-spark";
+    if (known !== pyKnown) diffs.push(`${name}: known=${known}`);
   }
   assert.deepEqual(diffs, []);
 });
@@ -617,14 +620,14 @@ test("M3-R3: keepsEffort reads the realtime flag off the session", () => {
 
 test("M3-R3: a hold keeps the routed name instead of rewriting it to the canonical model", async () => {
   const store = new SessionContinuityStore();
-  const options = { continuityStore: store, candidateModels: ["gpt-5.3-codex-spark:medium"], now: NOW };
+  const options = { continuityStore: store, candidateModels: ["gpt-5.3-codex:medium"], now: NOW };
   const first = await hooksTurn(options, [{ role: "user", content: REALTIME_FIRST_TURN }], { realtime_loop: true });
-  assert.equal(first.state.route.targetModel, "gpt-5.3-codex-spark");
+  assert.equal(first.state.route.targetModel, "gpt-5.3-codex");
   store.recordResponse(first.state.sessionKey, { usage: { input_tokens: 2000, output_tokens: 300 } }, {}, NOW);
   const second = await hooksTurn(options, twoTurns("Redesign the distributed architecture and find the root cause of this deadlock."), {});
   assert.equal(second.state.route.continuation.held, true);
-  assert.equal(second.state.route.targetModel, "gpt-5.3-codex-spark");
-  assert.equal(second.state.route.modelWithEffort, "gpt-5.3-codex-spark:medium");
+  assert.equal(second.state.route.targetModel, "gpt-5.3-codex");
+  assert.equal(second.state.route.modelWithEffort, "gpt-5.3-codex:medium");
   assert.equal(second.state.route.realtimeLoop, true);
 });
 
@@ -726,4 +729,105 @@ test("Sandbox: pin options reach routing through the middleware and warn in the 
   assert.match(warn.mock.calls[0].arguments[0], /^agentcompass: pinned .*below the realtime_loop floor/);
   assert.equal(await run({}, pin), await run({}, {}), "a pin does nothing without realtime_loop");
   assert.equal(warn.mock.callCount(), 1);
+});
+
+test("m1-R4: a middleware with its own store keeps the realtime flag of the hooks' route", async () => {
+  const pool = ["gpt-6-astra:medium", "claude-sonnet-5-5:medium"];
+  const hooksStore = new SessionContinuityStore();
+  const middlewareStore = new SessionContinuityStore();
+  const body = { model: "agentcompass/auto", messages: [{ role: "user", content: REALTIME_FIRST_TURN }], realtime_loop: true };
+  const ctx = { state: {}, options: { continuityStore: hooksStore, candidateModels: pool, now: NOW } };
+  await hooksOnRequest(body, ctx);
+  const route = ctx.state.route;
+  assert.equal(route.realtimeLoop, true);
+  await middlewareOnRequest({ ...body, model: "agentcompass/auto" }, { state: { route }, options: { continuityStore: middlewareStore, candidateModels: pool, now: NOW } });
+  assert.equal(middlewareStore.get(route.continuation.sessionKey, NOW).realtimeLoop, true);
+  assert.equal(hooksStore.get(route.continuation.sessionKey, NOW).realtimeLoop, true);
+});
+
+test("m2-R4: onProvider and the decision provider honor pins, and only under realtime_loop", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const pool = ["gemini-4-argon-high", "gpt-6-astra"];
+  const pin = { pinnedModel: "gemini-4-argon-high" };
+  const provider = async (extra, pins) => {
+    const options = { continuityStore: new SessionContinuityStore(), candidateModels: pool, modelsByProvider: { p: pool }, routePerProvider: true, now: NOW, ...pins };
+    const ctx = { state: {}, options };
+    const body = { model: "agentcompass/auto", messages: [{ role: "user", content: "Tune the live loop" }], ...extra };
+    await middlewareOnRequest(body, ctx);
+    middlewareOnProvider(body, { ...ctx, provider: { id: "p" } });
+    return body.model;
+  };
+  assert.equal(await provider({ realtime_loop: true }, pin), "gemini-4-argon-high:high");
+  assert.match(await provider({ realtime_loop: true }, {}), /^gpt-6-astra:/);
+  assert.equal(await provider({}, pin), await provider({}, {}));
+
+  const questions = { effort: { type: "level" }, intent: { criteria: { argon: "gemini-4-argon-high", astra: "gpt-6-astra", none: "none of these" } } };
+  const effort = async (state, pins) =>
+    (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", ...state }, questions }, { candidateModels: pool, ...pins })).answers.effort;
+  assert.deepEqual(await effort({ realtime_loop: true }, { ...pin, pinnedEffort: "high" }), await effort({ realtime_loop: true }, { candidateModels: ["gemini-4-argon-high"], ...pin }));
+  assert.notDeepEqual(await effort({ realtime_loop: true }, pin), await effort({ realtime_loop: true }, {}));
+  assert.deepEqual(await effort({}, pin), await effort({}, {}), "no pin effect without realtime_loop");
+});
+
+test("m3-R4: the slow pin warning names the model the speed was read for", () => {
+  const profile = { ...GRID[0], work_kind: "general_implementation", reasoning_depth: 1, code_complexity: 1, needs_visual: false, needs_gui: false, realtime_loop: true };
+  const warningOf = (candidate, pinnedModel) => selectBestRoute(profile, { candidateModels: [candidate], pinnedModel, now: NOW }).warnings[0];
+  const row = (m) => FIXTURE.responsiveness[m].high[0].toFixed(2);
+  assert.match(warningOf("claude-opus-4-6:high", "claude-opus-4-6"), new RegExp(`\\(claude-opus-4-6@high\\) responsiveness ${row("claude-opus-4-6")}`));
+  assert.match(warningOf("gemini-4-argon-high:high", "gemini-4-argon-high"), /\(gemini-4-argon-high@high\)/);
+});
+
+const SPARK = "gpt-5.3-codex-spark";
+
+test("Spark: every spelling has its own conservative entry and none resolves to gpt-6.1-sol", () => {
+  for (const name of [SPARK, `openai/${SPARK}`, `codex/${SPARK}:medium`, "OpenAI/GPT-5.3-Codex-Spark", `${SPARK}-20260212`, `${SPARK}@20260212`, `${SPARK}-preview`, `${SPARK}-latest`]) {
+    const { canonical, spec } = resolveModelSpec(name);
+    assert.equal(canonical, SPARK, name);
+    assert.equal(spec.tier, 3.0, name);
+  }
+  const spark = resolveModelSpec(SPARK).spec;
+  const luna = resolveModelSpec("gpt-6-luna").spec;
+  assert.ok(spark.tier <= luna.tier);
+  assert.ok(spark.cost <= luna.cost);
+  for (const [k, v] of Object.entries(spark.capabilities)) assert.ok(v <= luna.capabilities[k], k);
+  assert.match(spark.basis, /Not in AgentCompass accounts\.json/);
+  assert.equal(FIXTURE.models.includes(SPARK), false, "If AgentCompass lists Spark now, copy its values instead");
+  // Other codex names keep the family fallback, the default pool never picks Spark
+  assert.equal(resolveModelSpec("gpt-5.3-codex").canonical, "gpt-6.1-sol");
+  assert.equal(resolveModelSpec("some-codex-model").canonical, "gpt-6.1-sol");
+  assert.ok(rankCandidates(GRID[0], { now: NOW }).allCandidates.every((c) => c.canonicalModel !== SPARK));
+  // Named in a realtime pool it runs on the same default as in AgentCompass
+  assert.deepEqual(FIXTURE.responsiveness[SPARK].high, [0.52, "default"]);
+  const bundle = bundleResponsiveness({ model: SPARK, effort: "high" });
+  assert.deepEqual([bundle.value, bundle.source], [0.52, "default"]);
+});
+
+test("Spark: non-realtime differences from origin/main are all Spark's own entry, each with a reason", (t) => {
+  if (!baseline) return t.skip(baselineSkip);
+  // Every row names why origin/main, which scored Spark as gpt-6.1-sol (tier 3.6, its efforts and curves), chose otherwise.
+  const reasonFor = (base, head, sparkRow) => {
+    if (base.selected.canonicalModel !== "gpt-6.1-sol" || !base.selected.id.includes(SPARK)) return null;
+    if (head.selected?.model?.includes(SPARK)) {
+      return ["xhigh", "max"].includes(base.selected.effort) ? "effort-not-listed" : "no-effort-curve";
+    }
+    return sparkRow?.eligible ? "outscored-by-peer" : "below-the-task-gate";
+  };
+  const pools = { "spark alone": [SPARK], "spark + luna": [SPARK, "gpt-6-luna"], "spark + sol": [SPARK, "gpt-6.1-sol"], "spark + flash + sonnet": [SPARK, "claude-sonnet-5-5", "gemini-3.8-flash-high"] };
+  const counts = {};
+  for (const [name, pool] of Object.entries(pools)) {
+    counts[name] = {};
+    for (const profile of GRID) {
+      const opts = { candidateModels: pool, now: NOW };
+      const head = rankCandidates(profile, opts);
+      const base = baseline.allocator.rankCandidates(profile, opts);
+      if ((head.selected?.id ?? null) === (base.selected?.id ?? null)) continue;
+      const sparkRows = head.allCandidates.filter((c) => c.model === SPARK);
+      const reason = reasonFor(base, head, sparkRows.find((c) => c.eligible) || sparkRows[0]);
+      assert.ok(reason, `${name}: a difference that is not Spark's: ${base.selected?.id} -> ${head.selected?.id} on ${JSON.stringify(profile)}`);
+      counts[name][reason] = (counts[name][reason] || 0) + 1;
+    }
+    assert.ok(Object.keys(counts[name]).length > 0, `${name}: the entry changed nothing, so this test compares nothing`);
+  }
+  // Pools that do not name Spark are the "R3 parity" tests above: 0 differences.
+  t.diagnostic(JSON.stringify(counts));
 });

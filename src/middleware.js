@@ -565,6 +565,7 @@ export function onRequest(body, ctx = {}) {
               effort: decision.targetEffort || "high",
               workKind: decision.workKind || "general_implementation",
               difficulty: decision.difficulty || "routine",
+              realtimeLoop: Boolean(decision.realtimeLoop),
               why: decision.continuation?.why || "first",
               held: Boolean(decision.continuation?.held),
             },
@@ -659,6 +660,7 @@ export function onProvider(body, ctx = {}) {
         catalog: options.catalog,
         quotas: options.quotas,
         meteredOk: options.meteredOk,
+        ...pinOptionsOf(options),
       });
       if (routed.ok && routed.targetModel) {
         const updated = {

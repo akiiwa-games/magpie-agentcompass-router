@@ -194,7 +194,7 @@ export async function onRequest(body, ctx = {}) {
       }
     );
     const canonical = canonicalModel(cont.model, options.catalog?.aliases);
-    // A realtime session stays on the name it was routed to (`gpt-5.3-codex-spark`, not its canonical `gpt-6.1-sol`).
+    // A realtime session stays on the name it was routed to (`gpt-5.3-codex`, not its canonical `gpt-6.1-sol`).
     const heldModel = heldRealtime && sessionState?.target ? sessionState.target : cont.model;
     if (sessionKey) {
       store.recordRequest(

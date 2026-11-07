@@ -15,7 +15,7 @@
  *    - Shape C (Direct AgentCompass 10-field `/v1/systemone` query): `state.task` + `questions.work_kind` / `reasoning_depth` / etc.
  */
 
-import { rankCandidates, selectBestRoute } from "./allocator.js";
+import { pinOptionsOf, rankCandidates, selectBestRoute } from "./allocator.js";
 import { CANONICAL_ROUTES, canonicalModel } from "./catalog.js";
 import {
   SessionContinuityStore,
@@ -405,6 +405,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     quotas: liveQuotas,
     meteredOk: pluginOptions.meteredOk,
     ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
+    ...pinOptionsOf(pluginOptions),
   });
   if (!decision.ok && liveQuotas) {
     decision = selectBestRoute(profile, {
@@ -412,6 +413,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
       catalog: pluginOptions.catalog,
       ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
+      ...pinOptionsOf(pluginOptions),
     });
   }
 

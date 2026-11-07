@@ -27,6 +27,8 @@
  * - Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down, on every protocol
  * - Scenario 11: A realtime session's later turns hold, with no reroute and no effort ratchet
  * - Scenario 12: A pinned slow model is kept, with a warning in Magpie's log
+ * - Scenario 13: A real upstream (`REAL_CODEX_AUTH`): no `realtime_loop` on the wire, routes as on the mock, and the
+ *   `openai_compatible` classifier on 12 paired hard cases
  */
 
 import assert from "node:assert/strict";
@@ -40,6 +42,7 @@ const SANDBOX_ROOT = process.env.MAGPIE_SANDBOX_ROOT || "/run/magpie-sandbox";
 const MAGPIE_BIN = process.env.MAGPIE_BIN || path.join(SANDBOX_ROOT, "magpie");
 const PLUGIN_DIR = process.env.PLUGIN_DIR || path.join(SANDBOX_ROOT, "agentcompass");
 const BASELINE_PLUGIN_DIR = process.env.BASELINE_PLUGIN_DIR || "";
+const REAL_CODEX_AUTH = process.env.REAL_CODEX_AUTH || "";
 
 const ALL_MODELS = [
   "claude-opus-5-5",
@@ -1802,6 +1805,221 @@ async function main() {
       console.log(
         `[PASS] Scenario 12 (pinned slow model): Argon ${routedAs(argonIdeation)} / ${routedAs(argonDebug)}, opus ${routedAs(opusPinned)}, no pin ${routedAs(unpinned)}; log: ${warningsLogged()[before]}`
       );
+    }
+
+    // =========================================================================
+    // SCENARIO 13: A real upstream (the Codex sign-in) behind the same gateway and plugin
+    // =========================================================================
+    // Only an access token goes in. The refresh token rotates: a Magpie refreshing a copy of it would sign the machine's
+    // own Codex out (refresh_token_reused), and `magpie accounts import` spends it outright, so neither is used.
+    // The copy lives on the sandbox's tmpfs and goes with this scenario. Nothing here logs a credential or a real log line
+    // other than the observer's, and the requests' model and effort come from the observer plugin.
+    if (!REAL_CODEX_AUTH) {
+      report.scenarios.scenario13_real_upstream = { pass: null, skipped: "REAL_CODEX_AUTH not set" };
+      console.log("[SKIP] Scenario 13 (real upstream): REAL_CODEX_AUTH not set");
+    } else {
+      const root = path.join(SANDBOX_ROOT, "real");
+      const realGw = 13429;
+      const realWeb = 13430;
+      const realCookie = `magpie_web_${realWeb}=${webKey}`;
+      const realEnv = {
+        ...env,
+        HOME: path.join(root, "home"),
+        TMPDIR: path.join(root, "tmp"),
+        XDG_CONFIG_HOME: path.join(root, "config"),
+        XDG_CACHE_HOME: path.join(root, "cache"),
+        XDG_DATA_HOME: path.join(root, "data"),
+        XDG_STATE_HOME: path.join(root, "state"),
+        MAGPIE_ADDR: `127.0.0.1:${realGw}`,
+      };
+      const observerDir = path.join(PLUGIN_DIR, "test", "fixtures", "route-observer");
+      const realLogs = [];
+      let realProc = null;
+      try {
+        for (const dir of ["home/.codex", "tmp", "config", "cache", "data", "state"]) fs.mkdirSync(path.join(root, dir), { recursive: true, mode: 0o700 });
+        const signIn = JSON.parse(fs.readFileSync(REAL_CODEX_AUTH, "utf8"));
+        delete signIn.tokens.refresh_token;
+        fs.writeFileSync(path.join(root, "home", ".codex", "auth.json"), JSON.stringify(signIn), { mode: 0o600 });
+        const realBin = path.join(root, "magpie");
+        fs.copyFileSync(MAGPIE_BIN, realBin);
+        fs.chmodSync(realBin, 0o755);
+
+        const REAL_POOL = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra", "gpt-6-sol", "gpt-6-luna"];
+        const realOptions = { enableDecisionProvider: true, injectProtocolEffort: true, useCache: false, candidateModels: REAL_POOL.map((m) => `codex/${m}`) };
+        await runMagpieCli(["plugin", "add", PLUGIN_DIR], realEnv, realBin);
+        await runMagpieCli(["plugin", "options", PLUGIN_DIR, JSON.stringify(realOptions)], realEnv, realBin);
+        await runMagpieCli(["plugin", "login", "agentcompass"], realEnv, realBin);
+        await runMagpieCli(["plugin", "add", observerDir], realEnv, realBin);
+        realProc = await startMagpieWeb(realEnv, realGw, realWeb, realCookie, realLogs, realBin);
+
+        // The sign-in's models come in a moment after the gateway starts
+        let served = [];
+        for (let i = 0; i < 60 && !REAL_POOL.every((m) => served.includes(`codex/${m}`)); i++) {
+          if (i > 0) await new Promise((r) => setTimeout(r, 500));
+          const listed = await (await fetch(`http://127.0.0.1:${realGw}/v1/models`, { headers: gwHeaders })).json();
+          served = (listed.data || []).map((m) => m.id);
+        }
+        for (const m of REAL_POOL) assert.ok(served.includes(`codex/${m}`), `the Codex sign-in must serve codex/${m}`);
+
+        const observed = () =>
+          realLogs
+            .join("")
+            .split("\n")
+            .filter((l) => l.includes("route-observer {"))
+            .map((l) => JSON.parse(l.slice(l.indexOf("route-observer {") + "route-observer ".length)));
+        const REAL_TIMEOUT_MS = 240_000;
+        const callReal = async (requestPath, body) => {
+          const before = observed().length;
+          const started = Date.now();
+          const resp = await fetch(`http://127.0.0.1:${realGw}${requestPath}`, {
+            method: "POST",
+            headers: gwHeaders,
+            body: JSON.stringify(body),
+            signal: AbortSignal.timeout(REAL_TIMEOUT_MS),
+          });
+          const text = await resp.text();
+          for (let i = 0; i < 25 && observed().length <= before; i++) await new Promise((r) => setTimeout(r, 200));
+          const seen = observed().slice(before);
+          let replied = null;
+          try {
+            const parsed = JSON.parse(text);
+            replied = parsed.choices?.[0]?.message?.content ?? parsed.output?.flatMap((o) => o.content || []).find((c) => c.text)?.text ?? null;
+          } catch {}
+          return {
+            status: resp.status,
+            ms: Date.now() - started,
+            replied: replied ? replied.slice(0, 40) : null,
+            error: resp.status === 200 ? null : text.slice(0, 200),
+            sent: seen[seen.length - 1] || null,
+          };
+        };
+        const asRoute = (sent) => {
+          if (!sent?.model) return null;
+          const name = sent.model.replace(/^codex\//, "");
+          return name.includes(":") ? name : `${name}:${sent.effort}`;
+        };
+
+        // The same requests on the mock upstream, with the same pool under its own provider name
+        const REPLY = " Reply with exactly: OK";
+        const realText = `${CODING}${REPLY}`;
+        await setPluginOptions({ ...basePluginOptions, candidateModels: REAL_POOL.map((m) => `upstream/${m}`) });
+        const mockPlain = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${realText}`)] });
+        assert.equal(mockPlain.status, 200);
+        const mockPlainRoute = routedAs(lastUp());
+        const mockLive = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${realText} `)], realtime_loop: true });
+        assert.equal(mockLive.status, 200);
+        const mockLiveRoute = routedAs(lastUp());
+        await setPluginOptions(basePluginOptions);
+
+        const plain = await callReal("/v1/chat/completions", { model: "agentcompass/auto", messages: [userMsg(realText)] });
+        const live = await callReal("/v1/chat/completions", { model: "agentcompass/auto", messages: [userMsg(`${realText} `)], realtime_loop: true });
+        const liveResponses = await callReal("/v1/responses", {
+          model: "agentcompass/auto",
+          input: [{ role: "user", content: [{ type: "input_text", text: `${realText}  ` }] }],
+          realtime_loop: true,
+        });
+        const named = await callReal("/v1/chat/completions", { model: "codex/gpt-6-luna", messages: [userMsg(`Say OK.${REPLY}`)], realtime_loop: true });
+        for (const [name, call] of Object.entries({ plain, live, liveResponses, named })) {
+          assert.equal(call.status, 200, `${name} on the real upstream: ${call.error}`);
+          assert.ok(call.replied, `${name}: the real upstream must answer with text`);
+          assert.equal(call.sent?.flag, false, `${name}: realtime_loop must not go on to the real upstream`);
+          assert.equal(call.sent?.provider, "codex", `${name}: served by the Codex sign-in`);
+        }
+        assert.equal(asRoute(plain.sent), mockPlainRoute, "non-realtime: the real upstream's route must be the mock's");
+        assert.equal(asRoute(live.sent), mockLiveRoute, "realtime: the real upstream's route must be the mock's");
+        assert.notEqual(mockPlainRoute, mockLiveRoute, "the pair must show realtime routing doing something");
+
+        // Control: with AgentCompass off the flag does go on, so the observer's false above means something
+        const toggle = async (Off) => {
+          const r = await fetch(`http://127.0.0.1:${realWeb}/api/plugins/off`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json", Cookie: realCookie },
+            body: JSON.stringify({ Spec: PLUGIN_DIR, Off }),
+          });
+          assert.equal(r.status, 200);
+        };
+        await toggle(true);
+        const control = await callReal("/v1/chat/completions", { model: "codex/gpt-6-luna", messages: [userMsg(`Say OK.${REPLY}`)], realtime_loop: true });
+        await toggle(false);
+        assert.equal(control.sent?.flag, true, "With AgentCompass off the observer must see the flag");
+
+        // The classifier on a real endpoint: scoreTaskLive through this gateway, on the 12 paired hard cases
+        const pairs = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "test", "fixtures", "realtime-classifier-pairs.json"), "utf8")).cases;
+        const { scoreTaskLive } = await import(path.join(PLUGIN_DIR, "src", "scorer-live.js"));
+        const scorerModel = process.env.REAL_SCORER_MODEL || "codex/gpt-6-luna";
+        const scored = [];
+        for (const c of pairs) {
+          const { profile, meta } = await scoreTaskLive(
+            { objective: c.task },
+            {
+              scorerType: "openai_compatible",
+              allowExternalScorer: true,
+              scorerBaseUrl: `http://127.0.0.1:${realGw}/v1`,
+              scorerApiKey: "sk-local-agent",
+              scorerModel,
+              scorerTimeoutMs: 55_000,
+              useCache: false,
+            }
+          );
+          scored.push({
+            id: c.id,
+            expected: c.realtime_loop,
+            got: profile.realtime_loop === true,
+            expectedKind: c.work_kind,
+            gotKind: profile.work_kind,
+            source: meta.source,
+            error: meta.fallbackReason || null,
+            ms: meta.durationMs ?? null,
+          });
+        }
+        const answered = scored.filter((s) => s.source === "system_one_live");
+        const agree = answered.filter((s) => s.got === s.expected);
+        const kindAgree = answered.filter((s) => s.gotKind === s.expectedKind);
+        const missed = scored.filter((s) => s.got !== s.expected || s.source !== "system_one_live");
+        assert.equal(answered.length, pairs.length, `Every pair must be answered by the real classifier, not a fallback: ${JSON.stringify(missed)}`);
+
+        report.scenarios.scenario13_real_upstream = {
+          pass: true,
+          upstream: "Codex sign-in, access token only (refresh token never copied)",
+          routes: {
+            nonRealtime: { real: asRoute(plain.sent), mock: mockPlainRoute, ms: plain.ms, status: plain.status },
+            realtime: { real: asRoute(live.sent), mock: mockLiveRoute, ms: live.ms, status: live.status },
+            realtimeResponses: { real: asRoute(liveResponses.sent), ms: liveResponses.ms, status: liveResponses.status },
+            namedDirectly: { real: asRoute(named.sent), ms: named.ms, status: named.status },
+          },
+          flagSentOn: false,
+          controlWithPluginOff: { observerSawFlag: control.sent?.flag, status: control.status, error: control.error },
+          classifier: {
+            model: scorerModel,
+            cases: pairs.length,
+            answered: answered.length,
+            msPerCase: [Math.min(...answered.map((s) => s.ms)), Math.max(...answered.map((s) => s.ms))],
+            realtimeLoopAgreement: `${agree.length}/${pairs.length}`,
+            workKindAgreement: `${kindAgree.length}/${pairs.length}`,
+            disagreements: scored
+              .filter((s) => s.got !== s.expected || s.gotKind !== s.expectedKind)
+              .map(({ id, expected, got, expectedKind, gotKind }) => ({ id, expected, got, expectedKind, gotKind })),
+          },
+        };
+        report.steps.push({
+          test: "Scenario 13: real upstream (Codex sign-in): no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases",
+          ...report.scenarios.scenario13_real_upstream,
+        });
+        console.log(
+          `[PASS] Scenario 13 (real upstream): non-realtime ${asRoute(plain.sent)} (mock ${mockPlainRoute}) ${plain.status} in ${plain.ms}ms; realtime ${asRoute(live.sent)} (mock ${mockLiveRoute}) ${live.status} in ${live.ms}ms; /v1/responses ${asRoute(liveResponses.sent)} ${liveResponses.status}; named ${asRoute(named.sent)} ${named.status}; flag on the wire: none (plugin off control: observer ${control.sent?.flag}, HTTP ${control.status}); classifier ${scorerModel}: realtime_loop ${agree.length}/${pairs.length}, work_kind ${kindAgree.length}/${pairs.length}`
+        );
+      } catch (err) {
+        report.scenarios.scenario13_real_upstream = { pass: false };
+        console.error(`[Linux Sandbox] Scenario 13 observer lines: ${realLogs.join("").split("\n").filter((l) => l.includes("route-observer {")).slice(-8).join(" | ")}`);
+        throw err;
+      } finally {
+        if (realProc && !realProc.killed) {
+          realProc.kill("SIGTERM");
+          await new Promise((r) => setTimeout(r, 300));
+        }
+        fs.rmSync(root, { recursive: true, force: true });
+        assert.equal(fs.existsSync(root), false, "the sign-in copy must be gone after Scenario 13");
+      }
     }
 
     // Save complete JSON report

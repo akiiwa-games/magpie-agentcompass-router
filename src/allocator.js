@@ -1396,11 +1396,12 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (taskCtx.realtime_loop) {
     const respCfg = responsivenessConfig(policy);
     const pinnedChoice = isCandidatePinned(candidate, canonical, taskCtx);
+    const measuredAs = resolveResponsivenessModelKey(rawModel || canonical, models, aliases).key;
     extraComponents.responsiveness_source = respSource;
     if (respSource === "not_applicable" || respVal === null || respVal === undefined) {
       extraComponents.responsiveness = null;
       if (pinnedChoice) {
-        const warn = `pinned ${candidate.id || rawModel} (${canonical}@${effort}) responsiveness is not_applicable for realtime_loop (too slow per turn for a live loop); kept per explicit user selection`;
+        const warn = `pinned ${candidate.id || rawModel} (${measuredAs}@${effort}) responsiveness is not_applicable for realtime_loop (too slow per turn for a live loop); kept per explicit user selection`;
         extraComponents.realtime_slow_pin_warning = warn;
         notes.push(warn);
       } else {
@@ -1414,7 +1415,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
       const respFloor = Number(respCfg.floor ?? 0.5);
       if (respVal < respFloor) {
         if (pinnedChoice) {
-          const warn = `pinned ${candidate.id || rawModel} (${canonical}@${effort}) responsiveness ${respVal.toFixed(2)} is below the realtime_loop floor ${respFloor} (too slow per turn for a live loop); kept per explicit user selection`;
+          const warn = `pinned ${candidate.id || rawModel} (${measuredAs}@${effort}) responsiveness ${respVal.toFixed(2)} is below the realtime_loop floor ${respFloor} (too slow per turn for a live loop); kept per explicit user selection`;
           extraComponents.realtime_slow_pin_warning = warn;
           notes.push(warn);
         } else {
