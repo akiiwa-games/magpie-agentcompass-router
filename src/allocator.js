@@ -1019,9 +1019,36 @@ function dispatchAllowedEfforts(
   if (!table) return null;
   const rawModel = bundle?.model || canonical;
   const bare = splitEffortSuffix(rawModel).name;
-  const { key } = resolveResponsivenessModelKey(bare, models, aliases, curvesTable, respTable);
+  const { key, known } = resolveResponsivenessModelKey(bare, models, aliases, curvesTable, respTable);
+  const leaf = bare.split("/").pop();
+  const names = known ? [key, bare, leaf] : [bare, leaf];
+  for (const name of names) {
+    if (name && Array.isArray(table[name]) && table[name].length > 0) {
+      return table[name];
+    }
+  }
+  const own = bundle?.offered_efforts || bundle?.efforts;
+  if (Array.isArray(own)) return own;
   // A provider whose table does not list the model offers no other effort for it: a step-down never lands on an unverified flag.
-  return table[bare] || table[key] || (provider ? [] : null);
+  return provider ? [] : null;
+}
+
+function hasFixedEffort(bundle, models, aliases) {
+  if (bundle?.effort_fixed) return true;
+  const launchId = String(bundle?.launch_model || bundle?.model || "");
+  return nameFixesEffort(launchId, models, aliases);
+}
+
+function canStepDown(bundle, info, models, aliases) {
+  if (hasFixedEffort(bundle, models, aliases)) return false;
+  const own = Array.isArray(bundle?.offered_efforts)
+    ? bundle.offered_efforts
+    : Array.isArray(bundle?.efforts)
+      ? bundle.efforts
+      : null;
+  if (!own) return true;
+  const rank = effortRank(scoringEffort(bundle, info));
+  return own.some((level) => effortRank(level) < rank);
 }
 
 /**
@@ -1243,11 +1270,13 @@ export function resolveRealtimeEffort(
       }
     }
 
-    if (siblings.length > 0) {
-      const gateClearingPeers = siblings.filter(
+    // A row that cannot step does not stand in for the rows that can.
+    const steppable = siblings.filter((s) => canStepDown(s, info, models, aliases));
+    if (steppable.length > 0) {
+      const gateClearingPeers = steppable.filter(
         (s) => effortAbility(policy, curves, info, scoringEffort(s, info)) >= gate,
       );
-      const stepDownPeers = gateClearingPeers.length > 0 ? gateClearingPeers : siblings;
+      const stepDownPeers = gateClearingPeers.length > 0 ? gateClearingPeers : steppable;
       const minRank = Math.min(...stepDownPeers.map((s) => effortRank(scoringEffort(s, info))));
       if (effortRank(rawEffort) > minRank) {
         return makeReturn(rawEffort, respVal, respSource, null);
@@ -1272,7 +1301,11 @@ export function resolveRealtimeEffort(
   const rawRank = effortRank(rawEffort);
 
   // Contract R2: dispatch_efforts, within what this candidate or its pool offers, without what the user disabled.
-  const offered = Array.isArray(bundle?.offered_efforts) ? bundle.offered_efforts : null;
+  const offered = Array.isArray(bundle?.offered_efforts)
+    ? bundle.offered_efforts
+    : Array.isArray(bundle?.efforts)
+      ? bundle.efforts
+      : null;
   const disabledEfforts = Array.isArray(bundle?.disabled_efforts) ? bundle.disabled_efforts : [];
   const faster = REALTIME_EFFORT_ORDER.filter(
     (eff) =>
@@ -1920,6 +1953,8 @@ function expandCandidate(entry, taskCtx, catalog, models, aliases) {
   let notDispatchable = false;
   if (fixedBySuffix) {
     efforts = [entry.effort ? String(entry.effort).trim().toLowerCase() : suffixEffort];
+  } else if (entry.effort) {
+    efforts = [String(entry.effort).trim().toLowerCase()];
   } else if (Array.isArray(entry.efforts)) {
     const listed = entry.efforts.map((e) => String(e).trim().toLowerCase()).filter(Boolean);
     const allowed = dispatchAllowedEfforts(
@@ -1938,8 +1973,6 @@ function expandCandidate(entry, taskCtx, catalog, models, aliases) {
       efforts = listed;
       notDispatchable = true;
     }
-  } else if (entry.effort) {
-    efforts = [String(entry.effort).trim().toLowerCase()];
   } else {
     efforts = isBundleObj ? [scoringEffort(entry, spec)] : bare(entry, spec, canonical);
   }
@@ -1979,45 +2012,110 @@ function attachDisabledEfforts(expanded, models, aliases) {
   }
 }
 
+function clearingLevels(bundle, taskCtx, catalog, models, aliases) {
+  const policy = catalog.policy || DEFAULT_SCORING_POLICY;
+  const harness = bundle.harness || bundleHarness(bundle, bundle.account, bundle.id);
+  const provider = bundle.provider || bundle.account;
+  if (
+    harness === "antigravity" ||
+    harness === "antigravity-resilient" ||
+    provider === "antigravity" ||
+    provider === "antigravity-resilient"
+  ) {
+    return [];
+  }
+  const canonical = canonicalModel(bundle.model, aliases, models);
+  const curves = resolveRealtimeCurves(bundle.model, canonical, catalog);
+  const speeds = curves?.responsiveness;
+  if (!speeds || typeof speeds !== "object" || Object.keys(speeds).length === 0) {
+    return [];
+  }
+  const { spec: info } = resolveModelSpec(bundle.model, models, aliases);
+  const floor = Number(responsivenessConfig(policy).floor ?? 0.5);
+  const ability =
+    curves?.ability && typeof curves.ability === "object" && Object.keys(curves.ability).length > 0 ? curves.ability : null;
+  const levels = [];
+  for (const level of REALTIME_EFFORT_ORDER) {
+    if (!(level in speeds) || (ability && !(level in ability))) continue;
+    const { value, source } = bundleResponsiveness(bundle, info, policy, curves, {
+      effort: level,
+      harness,
+      models,
+      aliases,
+      effortCurves: catalog.effortCurves,
+      effortResponsiveness: catalog.effortResponsiveness,
+      localTelemetry: taskCtx?.localTelemetry,
+    });
+    if (source !== "not_applicable" && value !== null && value !== undefined && value >= floor) {
+      levels.push(level);
+    }
+  }
+  return levels;
+}
+
 /**
- * Rows for an effort the user named on a model the pool has no row for (`allocator.py:named_effort_bundles`). The launch
- * contract is what offers it; each row is the model's own carrier with a distinct id, so it never passes for the carrier.
+ * Rows for levels the user's pin reaches on a model the pool has no row at that level for (`allocator.py:named_effort_bundles`):
+ * the effort they named, or, for a model named alone on `realtime_loop` work, every level that clears the floor, so the score
+ * decides among them as it does among written rows.
  */
 function namedEffortRows(expanded, taskCtx, catalog, models, aliases) {
   const effort = pinnedEffortOf(taskCtx);
-  if (!effort || taskCtx.constraint_bundle) return [];
   const pinned = pinnedModelOf(taskCtx);
+  const levelChoice = !effort && Boolean(taskCtx.realtime_loop && pinned);
+  if ((!effort && !levelChoice) || taskCtx.constraint_bundle || taskCtx.pinned_bundle) return [];
   const groups = new Map();
   for (const c of expanded) {
-    const key = canonicalModel(c.model, aliases, models);
-    if (pinned && pinScope({ ...c, effort }, key, taskCtx) === null) continue;
+    const key = healthKey(c.model, models, aliases);
+    const canon = canonicalModel(c.model, aliases, models);
+    if (pinned && pinScope(effort ? { ...c, effort } : c, canon, taskCtx) === null) continue;
+    if (levelChoice && pinScope(c, canon, taskCtx) === "effort") continue;
     const group = JSON.stringify([c.account || "", c.harness || bundleHarness(c, c.account, c.id), key]);
-    if (!groups.has(group)) groups.set(group, { key, rows: [] });
+    if (!groups.has(group)) groups.set(group, { key, canon, rows: [] });
     groups.get(group).rows.push(c);
   }
   const found = [];
-  for (const { key, rows } of groups.values()) {
+  for (const { canon, rows } of groups.values()) {
     const specOf = (r) => resolveModelSpec(r.model, models, aliases).spec;
-    if (rows.some((r) => String(scoringEffort(r, specOf(r)) || "").toLowerCase() === effort)) continue;
-    const carrier = rows.find(
-      (r) => (!r.disabled || r.disabled_by_default) && !r.discovery_unavailable && !r.offered_efforts?.every((e) => e !== effort) && !nameFixesEffort(r.model, models, aliases) && !r.effort_fixed,
+    const written = new Set(rows.map((r) => String(scoringEffort(r, specOf(r)) || "").toLowerCase()));
+    const carriers = rows.filter(
+      (r) =>
+        (!r.disabled || r.disabled_by_default) &&
+        !r.discovery_unavailable &&
+        !hasFixedEffort(r, models, aliases),
     );
-    if (!carrier) continue;
-    const allowed = dispatchAllowedEfforts(
-      carrier,
-      carrier.provider || carrier.account,
-      carrier.harness || bundleHarness(carrier, carrier.account, carrier.id),
-      key,
-      models,
-      aliases,
-      catalog.dispatchEfforts || DISPATCH_EFFORTS,
-      catalog.effortCurves || EFFORT_CURVES,
-      catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
-    );
-    if (allowed ? !allowed.includes(effort) : !pinned) continue;
-    const carrierId = carrier.id || `${carrier.model}:${scoringEffort(carrier, specOf(carrier))}`;
-    const { when: _when, ...row } = carrier;
-    found.push({ ...row, id: `${carrierId}@${effort}`, effort, pin_carrier: carrierId });
+    for (const carrier of carriers) {
+      const allowed = dispatchAllowedEfforts(
+        carrier,
+        carrier.provider || carrier.account,
+        carrier.harness || bundleHarness(carrier, carrier.account, carrier.id),
+        canon,
+        models,
+        aliases,
+        catalog.dispatchEfforts || DISPATCH_EFFORTS,
+        catalog.effortCurves || EFFORT_CURVES,
+        catalog.effortResponsiveness || EFFORT_RESPONSIVENESS,
+      );
+      let levels;
+      if (effort) {
+        levels = (allowed ? allowed.includes(effort) : Boolean(pinned)) ? [effort] : [];
+      } else {
+        levels = clearingLevels(carrier, taskCtx, catalog, models, aliases).filter(
+          (e) => !allowed || allowed.includes(e),
+        );
+      }
+      const ownEfforts = Array.isArray(carrier.offered_efforts)
+        ? carrier.offered_efforts
+        : Array.isArray(carrier.efforts)
+          ? carrier.efforts
+          : null;
+      for (const level of levels) {
+        if (written.has(level) || (ownEfforts && !ownEfforts.includes(level))) continue;
+        written.add(level);
+        const carrierId = carrier.id || `${carrier.model}:${scoringEffort(carrier, specOf(carrier))}`;
+        const { when: _when, ...row } = carrier;
+        found.push({ ...row, id: `${carrierId}@${level}`, effort: level, pin_carrier: carrierId });
+      }
+    }
   }
   return found;
 }

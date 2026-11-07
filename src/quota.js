@@ -108,6 +108,8 @@ const PLAN_ALIASES = {
     team: "plus",
     pro: "pro",
     pro100: "pro100",
+    pro_100: "pro100",
+    100: "pro100",
     prolite: "pro100",
     pro_lite: "pro100",
   },
@@ -116,10 +118,16 @@ const PLAN_ALIASES = {
     max: "max5",
     max5: "max5",
     max_5x: "max5",
+    max_x5: "max5",
     max5x: "max5",
+    "5x": "max5",
+    x5: "max5",
     max20: "max20",
     max_20x: "max20",
+    max_x20: "max20",
     max20x: "max20",
+    "20x": "max20",
+    x20: "max20",
   },
   antigravity: {
     pro: "pro",
@@ -128,9 +136,11 @@ const PLAN_ALIASES = {
     google_ai_ultra: "ultra20",
     ultra20: "ultra20",
     ultra_20x: "ultra20",
+    ultra_x20: "ultra20",
     ultra20x: "ultra20",
     ultra5: "ultra5",
     ultra_5x: "ultra5",
+    ultra_x5: "ultra5",
     ultra5x: "ultra5",
   },
 };
@@ -193,8 +203,15 @@ export const DEFAULT_USAGE_FRESH_HOURS = 2;
 
 const plansProviders = Object.keys(PLAN_CAPACITY_USD);
 
+const POOL_SUFFIX_RE = /\s*×\s*\d+\s*$/;
+
+function stripPoolCount(raw) {
+  return String(raw ?? "").replace(POOL_SUFFIX_RE, "");
+}
+
 function planSlug(raw) {
   return String(raw ?? "")
+    .replace(/×/g, "x")
     .trim()
     .toLowerCase()
     .replace(/[\s-]+/g, "_");
@@ -211,19 +228,30 @@ function stripVendorWords(slug) {
 /**
  * Map a provider's reported plan label to a known plan key. `inactive` means the subscription is no
  * longer paying; `known: false` means an unrecognised (or absent) plan, which is sized conservatively.
+ * Matches the full name first, and only strips a trailing `×N` pool count if the full name did not match.
  */
 export function normalizePlan(provider, rawPlan) {
-  const slug = planSlug(rawPlan);
+  const rawStr = String(rawPlan ?? "");
+  const slug = planSlug(rawStr);
   const prov = String(provider || "").toLowerCase();
   if (!slug || slug === "none" || slug === "null" || slug === "unknown") {
-    return { raw: slug ? String(rawPlan) : null, key: null, known: false, inactive: false };
+    return { raw: slug ? rawStr : null, key: null, known: false, inactive: false };
   }
-  const stripped = stripVendorWords(slug);
-  if (INACTIVE_PLANS.has(slug) || (stripped && INACTIVE_PLANS.has(stripped))) {
-    return { raw: String(rawPlan), key: null, known: true, inactive: true };
+  const withoutPool = stripPoolCount(rawStr);
+  const candidates = withoutPool !== rawStr ? [rawStr, withoutPool] : [rawStr];
+  for (const candidate of candidates) {
+    const candSlug = planSlug(candidate);
+    if (!candSlug) continue;
+    const stripped = stripVendorWords(candSlug);
+    if (INACTIVE_PLANS.has(candSlug) || (stripped && INACTIVE_PLANS.has(stripped))) {
+      return { raw: rawStr, key: null, known: true, inactive: true };
+    }
+    const key = PLAN_ALIASES[prov]?.[candSlug] ?? (stripped ? PLAN_ALIASES[prov]?.[stripped] : null) ?? null;
+    if (key !== null) {
+      return { raw: rawStr, key, known: true, inactive: false };
+    }
   }
-  const key = PLAN_ALIASES[prov]?.[slug] ?? (stripped ? PLAN_ALIASES[prov]?.[stripped] : null) ?? null;
-  return { raw: String(rawPlan), key, known: key !== null, inactive: false };
+  return { raw: rawStr, key: null, known: false, inactive: false };
 }
 
 /** Smallest capacity table across a provider's known plans: what an unknown plan is sized as. */

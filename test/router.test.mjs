@@ -3903,7 +3903,7 @@ test("10.19 Round-2 M5 & m2: User pin canonicalization matches aliases/prefixes/
   // A model named without an effort takes the effort it can run live at, so there is nothing to warn about
   for (const pin of ["claude-opus-5", "anthropic/claude-opus-5-5", "claude-opus-5-5[1m]"]) {
     const r = selectBestRoute(rtProfile, { constraintModel: pin, candidateModels: [opus, fast] });
-    assert.equal(r.modelWithEffort, "claude-opus-5-5:medium", `pin=${pin}`);
+    assert.equal(r.modelWithEffort, "claude-opus-5-5:low", `pin=${pin}`);
     assert.deepEqual(r.warnings, [], `pin=${pin}`);
   }
 

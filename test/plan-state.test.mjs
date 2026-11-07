@@ -703,3 +703,37 @@ test("R2-M3: default catalog candidates are not pruned to quota providers when c
   assert.equal(rInactive.ok, true);
   assert.equal(rInactive.targetModel, "gpt-6.1-sol");
 });
+
+test("tier multipliers match before pool suffix and free ×N is plan_inactive (AgentCompass fix/plan-and-usage-state)", () => {
+  for (const [prov, label, expectedPlan, expectedWeekly] of [
+    ["antigravity", "Ultra x5", "ultra5", 156],
+    ["antigravity", "ultra ×5", "ultra5", 156],
+    ["antigravity", "Google AI Ultra x5", "ultra5", 156],
+    ["claude", "Max x20", "max20", 2380],
+    ["claude", "Claude Max x20", "max20", 2380],
+    ["claude", "Claude Max ×20", "max20", 2380],
+    ["claude", "Max x5", "max5", 1400],
+    ["claude", "Max 20x ×2", "max20", 2380],
+    ["codex", "Pro ×2", "pro", 325],
+  ]) {
+    const p = normalizePlan(prov, label);
+    assert.equal(p.known, true, `${prov}/${label} must be known`);
+    assert.equal(p.inactive, false, `${prov}/${label} must be active`);
+    assert.equal(p.key, expectedPlan, `${prov}/${label} key`);
+    assert.equal(cap(prov, label), expectedWeekly, `${prov}/${label} weekly capacity`);
+  }
+
+  for (const prov of ["claude", "codex", "antigravity"]) {
+    const freePool = normalizePlan(prov, "free ×2");
+    assert.equal(freePool.inactive, true, `${prov}/free ×2 must be inactive`);
+    const [row] = listQuotaAccounts(
+      [{ provider: prov, account: "pooled-free", plan: "free ×2", updated_at: iso(T0 - 60_000), windows: [win()] }],
+      T0
+    );
+    assert.equal(row.state, "plan_inactive");
+    assert.equal(row.dispatchable, false, `${prov}/free ×2 must not be dispatchable`);
+  }
+
+  assert.equal(normalizePlan("claude", "Max 5x x2").known, false);
+});
+

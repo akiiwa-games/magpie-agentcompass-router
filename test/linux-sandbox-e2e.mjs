@@ -2098,6 +2098,17 @@ async function main() {
       const noProvider = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${WORDS} [15f no provider]`)] });
       const noProviderBody = await bodyOf(noProvider);
       const noProviderCalls = upstreamCalls.length - noProviderBefore;
+      // Under the default install, a virtual model name with no text routes via R5-M1 (HTTP 200, no longer 404).
+      const noTextVirtualBefore = upstreamCalls.length;
+      const noTextVirtual = await postChat({
+        model: "agentcompass/auto",
+        messages: [{ role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] }],
+      });
+      const noTextVirtualBody = await bodyOf(noTextVirtual);
+      const noTextVirtualCalls = upstreamCalls.length - noTextVirtualBefore;
+      assert.equal(noTextVirtual.status, 200, `A virtual name with no text must route instead of 404 (R5-M1): ${noTextVirtualBody.text.slice(0, 300)}`);
+      assert.equal(noTextVirtualCalls, 1, "Routed no-text virtual model request reaches the upstream");
+      const noTextVirtualRoute = routedAs(lastUp());
       await setPluginOptions(basePluginOptions);
 
       // 15g. What the operator sees
@@ -2114,6 +2125,7 @@ async function main() {
         invalidProfile: invalidBody.json?.[NOTE] ?? null,
         virtualNameWithDefault: { status: withDefault.status, replyCarries: withDefaultBody.json?.[NOTE] ?? null },
         virtualNameNoDecisionProvider: { status: noProvider.status, upstreamCalls: noProviderCalls, body: noProviderBody.text.slice(0, 300), asserted: false },
+        virtualNameNoTextDefaultInstall: { status: noTextVirtual.status, upstreamCalls: noTextVirtualCalls, route: noTextVirtualRoute },
         logLine: lines[lines.length - 1],
       };
       report.steps.push({

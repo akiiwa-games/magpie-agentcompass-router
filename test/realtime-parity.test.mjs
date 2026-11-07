@@ -141,6 +141,18 @@ test("R3 Python: a pin routes as plan() does over the reference accounts", () =>
     }
     if (blocked) assert.ok(js.warnings.length > 0, label);
   }
+  for (const { label, rows, task, realtime_loop, model, effort, blocked } of FIXTURE.row_pins || []) {
+    const rowPool = Object.entries(rows).map(([id, r]) => {
+      const provider = String(r.model || "").startsWith("claude") ? "claude" : "codex";
+      return { id, provider, account: provider, ...r };
+    });
+    const js = selectBestRoute(profile, { candidateModels: rowPool, realtime_loop, now: NOW, ...mergePinOptions(task) });
+    const tag = `${label} (rt=${realtime_loop})`;
+    if (blocked ? js.ok !== false : js.targetModel !== model || js.targetEffort !== effort) {
+      diffs.push(`${tag}: js=${js.targetModel}:${js.targetEffort} py=${model}:${effort} blocked=${blocked}`);
+    }
+    if (blocked) assert.ok(js.warnings.length > 0, tag);
+  }
   assert.deepEqual(diffs, []);
 });
 
@@ -249,7 +261,7 @@ test("M2-R3: pin identity is each row's own key (contract R1): a pin never cross
     assert.ok(r.warnings.length > 0, pin);
   }
   const ranked = rankCandidates(rtProfile, { candidateModels: [opus55, opus46], constraintModel: "claude-opus-5-5", now: NOW });
-  assert.equal(ranked.selected.id, "opus55");
+  assert.equal(ranked.selected.id, "opus55@low");
   const slow = ranked.allCandidates.find((c) => c.id === "opus46");
   assert.equal(slow.eligible, false);
   assert.ok(slow.excluded.includes("explicit model constraint"));

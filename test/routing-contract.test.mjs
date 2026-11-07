@@ -1131,6 +1131,18 @@ test("a turn with no text still routes when the user set a pool or a pin (review
   const bare = send({ routeAllModels: true }, { model: sol, reasoning_effort: "high" });
   assert.equal(bare.model, sol);
   assert.equal(bare.reasoning_effort, "high");
+  // Under the default install (no decision provider), a virtual model name with no text is routed in onRequest (status 200, no longer 404)
+  const defaultInstallGateway = (options, messages = [image]) => {
+    const body = { model: "agentcompass/auto", messages };
+    const ctx = context(options, { sessionId: "i" });
+    const { value } = quietly(() => middleware.onRequest(body, ctx));
+    if (value?.rejected) return { status: value.rejected, model: body.model };
+    if (body.model === "agentcompass/auto") return { status: 404, model: body.model };
+    return { status: 200, model: body.model };
+  };
+  assert.deepEqual(defaultInstallGateway({ candidateModels: pool }), { status: 200, model: `${sol}:low` });
+  assert.deepEqual(defaultInstallGateway({ candidateModels: pool }, [{ role: "user", content: "" }]), { status: 200, model: `${sol}:low` });
+  assert.deepEqual(defaultInstallGateway({ candidateModels: ["auto"] }), { status: 503, model: "agentcompass/auto" });
 });
 
 test("the hooks route a turn with no text too when the user set a pool or a pin (review 5 M1)", async () => {
