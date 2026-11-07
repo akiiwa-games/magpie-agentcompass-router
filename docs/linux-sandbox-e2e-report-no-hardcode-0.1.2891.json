@@ -1,0 +1,669 @@
+{
+  "timestamp": "2026-11-07T10:02:05.265Z",
+  "platform": "linux",
+  "arch": "x64",
+  "release": "6.18.40.1-microsoft-standard-WSL2",
+  "sandboxRoot": "/run/magpie-sandbox",
+  "magpieVersion": "magpie 0.1.2891",
+  "magpieBinarySha256": "ffa0785ccc41d093c8fdbc96351372c5f2553dc2cb67e5b0ec2b0fa8e3488c09",
+  "pluginCommit": "c21ece3",
+  "baselineCommit": "759d956",
+  "scenarios": {
+    "scenario1_cli_lifecycle": {
+      "pass": true,
+      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  gateway middleware  onRequest, onAccount, onProvider, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure\n  agentcompass (AgentCompass, 1 models)  signed in",
+      "magpieName": "AgentCompass",
+      "hasSvgDataUriIcon": true
+    },
+    "scenario2_market_and_gui_api": {
+      "pass": true,
+      "marketListingPackage": "@magpie-community/gateway-agentcompass",
+      "installedOwnName": "AgentCompass",
+      "storedIconFile": "file:a100c6af45032ded.svg",
+      "readmeLength": 27042,
+      "offBypassModel": "gpt-6-luna",
+      "optionsUpdated": true
+    },
+    "scenario3_mode_a_latency_budget": {
+      "pass": true,
+      "routedModel": "claude-opus-5-5",
+      "routedEffort": "xhigh",
+      "carrierStripped": true,
+      "scorerCalls": 0,
+      "configuredScorerDelayMs": 1600,
+      "routedElapsedMs": 5,
+      "baselineElapsedMs": 4,
+      "overheadMs": 1,
+      "noCandidateModelsStatus": 400
+    },
+    "scenario4_model_dna_differentiation": {
+      "pass": true,
+      "divergentIdeation": "gemini-4-argon-high:high",
+      "selfContainedResponses": "gpt-6.1-sol:high",
+      "routineBulkWork": "gemini-3.8-flash-high:high",
+      "coupledDebugging": "claude-opus-5-5:xhigh"
+    },
+    "scenario5_anthropic_and_sse_streaming": {
+      "pass": true,
+      "anthropicUpstreamPath": "/v1/chat/completions",
+      "anthropicRoutedModel": "claude-opus-5-5",
+      "anthropicEffort": null,
+      "anthropicUpstreamBodyKeys": [
+        "max_tokens",
+        "messages",
+        "model",
+        "prompt_cache_key",
+        "stream",
+        "stream_options"
+      ],
+      "sseStreamRoutedModel": "gpt-6.1-sol",
+      "sseStreamEffort": "high",
+      "sseReceivedDone": true
+    },
+    "scenario6_classifier_unavailable": {
+      "pass": true,
+      "healthyClassifierModeB": "gemini-4-argon-high",
+      "http500ModeB": "gpt-6-luna",
+      "timeoutModeB": "gpt-6-luna",
+      "timeoutElapsedMs": 305,
+      "noClassifierModeB": "gpt-6-luna",
+      "modeAWithClassifierDown": "gemini-3.8-flash-high"
+    },
+    "scenario7_mode_b_systemone_group": {
+      "pass": true,
+      "directionReasoningRule": "gemini-4-argon-high:high",
+      "debugReviewRule": "claude-opus-5-5:xhigh",
+      "noneOfTheseFallback": "gpt-6-luna:null"
+    },
+    "scenario8_session_continuity_and_turn_lock": {
+      "pass": true,
+      "gomaxprocs": "default",
+      "repeats": 20,
+      "toolLoopReroutes": 0,
+      "followupReroutes": 0,
+      "firstTurnRouted": "claude-opus-5-5:xhigh",
+      "midTurnToolLoopRouted": "claude-opus-5-5:xhigh",
+      "shortFollowupRouted": "claude-opus-5-5:xhigh",
+      "otherSessionRouted": "gemini-3.8-flash-high:high",
+      "toolLoopWithoutProfile": {
+        "outcomes": {
+          "404 no upstream call": 13,
+          "200 claude-opus-5-5:xhigh": 7
+        },
+        "asserted": false
+      },
+      "scorerCalls": 0
+    },
+    "scenario9_same_answers_match_baseline": {
+      "pass": true,
+      "requests": 352,
+      "served": 352,
+      "diffs": 0,
+      "followupsRoutedAgainAsTheirFirstRequest": [],
+      "distinctRoutes": 33,
+      "perPool": {
+        "default": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "README pool": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "bare strings": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "dated/-latest/-preview/-chat": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "{model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "{id,provider,model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "bundles with effort": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "pin options, which only act on realtime routing": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        }
+      },
+      "newTurnSampling": {
+        "samplesPerRow": 8,
+        "rows": 48,
+        "diffs": 0,
+        "rowsComparedOnBothBuilds": 47,
+        "baselineRowsThatFlipOnThePool": 38
+      }
+    },
+    "scenario10_realtime_routing": {
+      "pass": true,
+      "routed": {
+        "ideation": {
+          "nonRealtime": "gemini-4-argon-high:high",
+          "realtime": "gpt-6-astra:medium"
+        },
+        "coding": {
+          "nonRealtime": "gpt-6.1-sol:high",
+          "realtime": "gpt-6.1-sol:medium"
+        },
+        "bulk": {
+          "nonRealtime": "gemini-3.8-flash-high:high",
+          "realtime": "claude-sonnet-5-5:low"
+        },
+        "debug": {
+          "nonRealtime": "claude-opus-5-5:xhigh",
+          "realtime": "claude-opus-5-5:medium"
+        }
+      },
+      "slowBundleStepsDown": "claude-opus-5-5:xhigh -> claude-opus-5-5:medium",
+      "argonOnlyPool": {
+        "status": 404,
+        "upstreamCalls": [],
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"}}\n"
+      },
+      "responses": "gpt-6.1-sol:medium",
+      "messages": "claude-opus-5-5:null",
+      "stream": "gpt-6.1-sol:medium",
+      "pluginWideOption": "gpt-6-astra:medium",
+      "flagForwardedUpstream": false
+    },
+    "scenario11_realtime_session_hold": {
+      "pass": true,
+      "repeats": 20,
+      "reroutes": 0,
+      "turns": {
+        "a": "claude-opus-5-5:medium",
+        "b": "claude-opus-5-5:medium",
+        "c": "claude-opus-5-5:medium",
+        "d": "claude-opus-5-5:medium",
+        "e": "claude-opus-5-5:medium"
+      },
+      "flaglessFollowups": {
+        "routes": {
+          "claude-opus-5-5:medium": 15,
+          "claude-opus-5-5:xhigh": 5
+        },
+        "differFromTurn1": 5,
+        "asserted": false
+      },
+      "newTurnWithAnotherAnswer": {
+        "routes": {
+          "claude-opus-5-5:medium": 17,
+          "gpt-6-astra:medium": 3
+        },
+        "holdsOnlyOnARuntimeThatSawTheSession": true
+      },
+      "explicitFalse": {
+        "realtime": "gpt-6-astra:medium",
+        "afterFalse": "gemini-4-argon-high:high"
+      },
+      "anthropic": [
+        "claude-opus-5-5:null",
+        "claude-opus-5-5:null"
+      ]
+    },
+    "scenario12_pinned_slow_model": {
+      "pass": true,
+      "pinnedArgonIdeation": "gemini-4-argon-high:high",
+      "pinnedArgonDebug": "gemini-4-argon-high:high",
+      "pinWithoutRealtime": "claude-opus-5-5:xhigh",
+      "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
+      "withoutPin": "gpt-6-astra:medium",
+      "warningLines": [
+        "2026/11/07 10:02:26 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 10:02:26 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 10:02:26 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+      ]
+    },
+    "scenario14_caller_profile_any_wording": {
+      "pass": true,
+      "requests": 902,
+      "perProfile": {
+        "bulk": {
+          "chat": {
+            "route": "gemini-3.8-flash-high:high",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "gemini-3.8-flash-high:high",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "gemini-3.8-flash-high:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "gemini-3.8-flash-high:high",
+            "wordings": 37
+          }
+        },
+        "debug": {
+          "chat": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "claude-opus-5-5:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 37
+          }
+        }
+      },
+      "control": {
+        "bulk": "gemini-3.8-flash-high:high",
+        "debug": "claude-opus-5-5:xhigh"
+      }
+    },
+    "scenario15_no_profile_not_routed": {
+      "pass": true,
+      "virtualNameWithoutDefault": {
+        "status": 404,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "namedModel": {
+        "chat": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "responses": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "messages": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "stream": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": null
+        }
+      },
+      "invalidProfile": {
+        "routed": false,
+        "notice": "未路由：分类不可用",
+        "reason": "invalid_caller_profile: task.profile.work_kind must be one of general_implementation, frontend_implementation, debug_review, bounded_bulk_work, "
+      },
+      "virtualNameWithDefault": {
+        "status": 200,
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "virtualNameNoDecisionProvider": {
+        "status": 502,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: getaddrinfo ENOTFOUND agentcompass.local\",\"param\":null,\"type\":\"api_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "asserted": false
+      },
+      "logLine": "2026/11/07 10:02:30 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: 未路由：分类不可用 (no_task_profile)"
+    },
+    "scenario13_real_upstream": {
+      "pass": null,
+      "skipped": "No REAL_*_AUTH set"
+    }
+  },
+  "steps": [
+    {
+      "test": "Scenario 2 — Plugin Market (`registry.json`), README Page, Icon Storage, Off/On Toggle & Options API",
+      "storedIcon": "file:a100c6af45032ded.svg",
+      "readmeLength": 27042,
+      "offBypassModel": "gpt-6-luna",
+      "pass": true
+    },
+    {
+      "test": "Scenario 3: Mode A latency/budget (`agentcompass/auto` with a profile -> middleware.js [moejs]; 1,600ms classifier configured but never called; no candidateModels or defaultModel -> 400)",
+      "routedModel": "claude-opus-5-5",
+      "routedEffort": "xhigh",
+      "routedElapsedMs": 5,
+      "overheadMs": 1,
+      "pass": true
+    },
+    {
+      "test": "Scenario 4: Mode A — Model DNA differentiation through the middleware (ideation / coding / bulk / debugging)",
+      "pass": true,
+      "divergentIdeation": "gemini-4-argon-high:high",
+      "selfContainedResponses": "gpt-6.1-sol:high",
+      "routineBulkWork": "gemini-3.8-flash-high:high",
+      "coupledDebugging": "claude-opus-5-5:xhigh"
+    },
+    {
+      "test": "Scenario 5: Mode A — Anthropic `/v1/messages` & SSE streaming (`stream: true`) through the middleware",
+      "anthropicRouted": "claude-opus-5-5:null",
+      "sseStreamRouted": "gpt-6.1-sol:high",
+      "pass": true
+    },
+    {
+      "test": "Scenario 6: the classifier unavailable or slow (Mode B HTTP 500 / timeout / none configured -> not routed, the group's fallback; Mode A unaffected)",
+      "pass": true,
+      "healthyClassifierModeB": "gemini-4-argon-high",
+      "http500ModeB": "gpt-6-luna",
+      "timeoutModeB": "gpt-6-luna",
+      "timeoutElapsedMs": 305,
+      "noClassifierModeB": "gpt-6-luna",
+      "modeAWithClassifierDown": "gemini-3.8-flash-high"
+    },
+    {
+      "test": "Scenario 7: Mode B (`group/compass-group` via `/v1/systemone` Decision Provider) — Rules, `none of these` Fallback & `effort=auto`",
+      "directionReasoningRule": "gemini-4-argon-high:high",
+      "debugReviewRule": "claude-opus-5-5:xhigh",
+      "noneOfTheseFallback": "gpt-6-luna:null",
+      "pass": true
+    },
+    {
+      "test": "Scenario 8: Mode A — session affinity, mid-turn tool lock (`within: true`) & short follow-up hold (`keepsEffort`), repeated on pooled runtimes",
+      "pass": true,
+      "gomaxprocs": "default",
+      "repeats": 20,
+      "toolLoopReroutes": 0,
+      "followupReroutes": 0,
+      "firstTurnRouted": "claude-opus-5-5:xhigh",
+      "midTurnToolLoopRouted": "claude-opus-5-5:xhigh",
+      "shortFollowupRouted": "claude-opus-5-5:xhigh",
+      "otherSessionRouted": "gemini-3.8-flash-high:high",
+      "toolLoopWithoutProfile": {
+        "outcomes": {
+          "404 no upstream call": 13,
+          "200 claude-opus-5-5:xhigh": 7
+        },
+        "asserted": false
+      },
+      "scorerCalls": 0
+    },
+    {
+      "test": "Scenario 9: given the answers the removed text rules gave, requests reach the upstream as a second real Magpie running the build that had them sends them (status, model, effort, full body)",
+      "pass": true,
+      "requests": 352,
+      "served": 352,
+      "diffs": 0,
+      "followupsRoutedAgainAsTheirFirstRequest": [],
+      "distinctRoutes": 33,
+      "perPool": {
+        "default": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "README pool": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "bare strings": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "dated/-latest/-preview/-chat": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "{model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "{id,provider,model} objects": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        },
+        "bundles with effort": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 10
+        },
+        "pin options, which only act on realtime routing": {
+          "requests": 44,
+          "diffs": 0,
+          "routes": 11
+        }
+      },
+      "newTurnSampling": {
+        "samplesPerRow": 8,
+        "rows": 48,
+        "diffs": 0,
+        "rowsComparedOnBothBuilds": 47,
+        "baselineRowsThatFlipOnThePool": 38
+      }
+    },
+    {
+      "test": "Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down on chat, responses, messages and streams",
+      "pass": true,
+      "routed": {
+        "ideation": {
+          "nonRealtime": "gemini-4-argon-high:high",
+          "realtime": "gpt-6-astra:medium"
+        },
+        "coding": {
+          "nonRealtime": "gpt-6.1-sol:high",
+          "realtime": "gpt-6.1-sol:medium"
+        },
+        "bulk": {
+          "nonRealtime": "gemini-3.8-flash-high:high",
+          "realtime": "claude-sonnet-5-5:low"
+        },
+        "debug": {
+          "nonRealtime": "claude-opus-5-5:xhigh",
+          "realtime": "claude-opus-5-5:medium"
+        }
+      },
+      "slowBundleStepsDown": "claude-opus-5-5:xhigh -> claude-opus-5-5:medium",
+      "argonOnlyPool": {
+        "status": 404,
+        "upstreamCalls": [],
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"}}\n"
+      },
+      "responses": "gpt-6.1-sol:medium",
+      "messages": "claude-opus-5-5:null",
+      "stream": "gpt-6.1-sol:medium",
+      "pluginWideOption": "gpt-6-astra:medium",
+      "flagForwardedUpstream": false
+    },
+    {
+      "test": "Scenario 11: a realtime session's later turns hold (tool loop, short follow-up, new turns), repeated on pooled runtimes",
+      "pass": true,
+      "repeats": 20,
+      "reroutes": 0,
+      "turns": {
+        "a": "claude-opus-5-5:medium",
+        "b": "claude-opus-5-5:medium",
+        "c": "claude-opus-5-5:medium",
+        "d": "claude-opus-5-5:medium",
+        "e": "claude-opus-5-5:medium"
+      },
+      "flaglessFollowups": {
+        "routes": {
+          "claude-opus-5-5:medium": 15,
+          "claude-opus-5-5:xhigh": 5
+        },
+        "differFromTurn1": 5,
+        "asserted": false
+      },
+      "newTurnWithAnotherAnswer": {
+        "routes": {
+          "claude-opus-5-5:medium": 17,
+          "gpt-6-astra:medium": 3
+        },
+        "holdsOnlyOnARuntimeThatSawTheSession": true
+      },
+      "explicitFalse": {
+        "realtime": "gpt-6-astra:medium",
+        "afterFalse": "gemini-4-argon-high:high"
+      },
+      "anthropic": [
+        "claude-opus-5-5:null",
+        "claude-opus-5-5:null"
+      ]
+    },
+    {
+      "test": "Scenario 12: a pinned slow model is kept with a warning in Magpie's log; without the pin it is excluded or stepped down",
+      "pass": true,
+      "pinnedArgonIdeation": "gemini-4-argon-high:high",
+      "pinnedArgonDebug": "gemini-4-argon-high:high",
+      "pinWithoutRealtime": "claude-opus-5-5:xhigh",
+      "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
+      "withoutPin": "gpt-6-astra:medium",
+      "warningLines": [
+        "2026/11/07 10:02:26 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 10:02:26 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 10:02:26 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+      ]
+    },
+    {
+      "test": "Scenario 14: a caller's profile routes, and rewording the task (test/task_text_corpus.mjs) changes nothing, on chat, responses, messages and streams",
+      "pass": true,
+      "requests": 902,
+      "perProfile": {
+        "bulk": {
+          "chat": {
+            "route": "gemini-3.8-flash-high:high",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "gemini-3.8-flash-high:high",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "gemini-3.8-flash-high:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "gemini-3.8-flash-high:high",
+            "wordings": 37
+          }
+        },
+        "debug": {
+          "chat": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 338
+          },
+          "responses": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 38
+          },
+          "messages": {
+            "route": "claude-opus-5-5:null",
+            "wordings": 38
+          },
+          "stream": {
+            "route": "claude-opus-5-5:xhigh",
+            "wordings": 37
+          }
+        }
+      },
+      "control": {
+        "bulk": "gemini-3.8-flash-high:high",
+        "debug": "claude-opus-5-5:xhigh"
+      }
+    },
+    {
+      "test": "Scenario 15: with no profile a request is not routed: forwarded as asked, no effort, no session; said in Magpie's log and in the reply where it can be",
+      "pass": true,
+      "virtualNameWithoutDefault": {
+        "status": 404,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: agentcompass answers only /systemone (System One decisions)\",\"param\":null,\"type\":\"not_found_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "namedModel": {
+        "chat": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "responses": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "messages": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": {
+            "routed": false,
+            "notice": "未路由：分类不可用",
+            "reason": "no_task_profile"
+          }
+        },
+        "stream": {
+          "route": "gpt-6-luna:null",
+          "replyCarries": null
+        }
+      },
+      "invalidProfile": {
+        "routed": false,
+        "notice": "未路由：分类不可用",
+        "reason": "invalid_caller_profile: task.profile.work_kind must be one of general_implementation, frontend_implementation, debug_review, bounded_bulk_work, "
+      },
+      "virtualNameWithDefault": {
+        "status": 200,
+        "replyCarries": {
+          "routed": false,
+          "notice": "未路由：分类不可用",
+          "reason": "no_task_profile"
+        }
+      },
+      "virtualNameNoDecisionProvider": {
+        "status": 502,
+        "upstreamCalls": 0,
+        "body": "{\"error\":{\"code\":null,\"message\":\"AgentCompass: getaddrinfo ENOTFOUND agentcompass.local\",\"param\":null,\"type\":\"api_error\"},\"agentcompass\":{\"routed\":false,\"notice\":\"未路由：分类不可用\",\"reason\":\"no_task_profile\"}}",
+        "asserted": false
+      },
+      "logLine": "2026/11/07 10:02:30 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: 未路由：分类不可用 (no_task_profile)"
+    }
+  ],
+  "hostEffortReadyMs": 1093
+}

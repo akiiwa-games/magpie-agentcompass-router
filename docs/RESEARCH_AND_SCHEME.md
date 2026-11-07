@@ -323,6 +323,37 @@ AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 
 
 ---
 
+### 4.6 删除文本规则后的真实 Magpie 验收（Scenario 1–12、14、15）
+
+§4.2–4.4 记录的是删除文本规则之前的提交。删除之后路由只看结构化画像，这里是重写后的场景在真实 Magpie 上的结果。
+
+运行环境同 §4.3，只用假凭据，上游和分类模型都是本地 mock。被测提交 `c21ece3`，对比基线 `759d956`（删除前的最后一个提交，第二个真实 Magpie 进程）。Scenario 13（真实凭据）没有运行，它的请求已改为带画像，但改动未经实跑。完整记录：[`linux-sandbox-e2e-report-no-hardcode-0.1.2891.json`](./linux-sandbox-e2e-report-no-hardcode-0.1.2891.json)、[`linux-sandbox-e2e-report-no-hardcode-0.1.3196.json`](./linux-sandbox-e2e-report-no-hardcode-0.1.3196.json)。
+
+| 场景 | 现在验证什么 | 0.1.2891 | 0.1.3196 |
+|---|---|---|---|
+| 1–2 | 插件生命周期、市场与 Web API | PASS | PASS |
+| 3 | 带画像的请求不等 1600ms 的分类模型（0 次调用，额外开销 1ms / 4ms）；虚拟模型没有 `candidateModels` 和 `defaultModel` 时返回 400 并写明这两个选项 | PASS | PASS |
+| 4–5 | 四种画像路由到不同模型；`/v1/responses`、`/v1/messages`、SSE；`profile` 不发往上游 | PASS | PASS |
+| 6 | 分类模型 HTTP 500、超时（约 305ms）、未配置：不路由，走路由组兜底 `gpt-6-luna`；模式 A 不受影响 | PASS | PASS |
+| 7 | 模式 B 经分类模型命中规则，其余回答 `none of these` | PASS | PASS |
+| 8 | 每个请求都带画像时，20 个会话 0 次重路由 | PASS | PASS |
+| 9 | 把基线自己的画像器的答案交给新版本：352 个请求逐项比较状态码、模型、effort、完整上游请求，0 处差异；新一轮 48 行 × 8 次采样，0 处差异 | PASS | PASS |
+| 10–12 | `realtime_loop` 路由、会话保持、固定慢模型 | PASS | PASS |
+| 14 | 同一画像配 902 种措辞（`test/task_text_corpus.mjs`，含加急、brainstorm、审查），每种协议路由都不变；同样的文字换一个画像就去别处 | PASS | PASS |
+| 15 | 没有画像：不路由、不加 effort、不写会话，日志和 JSON 回复写明原因 | PASS | PASS |
+| 13 | 真实上游 | 未运行 | 未运行 |
+
+Scenario 9 不再比较直接发文本的结果，因为新版本不读文本。比较的是拿到同样答案之后的一切。
+
+结论与边界：
+
+- **`onResponse` 的返回值会到达客户端（实测）**：未路由时，chat、responses、messages 的 JSON 回复都带 `agentcompass: { routed: false, notice, reason }`，错误回复也带。流式回复不带，它走 `onEvent`，插件没有导出；流式只有 Magpie 日志。
+- **虚拟模型名没有 `defaultModel` 时客户端收到错误**：开着决策 provider 时是 HTTP 404（`agentcompass answers only /systemone`），不发往上游。运行时再把 `enableDecisionProvider` 关掉，是 502（`getaddrinfo ENOTFOUND agentcompass.local`），Magpie 还留着这个 provider 的条目。全新安装、从未开启决策 provider 的情况没有测。配置 `defaultModel` 后是 200。
+- **画像要每个请求都带**：会话中途不带画像的工具循环请求，各次运行 20 次中有 4–10 次被保持（落在服务过该会话的运行时上），其余是 404。只记录，不断言。
+- **请求只带当前轮的答案**：基线可以从历史文本重算前一轮的决策，新版本不行。新一轮画像变了时，实时会话 20 次中有 3–5 次移动到新画像的路由，其余保持；每轮画像不变则 0 次移动。
+- **短追问不再因为短而保持**：Scenario 9 里 `bundles with effort` 池的一行 `继续`，基线是 `claude-opus-5-5:xhigh`，新版本是 `claude-opus-5-5:medium`，和本会话第一个请求一致。这一行取决于落在哪个运行时（0.1.2891 这次没有差异，0.1.3196 有一行）。它单独记在报告的 `followupsRoutedAgainAsTheirFirstRequest` 里，并断言等于首个请求的路由，不算差异。
+- **沙盒内的单元测试**：`bun test` 是 121 通过、26 跳过、0 失败。跳过的是要和 git 基线比较的 parity 测试，沙盒里没有 git；宿主机上 `npm test` 147 项全部运行并通过。
+
 ## 5. 与 [AgentCompass 本体 (`akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass) 的生态协同
 
 本插件提供 Magpie 网关层面的**单轮纯意图路由（Turn-Level Micro-Router）**。在生产多 Agent 研发工作流中，推荐与 **[AgentCompass 本体 (`https://github.com/akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass)**、**[Magpie](https://github.com/yetone/magpie)**、**[Cindy](https://github.com/yetone/cindy)** 及 **Paseo** 配合使用：
