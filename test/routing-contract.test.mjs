@@ -1105,6 +1105,34 @@ test("a turn with no text still routes when the user set a pool or a pin (review
   assert.equal(bare.reasoning_effort, "high");
 });
 
+test("the hooks route a turn with no text too when the user set a pool or a pin (review 5 M1)", async () => {
+  const sol = "gpt-6.1-sol";
+  const astra = "gpt-6-astra";
+  const pool = [sol, { model: sol, effort: "high", disabled: true }];
+  const image = { role: "user", content: [{ type: "image_url", image_url: { url: "data:image/png;base64,AAAA" } }] };
+  const send = async (options, extra = {}) => {
+    const ctx = context(options, { sessionId: "i" });
+    await hooks.onRequest({ model: "agentcompass/auto", messages: [image], ...extra }, ctx);
+    return ctx.state;
+  };
+  const picked = ({ route }) => `${route?.targetModel}:${route?.targetEffort}`;
+  // The first turn is an image, so the effort the user disabled must not be routed to
+  assert.equal(picked(await send({ candidateModels: pool })), `${sol}:low`);
+  assert.equal(picked(await send({ candidateModels: pool, routeModelTriggers: [sol] }, { model: sol })), `${sol}:low`);
+  assert.equal(picked(await send({ candidateModels: pool, routeAllModels: true }, { model: sol, reasoning_effort: "high" })), `${sol}:low`);
+  // A pin holds without text, and an unhealthy one is refused
+  assert.equal(picked(await send({ candidateModels: [sol, astra], routeAllModels: true, pinnedModel: astra }, { model: sol })), `${astra}:low`);
+  for (const [options, extra] of [[{ routeAllModels: true }, { model: sol }], [{}, {}]]) {
+    const refused = await send({ candidateModels: [sol, astra], pinnedModel: sol, unhealthyModels: [sol], ...options }, extra);
+    assert.equal(refused.route, undefined);
+    assert.ok(refused.routeBlocked);
+  }
+  // With neither a pool nor a pin there is nothing to route on
+  const bare = await send({ routeAllModels: true }, { model: sol, reasoning_effort: "high" });
+  assert.equal(bare.route, undefined);
+  assert.equal(bare.routeBlocked, undefined);
+});
+
 test("an effort the user disabled stays out for a row off by default, pinned too (review 4 r1)", () => {
   const sol = "gpt-6.1-sol";
   const dflt = (extra) => ({ model: sol, disabled: true, disabled_by_default: true, ...extra });

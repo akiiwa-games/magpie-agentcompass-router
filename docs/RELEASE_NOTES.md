@@ -151,7 +151,7 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 
 ### 其他行为变化
 
-- 整个对话没有用户文字时（例如第一轮只发图片），只要有候选池或点名也照常路由，所以禁用的档位、点名和不健康拒绝都生效。以前这种请求不路由：虚拟名默认返回 404，配了 `routeModelTriggers`、Routing Group 或 `routeAllModels` 时按原模型和默认的 `high` 或客户端自带的档位发出。现在虚拟名加无文字请求按候选池正常路由，候选池里的未知模型名选不出时返回 503。既没有候选池也没有点名时不变。
+- 整个对话没有用户文字时（例如第一轮只发图片），只要有候选池或点名也照常路由（middleware 和 hooks 相同），所以禁用的档位、点名和不健康拒绝都生效。以前这种请求不路由：虚拟名默认返回 404，配了 `routeModelTriggers`、Routing Group 或 `routeAllModels` 时按原模型和默认的 `high` 或客户端自带的档位发出。现在虚拟名加无文字请求按候选池正常路由，候选池里的未知模型名选不出时返回 503。既没有候选池也没有点名时不变。
 - 候选名上的 `:auto`、`:off`、`:default` 不约束档位，路由时会去掉；`-off` 不是档位后缀（`gpt-6.1-sol-off` 按 family 处理）。
 - 点名时不一样：`:default` 算一个具体档位，点名 `gpt-6.1-sol:default` 找不到对应的行，返回 503（`pin_unavailable`），和 AgentCompass 相同。
 - 任务级 `multi_task`、`task_count` 的值原样校验。`multi_task:"false"`、`task_count:0` 这类值返回 `invalid_caller_profile`。

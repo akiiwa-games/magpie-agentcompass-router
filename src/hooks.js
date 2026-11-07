@@ -273,7 +273,8 @@ export async function onRequest(body, ctx = {}) {
     }
   }
 
-  if (!facts.objective) {
+  // A pool or a pin holds on a turn with no text too: an image alone doesn't get past either (contract R2, R3).
+  if (!facts.objective && !hasExplicitCandidates && Object.keys(pins).length === 0) {
     ctx.report?.("empty");
     return undefined;
   }
