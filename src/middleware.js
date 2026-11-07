@@ -21,6 +21,7 @@
 import {
   blockedRefusal,
   candidateOffers,
+  effortGoneWarning,
   heldBundle,
   heldEffortOn,
   heldTarget,
@@ -31,6 +32,7 @@ import {
   mergePinOptions,
   pinOptionsOf,
   pinsFixEffort,
+  sessionProfile,
   selectBestRoute,
 } from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
@@ -344,11 +346,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
         : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
     // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
     const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
-    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog, {
-      pins,
-      profile: sessionState?.profile || { work_kind: sessionState?.workKind || "general_implementation", difficulty: sessionState?.difficulty || "routine" },
-      realtimeLoop: heldRealtime,
-    }) : keptEffort;
+    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState), realtimeLoop: heldRealtime }) : keptEffort;
     if (heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins))) {
       cont = {
         shouldHold: false,
@@ -407,7 +405,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
     return { facts, sessionKey, record: null, decision: null };
   }
 
-  const profile = inferTaskProfile(facts);
+  // What this turn's text looks like is no ground for putting back the row the hold just refused (contract R2).
+  const profile = cont.why === "effort_gone" ? sessionProfile(sessionState) : inferTaskProfile(facts);
   const unhealthyModels = [
     ...store.getUnhealthyModels(now),
     ...(Array.isArray(options.unhealthyModels) ? options.unhealthyModels : []),
@@ -435,6 +434,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
       cacheWarm: false,
     },
   });
+  if (cont.why === "effort_gone") decision.warnings = [effortGoneWarning(cont), ...decision.warnings];
 
   if (!decision || !decision.targetModel) {
     return { facts, sessionKey, record: null, decision };

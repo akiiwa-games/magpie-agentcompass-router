@@ -809,6 +809,224 @@ test("`:default` constrains nothing on a candidate; a pin that says it names an 
   assert.equal(pinned.refusal, "pin_unavailable: pinned model gpt-6.1-sol:default cannot serve this request");
 });
 
+const SCORED = (over = {}) => ({
+  work_kind: "general_implementation",
+  reasoning_depth: 2,
+  code_complexity: 2,
+  context_scale: 1,
+  divergence: 1,
+  hallucination_risk: 1,
+  error_cost: 1,
+  needs_visual: false,
+  needs_gui: false,
+  local_only: false,
+  expected_hours: 1,
+  hours_confidence: "medium",
+  urgency: 1,
+  multi_task: false,
+  task_count: "1",
+  interaction_style: "engineering",
+  realtime_loop: false,
+  ...over,
+});
+
+test("an effort the user disabled is never dispatched, by any row of that model (review 3 M1)", () => {
+  const profiles = [
+    SCORED({ work_kind: "tool_execution", reasoning_depth: 1, code_complexity: 0 }),
+    SCORED(),
+    SCORED({ reasoning_depth: 3, code_complexity: 3, context_scale: 3, error_cost: 3 }),
+    SCORED({ realtime_loop: true }),
+  ];
+  const all = ["low", "medium", "high", "xhigh", "max"];
+  let won = 0;
+  for (const m of Object.keys(catalog.DEFAULT_MODELS)) {
+    for (const effort of all) {
+      for (const pool of [
+        [m, { model: m, effort, disabled: true }],
+        [{ model: m, efforts: all }, { model: m, effort, disabled: true }],
+        [{ id: "a", account: "x", provider: "codex", model: m, efforts: all }, { id: "b", account: "x", provider: "codex", model: m, effort, disabled: true }],
+        [{ model: m, account: "x" }, { id: "b", account: "x", model: m, effort, disabled: true }],
+      ]) {
+        for (const p of profiles) {
+          const route = selectBestRoute(p, { candidateModels: pool, realtime_loop: p.realtime_loop });
+          if (route.ok && route.targetEffort === effort) won++;
+        }
+      }
+    }
+  }
+  assert.equal(won, 0);
+
+  // Pinned, it is refused as AgentCompass refuses it, and every turn asks no more than the first
+  const sol = "gpt-6.1-sol";
+  for (const [pool, pin] of [
+    [[sol, { model: sol, effort: "medium", disabled: true }], { constraintModel: `${sol}:medium` }],
+    [[sol, { model: sol, effort: "medium", disabled: true }], { constraintModel: sol, constraintEffort: "medium" }],
+    [[{ model: sol, efforts: all }, { model: sol, effort: "medium", disabled: true }], { constraintModel: `${sol}:medium` }],
+    [["grok-4.7", { model: "grok-4.7", effort: "medium", disabled: true }], { constraintModel: "grok-4.7:medium" }],
+  ]) {
+    const route = selectBestRoute(SCORED(), { candidateModels: pool, ...pin });
+    assert.equal(route.blocked, true);
+    assert.match(route.refusal, /^pin_unavailable: /);
+    assert.match(route.warnings[0], /unchecked in model management/);
+    const run = twoTurns({ candidateModels: pool, ...pin }, { candidateModels: pool, ...pin });
+    assert.equal(run.first, "agentcompass/auto");
+    assert.equal(run.second, "agentcompass/auto");
+    assert.match(run.rejected[0][1], /^agentcompass: pin_unavailable: /);
+  }
+  // The other efforts stay on offer, and a session on the disabled one leaves it
+  assert.notEqual(selectBestRoute(SCORED(), { candidateModels: [sol, { model: sol, effort: "high", disabled: true }] }).targetEffort, "high");
+  const left = twoTurns({ candidateModels: [`${sol}:high`] }, { candidateModels: [sol, { model: sol, effort: "high", disabled: true }] });
+  assert.equal(left.first, `${sol}:high`);
+  assert.notEqual(left.second, `${sol}:high`);
+});
+
+test("a route after a hold refused a step down judges by the session's task, and says why (review 3 r1)", async () => {
+  const sonnet = "claude-sonnet-5-5";
+  const hard = "Prove the correctness of this distributed consensus algorithm and redesign the architecture across all modules";
+  const asked = { candidateModels: [`${sonnet}:xhigh`] };
+  const down = { candidateModels: [`${sonnet}:low`] };
+
+  const store = new SessionContinuityStore();
+  const first = { model: "agentcompass/auto", messages: [{ role: "user", content: hard }] };
+  const ctxOne = { sessionId: "k", options: { ...asked, continuityStore: store, now: NOW }, state: {} };
+  quietly(() => middleware.onRequest(first, ctxOne));
+  assert.equal(first.model, `${sonnet}:xhigh`);
+  const profile = ctxOne.state.route.profile;
+  assert.equal(selectBestRoute(profile, down).blocked, true, "a new route for this task refuses the low row");
+  const rejected = [];
+  const second = followUp(first);
+  const { logged } = quietly(() =>
+    middleware.onRequest(second, { sessionId: "k", options: { ...down, continuityStore: store, now: NOW + 1000 }, state: {}, reject: (s, m) => rejected.push([s, m]) }),
+  );
+  assert.equal(second.model, "agentcompass/auto");
+  assert.equal(rejected[0]?.[0], 503);
+  assert.match(logged[0], new RegExp(`${sonnet}: effort xhigh is no longer offered; routed again`));
+
+  // The hooks do the same, with no second classifier call
+  let calls = 0;
+  const fetch = async () => {
+    calls++;
+    const content = JSON.stringify(calls === 1 ? SCORED({ reasoning_depth: 3, code_complexity: 3, context_scale: 3, divergence: 2, error_cost: 3, hallucination_risk: 2 }) : SCORED({ reasoning_depth: 1, code_complexity: 0 }));
+    return { ok: true, status: 200, json: async () => ({ choices: [{ message: { content } }] }) };
+  };
+  const scored = { allowExternalScorer: true, scorerType: "openai_compatible", scorerBaseUrl: "http://127.0.0.1:9/v1", scorerApiKey: "fake", scorerModel: "fake", useCache: false, fetch };
+  const hookStore = new SessionContinuityStore();
+  const hookFirst = turnOne();
+  await hooks.onRequest(hookFirst, { protocol: "chat", sessionId: "k2", options: { ...asked, ...scored, continuityStore: hookStore, now: NOW }, state: {} });
+  assert.equal(calls, 1);
+  const hookCtx = { protocol: "chat", sessionId: "k2", options: { ...down, ...scored, continuityStore: hookStore, now: NOW + 1000 }, state: {} };
+  await hooks.onRequest(followUp(hookFirst), hookCtx);
+  assert.equal(calls, 1);
+  assert.equal(hookCtx.state.route, undefined);
+  assert.match(hookCtx.state.routeBlocked.warnings[0], /effort xhigh is no longer offered; routed again/);
+
+  // Routed somewhere new, the warning goes with the route
+  const sol = "gpt-6.1-sol";
+  const up = twoTurns({ candidateModels: [`${sol}:medium`] }, { candidateModels: [`${sol}:high`] });
+  assert.equal(up.second, `${sol}:high`);
+  assert.equal(up.route.continuation.why, "effort_gone");
+  assert.match(up.route.warnings[0], new RegExp(`${sol}: effort medium is no longer offered; routed again`));
+  const hookUp = new SessionContinuityStore();
+  const hookUpFirst = turnOne();
+  await hooks.onRequest(hookUpFirst, { protocol: "chat", sessionId: "k3", options: { candidateModels: [`${sol}:medium`], continuityStore: hookUp, now: NOW }, state: {} });
+  const hookUpCtx = { protocol: "chat", sessionId: "k3", options: { candidateModels: [`${sol}:high`], continuityStore: hookUp, now: NOW + 1000 }, state: {} };
+  await hooks.onRequest(followUp(hookUpFirst), hookUpCtx);
+  assert.equal(hookUpCtx.state.route.targetEffort, "high");
+  assert.match(hookUpCtx.state.route.warnings[0], /effort medium is no longer offered; routed again/);
+});
+
+test("/v1/systemone gives any caller the conclusion; the details take the operator's option (review 3 r2)", async () => {
+  const account = "claude/secret-account@example.com";
+  const windows = (remaining) => [{ name: "7d", used: 100 - remaining, remaining, resetsAt: new Date(Date.now() + 48 * 3600 * 1000).toISOString() }];
+  const quotaOf = (remaining) => ({ [account]: { kind: "subscription", quota: { windows: windows(remaining) } } });
+  const ok = { candidateModels: ["claude-sonnet-5-5"], quotas: quotaOf(80) };
+  const spent = { candidateModels: ["claude-sonnet-5-5"], quotas: quotaOf(0) };
+  const sick = { candidateModels: ["claude-sonnet-5-5"], unhealthyModels: ["claude-sonnet-5-5"] };
+  const leaks = (answer) => /secret-account|remaining|unhealthy|ability|floor|selectedAccount|"quota"|"warnings"|"profile"|"scorer"/.test(JSON.stringify(answer));
+  const silently = async (fn) => {
+    const warn = console.warn;
+    const logged = [];
+    console.warn = (line) => logged.push(line);
+    try {
+      return { answer: await fn(), logged };
+    } finally {
+      console.warn = warn;
+    }
+  };
+
+  // A route: model and effort, and the answers Magpie reads
+  const routed = await systemOne({}, ok);
+  assert.deepEqual(Object.keys(routed.agentcompass).sort(), ["targetEffort", "targetModel"]);
+  assert.equal(routed.agentcompass.targetModel, "claude-sonnet-5-5");
+  assert.ok(routed.answers.effort);
+  assert.ok(routed.usage);
+  assert.equal(leaks(routed), false);
+
+  // A block: a code and a sentence, whatever blocked it; the detail is in the local log
+  for (const [options, state] of [[spent, {}], [sick, {}]]) {
+    const { answer, logged } = await silently(() => systemOne(state, options));
+    assert.deepEqual(answer.agentcompass, { targetModel: null, blocked: true, error: "no_route", message: "no candidate can serve this request" });
+    assert.equal(leaks(answer), false);
+    assert.ok(logged.length > 0);
+  }
+  assert.match((await silently(() => systemOne({}, spent))).logged.join("\n"), /secret-account/);
+  // A pin learns no more: not whether the name is in the pool, nor whether it is healthy
+  const pinAnswers = [];
+  for (const [options, pin] of [[sick, "claude-sonnet-5-5"], [ok, "not-in-the-pool"], [{ candidateModels: ["claude-sonnet-5-5:high"] }, "claude-sonnet-5-5:low"]]) {
+    pinAnswers.push((await silently(() => systemOne({ constraintModel: pin }, options))).answer.agentcompass);
+  }
+  for (const answer of pinAnswers) {
+    assert.deepEqual(answer, { targetModel: null, blocked: true, error: "pin_unavailable", message: "the pinned model cannot serve this request" });
+  }
+  // A short follow-up is a conclusion too
+  const nudge = await index.handleSystemOneRequest(
+    { model: "jev-6b-int8", state: { message: "继续", previous_message_kind: "general_implementation", previous_message_reasoning: "high" }, questions: SYSTEM_ONE_QUESTIONS },
+    ok,
+  );
+  assert.deepEqual(Object.keys(nudge.agentcompass).sort(), ["targetEffort", "targetModel"]);
+  // Through the provider's fetch too
+  const fetched = await index.systemOneFetch("http://plugin/v1/systemone", { method: "POST", body: JSON.stringify({ model: "m", state: { message: TASK }, questions: SYSTEM_ONE_QUESTIONS }) }, spent);
+  const fetchedBody = await (await silently(async () => fetched)).answer.json();
+  assert.equal(leaks(fetchedBody), false);
+
+  // Only the operator's literal `true` opens the details
+  assert.equal(leaks(await silently(() => systemOne({ decisionProviderDetails: true }, spent)).then((r) => r.answer)), false);
+  assert.equal(leaks(await silently(() => systemOne({}, { ...spent, decisionProviderDetails: "true" })).then((r) => r.answer)), false);
+  const details = { decisionProviderDetails: true };
+  const blocked = (await silently(() => systemOne({}, { ...spent, ...details }))).answer.agentcompass;
+  assert.equal(blocked.error, "no_route");
+  assert.equal(blocked.refusal, "no_route: no candidate can serve this request");
+  assert.match(blocked.warnings.join(" "), /secret-account/);
+  const open = (await systemOne({}, { ...ok, ...details })).agentcompass;
+  assert.equal(open.selectedAccount, account);
+  assert.equal(open.quota.account, account);
+  assert.ok(open.profile);
+  assert.ok(Array.isArray(open.warnings));
+  const pinned = (await silently(() => systemOne({ constraintModel: "claude-sonnet-5-5" }, { ...sick, ...details }))).answer.agentcompass;
+  assert.equal(pinned.refusal, "model_unhealthy: pinned model claude-sonnet-5-5 is marked unhealthy");
+});
+
+test("model_unhealthy says whose health it is (review 3 r3)", () => {
+  const flagship = "claude-opus-5-5";
+  const family = "claude-opus-9";
+  const refuse = (pool, unhealthyModels, pin) => selectBestRoute(PROFILE, { candidateModels: pool, unhealthyModels, ...pin });
+  // The pinned model itself
+  assert.equal(refuse([flagship, family], [flagship], { constraintModel: flagship }).refusal, `model_unhealthy: pinned model ${flagship} is marked unhealthy`);
+  assert.equal(refuse([family], [family], { constraintModel: family }).refusal, `model_unhealthy: pinned model ${family} is marked unhealthy`);
+  // A family row the pin also matches, with the flagship healthy: the name in the 503 stays the pinned one, the log has the row
+  const familyDown = refuse([family], [family], { constraintModel: flagship });
+  assert.equal(familyDown.refusal, `model_unhealthy: a family row of pinned model ${flagship} is marked unhealthy`);
+  assert.match(familyDown.warnings[0], new RegExp(`pinned model ${flagship} is unavailable: ${family}@\\w+: model is currently marked unhealthy`));
+  // An effort pin has no model to blame, and a row left out by its effort is not the cause
+  assert.match(refuse(["gpt-6.1-sol:high", "gpt-6-astra:high"], ["gpt-6.1-sol"], { constraintEffort: "low" }).refusal, /^pin_unavailable: pinned effort low /);
+  assert.match(refuse(["gpt-6.1-sol:low"], ["gpt-6.1-sol"], { constraintEffort: "low" }).refusal, /^pin_unavailable: pinned effort low /);
+  // A bundle's model is named as the bundle's
+  const bundle = { id: "row", provider: "codex", account: "codex", model: "gpt-6.1-sol", effort: "high" };
+  assert.equal(refuse([bundle], ["gpt-6.1-sol"], { pinnedBundle: "row" }).refusal, "model_unhealthy: the model of pinned bundle row is marked unhealthy");
+  // Blocked for another reason, with nothing down: no health in the wording
+  assert.match(refuse([`${flagship}:high`], [], { constraintModel: `${flagship}:low` }).refusal, /^pin_unavailable: /);
+});
+
 test("the pools of the non-realtime report are in the repo", () => {
   const pools = JSON.parse(fs.readFileSync(path.join(REPO, "test", "fixtures", "nonrealtime-pools.json"), "utf8"));
   assert.equal(pools.length, 20);

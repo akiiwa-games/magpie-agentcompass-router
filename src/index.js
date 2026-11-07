@@ -17,10 +17,13 @@
 
 import {
   explicitCandidateModels,
+  blockedRefusal,
   candidateOffers,
+  logRouteWarnings,
   mergePinOptions,
   pinOptionsOf,
   pinsFixEffort,
+  refusalSummary,
   rankCandidates,
   selectBestRoute,
 } from "./allocator.js";
@@ -245,7 +248,9 @@ function buildEffortAnswer(effort, confidence = 0.9) {
 }
 
 /**
- * Handle a POST `/v1/systemone` request from Magpie (`internal/gateway/decide.go`).
+ * Handle a POST `/v1/systemone` request from Magpie (`internal/gateway/decide.go`). Magpie reads `model`, `answers` and `usage`.
+ * This is a public gateway route, so `agentcompass` holds the conclusion only: accounts, quotas, the pool and health go to the
+ * local log, and to the caller only under the operator's `decisionProviderDetails: true`.
  */
 export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   const model = bodyObj?.model || DECISION_MODEL_ID;
@@ -306,12 +311,19 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
             : undefined;
 
   const pins = mergePinOptions(pinOptionsOf(pluginOptions), state, rawTaskObj);
-  const blockedAnswer = (error, warnings) => ({
-    model,
-    answers: {},
-    agentcompass: { targetModel: null, blocked: true, error, warnings },
-    usage: { input_tokens: Math.max(16, Math.ceil(turnText.length / 4)), output_tokens: 16 },
-  });
+  const withDetails = pluginOptions.decisionProviderDetails === true;
+  const blockedAnswer = (blocked) => {
+    logRouteWarnings(blocked.warnings);
+    const { code, message } = refusalSummary(blocked);
+    return {
+      model,
+      answers: {},
+      agentcompass: withDetails
+        ? { targetModel: null, blocked: true, error: blocked.error, refusal: blockedRefusal(blocked), warnings: blocked.warnings }
+        : { targetModel: null, blocked: true, error: code, message },
+      usage: { input_tokens: Math.max(16, Math.ceil(turnText.length / 4)), output_tokens: 16 },
+    };
+  };
 
   // Continuation fast-path for short follow-up nudges ("继续", "ok go ahead", "lgtm", etc.)
   // when Magpie's `decide.go` passes `previous_message_kind` / `previous_message_reasoning`.
@@ -363,24 +375,26 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     return {
       model,
       answers,
-      agentcompass: {
-        targetModel: null,
-        targetEffort: heldEffort,
-        workKind: prevKind || "general_implementation",
-        difficulty: syntheticDecision.difficulty,
-        continuation: {
-          held: true,
-          why: "followup",
-          previousKind: prevKind || null,
-          previousEffort: prevReasoning || null,
-        },
-        scorer: {
-          kind: "continuity_hold",
-          held: true,
-          why: "followup",
-          calls: 0,
-        },
-      },
+      agentcompass: withDetails
+        ? {
+            targetModel: null,
+            targetEffort: heldEffort,
+            workKind: prevKind || "general_implementation",
+            difficulty: syntheticDecision.difficulty,
+            continuation: {
+              held: true,
+              why: "followup",
+              previousKind: prevKind || null,
+              previousEffort: prevReasoning || null,
+            },
+            scorer: {
+              kind: "continuity_hold",
+              held: true,
+              why: "followup",
+              calls: 0,
+            },
+          }
+        : { targetModel: null, targetEffort: heldEffort },
       usage: {
         input_tokens: Math.max(8, Math.ceil(turnText.length / 4)),
         output_tokens: 16,
@@ -415,7 +429,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   });
 
   if (!profile) {
-    return blockedAnswer(meta.error, [`task profile unavailable: ${meta.detail || meta.error}`]);
+    return blockedAnswer({ error: meta.error, warnings: [`task profile unavailable: ${meta.detail || meta.error}`] });
   }
 
   const liveQuotas = state.quotas || loadLiveQuotas(pluginOptions);
@@ -433,8 +447,9 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     ...pins,
   });
   if (decision.blocked) {
-    return blockedAnswer(decision.error || "no_route", decision.warnings);
+    return blockedAnswer({ error: decision.error || "no_route", warnings: decision.warnings, refusal: decision.refusal });
   }
+  logRouteWarnings(decision.warnings);
 
   const answers = {};
   let matchedChoice = "";
@@ -497,25 +512,27 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   return {
     model,
     answers,
-    agentcompass: {
-      targetModel: decision.targetModel,
-      targetEffort: effectiveEffort,
-      selectedAccount: decision.selectedAccount || null,
-      quota: decision.quota || null,
-      workKind: decision.workKind,
-      difficulty: decision.difficulty,
-      requiredAbility: decision.requiredAbility,
-      realtimeLoop: Boolean(decision.realtimeLoop),
-      warnings: decision.warnings,
-      continuation: {
-        held: false,
-        why: prevKind ? "reclassified" : "first",
-        previousKind: prevKind || null,
-        previousEffort: prevReasoning || null,
-      },
-      profile,
-      scorer: meta,
-    },
+    agentcompass: withDetails
+      ? {
+          targetModel: decision.targetModel,
+          targetEffort: effectiveEffort,
+          selectedAccount: decision.selectedAccount || null,
+          quota: decision.quota || null,
+          workKind: decision.workKind,
+          difficulty: decision.difficulty,
+          requiredAbility: decision.requiredAbility,
+          realtimeLoop: Boolean(decision.realtimeLoop),
+          warnings: decision.warnings,
+          continuation: {
+            held: false,
+            why: prevKind ? "reclassified" : "first",
+            previousKind: prevKind || null,
+            previousEffort: prevReasoning || null,
+          },
+          profile,
+          scorer: meta,
+        }
+      : { targetModel: decision.targetModel, targetEffort: effectiveEffort },
     usage: {
       input_tokens: Math.max(16, Math.ceil(turnText.length / 4)),
       output_tokens: 48,

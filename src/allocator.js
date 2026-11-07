@@ -38,6 +38,7 @@ import {
 } from "./catalog.js";
 
 const MARKED_UNHEALTHY = "model is currently marked unhealthy";
+const EFFORT_NOT_PINNED = "explicit effort constraint";
 import { inferTaskProfile, validateProfile } from "./profiler-core.js";
 import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
 
@@ -1331,7 +1332,8 @@ function availabilityExclusions(candidate, rawEffort, taskCtx) {
   const rawModel = candidate.model;
   // Off by default is not the user's checkbox: naming the model still reaches it.
   const named = candidate.disabled_by_default && pinScope(candidate, canonicalModel(rawModel, taskCtx.aliases, taskCtx.models), taskCtx);
-  if (candidate.disabled && !named) {
+  // Unchecking an effort takes it from every row of that account and model, a bare name's included (contract R2).
+  if ((candidate.disabled && !named) || (!candidate.disabled && candidate.disabled_efforts?.includes(String(rawEffort).toLowerCase()))) {
     excluded.push("unchecked in model management");
   }
   if (candidate.discovery_unavailable) {
@@ -1372,7 +1374,7 @@ function availabilityExclusions(candidate, rawEffort, taskCtx) {
   }
   const wantedEffort = pinnedEffortOf(taskCtx);
   if (wantedEffort && String(rawEffort).toLowerCase() !== wantedEffort) {
-    excluded.push("explicit effort constraint");
+    excluded.push(EFFORT_NOT_PINNED);
   }
   const cooling = bundleCooldownReason(candidate, taskCtx.launch_failures || taskCtx.launchFailures, taskCtx.now);
   if (cooling) {
@@ -2259,6 +2261,7 @@ export function rankCandidates(profileInput, options = {}) {
       model: pinned || null,
       effort: taskCtx.constraint_effort || taskCtx.constraints?.effort || null,
       bundle: taskCtx.pinned_bundle || taskCtx.constraint_bundle || null,
+      row_down: taskCtx.pinned_row_down,
     },
     selected: pinnedCand || eligible[0] || null,
     ranking: eligible,
@@ -2457,6 +2460,21 @@ export function heldEffortOn(list, model, effort, catalog, { pins, profile, real
   return null;
 }
 
+/** What a session was routed on: a hold and a route after it judge by this, not by what a short follow-up looks like. */
+export function sessionProfile(sessionState) {
+  return (
+    sessionState?.profile || {
+      work_kind: sessionState?.workKind || "general_implementation",
+      difficulty: sessionState?.difficulty || "routine",
+    }
+  );
+}
+
+/** Says why a session that lost its effort was routed again. */
+export function effortGoneWarning(cont) {
+  return `${cont.previousModel}: effort ${cont.previousEffort} is no longer offered; routed again`;
+}
+
 /** The pool's row a held session runs on (`modeId`, `draws`, ...), at its held effort. */
 export function heldBundle(list, model, effort, catalog) {
   const rows = rowsNaming(list, model, catalog);
@@ -2522,7 +2540,7 @@ export function logRouteWarnings(warnings) {
 /**
  * Why a pinned choice came back blocked (`warnings` of the decision).
  */
-function blockedWarnings(result) {
+function blockedWarnings(result, models, aliases) {
   const label = pinLabel(result.pin);
   if (!label) {
     const reasons = [...new Set(result.allCandidates.flatMap((c) => c.excluded.map((reason) => excludedLine(c, reason))))];
@@ -2530,8 +2548,18 @@ function blockedWarnings(result) {
   }
   const matching = rowsThePinNames(result);
   if (matching.length === 0) return [`${label} is not among the candidates`];
-  const reasons = [...new Set(matching.flatMap((c) => c.excluded))];
+  const pinKey = pinnedRowKey(result.pin, models, aliases);
+  // What is wrong with a family row the pin also matches is that row's, not the pinned model's (contract R1).
+  const ownRow = (c) => !pinKey || result.pin.row_down || healthKey(c.model, models, aliases) === pinKey;
+  const reasons = [...new Set(matching.flatMap((c) => (ownRow(c) ? c.excluded : c.excluded.map((reason) => excludedLine(c, reason)))))];
   return [`${label} is unavailable: ${reasons.join("; ")}`];
+}
+
+/** The key of a pinned name with a row of its own, or `null`: a family name stays itself. */
+function pinnedRowKey(pin, models, aliases) {
+  if (pin?.bundle || !pin?.model) return null;
+  const named = resolveModel(splitPinModelAndEffort(String(pin.model).trim()).modelPart, models, aliases);
+  return named.source === "exact" || named.source === "alias" ? named.key : null;
 }
 
 /** How a blocked route refers to what was pinned, or `null` with no pin. */
@@ -2547,18 +2575,37 @@ function rowsThePinNames(result) {
 }
 
 /** What a client hears when a route is refused: what it pinned, a code, one sentence. The pool and its quotas stay in the local log. */
-function refusalOf(result) {
-  const label = pinLabel(result.pin);
+function refusalOf(result, models, aliases) {
+  const { pin } = result;
+  const label = pinLabel(pin);
   if (!label) return "no_route: no candidate can serve this request";
   const matching = rowsThePinNames(result);
   if (matching.length === 0) return `pin_not_in_pool: ${label} is not among the candidates`;
-  if (matching.some((c) => c.excluded.includes(MARKED_UNHEALTHY))) return `model_unhealthy: ${label} is marked unhealthy`;
+  // Health belongs to a model: a row left out by its effort says nothing here, and an effort pin has no model to blame.
+  const down = matching.some((c) => c.excluded.includes(MARKED_UNHEALTHY) && !c.excluded.includes(EFFORT_NOT_PINNED));
+  if (pin.bundle && down) return `model_unhealthy: the model of ${label} is marked unhealthy`;
+  if (!pin.bundle && pin.model && (pin.row_down || down)) {
+    const onlyAFamilyRow = !pin.row_down && pinnedRowKey(pin, models, aliases);
+    return `model_unhealthy: ${onlyAFamilyRow ? `a family row of ${label}` : label} is marked unhealthy`;
+  }
   return `pin_unavailable: ${label} cannot serve this request`;
 }
 
 /** The refusal of a block with no decision behind it: its code and one sentence. */
 export function blockedRefusal(blocked) {
   return blocked.refusal || `${blocked.error || "no_route"}: this request could not be routed`;
+}
+
+const PIN_REFUSALS = ["pin_not_in_pool", "model_unhealthy", "pin_unavailable"];
+
+/** A refusal for any holder of a gateway key: whether a pinned name is in the pool or healthy is the operator's to know. */
+export function refusalSummary(blocked) {
+  const refusal = blockedRefusal(blocked);
+  const colon = refusal.indexOf(": ");
+  const code = refusal.slice(0, colon);
+  return PIN_REFUSALS.includes(code)
+    ? { code: "pin_unavailable", message: "the pinned model cannot serve this request" }
+    : { code, message: refusal.slice(colon + 2) };
 }
 
 /**
@@ -2585,14 +2632,16 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     };
   }
   const top = result.selected;
+  const models = options.catalog?.models || DEFAULT_MODELS;
+  const aliases = options.catalog?.aliases || MODEL_ALIASES;
   const warnings = [
-    ...(top ? (top.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []) : blockedWarnings(result)),
-    ...poolNameWarnings(options, options.catalog?.models || DEFAULT_MODELS, options.catalog?.aliases || MODEL_ALIASES),
+    ...(top ? (top.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []) : blockedWarnings(result, models, aliases)),
+    ...poolNameWarnings(options, models, aliases),
   ];
   return {
     ok: Boolean(top),
     blocked: !top,
-    refusal: top ? null : refusalOf(result),
+    refusal: top ? null : refusalOf(result, models, aliases),
     targetModel: top ? top.model : null,
     canonicalModel: top ? top.canonicalModel : null,
     targetEffort: top ? top.effort : "high",

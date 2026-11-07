@@ -8,6 +8,7 @@
 
 import {
   candidateOffers,
+  effortGoneWarning,
   heldBundle,
   heldEffortOn,
   heldTarget,
@@ -16,6 +17,7 @@ import {
   mergePinOptions,
   pinOptionsOf,
   pinsFixEffort,
+  sessionProfile,
   selectBestRoute,
 } from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
@@ -193,11 +195,7 @@ export async function onRequest(body, ctx = {}) {
       heldRealtime && sessionState?.target ? sessionState.target : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
     // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
     const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
-    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog, {
-      pins,
-      profile: sessionState?.profile || { work_kind: sessionState?.workKind || "general_implementation", difficulty: sessionState?.difficulty || "routine" },
-      realtimeLoop: heldRealtime,
-    }) : keptEffort;
+    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState), realtimeLoop: heldRealtime }) : keptEffort;
     const effortGone = heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins));
     if (effortGone) {
       cont = {
@@ -286,24 +284,27 @@ export async function onRequest(body, ctx = {}) {
     options.allowExternalScorer === true ||
     scorerCfg.allowExternalScorer === true;
 
-  const { profile, meta } = await scoreTaskLive(facts, {
-    allowExternalScorer,
-    scorerType: preferHeuristic
-      ? "heuristic"
-      : options.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
-    scorerModel: options.scorerModel || scorerCfg.model,
-    scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl,
-    scorerApiKey: options.scorerApiKey || scorerCfg.apiKey,
-    jevBaseUrl: options.jevBaseUrl || scorerCfg.jevBaseUrl,
-    jevApiKey: options.jevApiKey || scorerCfg.jevApiKey,
-    scorerTimeoutMs:
-      options.scorerTimeoutMs ||
-      scorerCfg.timeoutMs ||
-      Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
-    useCache: options.useCache !== false && scorerCfg.useCache !== false,
-    signal: ctx.signal,
-    fetch: options.fetch,
-  });
+  // What this turn's text looks like is no ground for putting back the row the hold just refused (contract R2).
+  const { profile, meta } = cont.why === "effort_gone"
+    ? { profile: sessionProfile(sessionState), meta: { kind: "continuity_hold", held: false, why: cont.why, calls: 0 } }
+    : await scoreTaskLive(facts, {
+        allowExternalScorer,
+        scorerType: preferHeuristic
+          ? "heuristic"
+          : options.scorerType || scorerCfg.kind || scorerCfg.type || "heuristic",
+        scorerModel: options.scorerModel || scorerCfg.model,
+        scorerBaseUrl: options.scorerBaseUrl || scorerCfg.baseUrl,
+        scorerApiKey: options.scorerApiKey || scorerCfg.apiKey,
+        jevBaseUrl: options.jevBaseUrl || scorerCfg.jevBaseUrl,
+        jevApiKey: options.jevApiKey || scorerCfg.jevApiKey,
+        scorerTimeoutMs:
+          options.scorerTimeoutMs ||
+          scorerCfg.timeoutMs ||
+          Math.max(500, (options.gatewayTimeoutMs || 8000) - 500),
+        useCache: options.useCache !== false && scorerCfg.useCache !== false,
+        signal: ctx.signal,
+        fetch: options.fetch,
+      });
 
   if (!profile) {
     blockRoute(ctx, sessionKey, meta.error, [`task profile unavailable: ${meta.detail || meta.error}`]);
@@ -339,6 +340,7 @@ export async function onRequest(body, ctx = {}) {
       cacheWarm: false,
     },
   });
+  if (cont.why === "effort_gone") decision.warnings = [effortGoneWarning(cont), ...decision.warnings];
 
   if (!decision.ok || !decision.targetModel) {
     blockRoute(ctx, sessionKey, decision.error || "no_route", decision.warnings, decision.refusal);

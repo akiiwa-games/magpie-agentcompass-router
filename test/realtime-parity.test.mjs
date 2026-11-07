@@ -581,7 +581,7 @@ test("m2-R4: onProvider and the decision provider honor pins, with or without re
   const spent = { kind: "subscription", quota: { windows: [{ name: "7d", used: 100, remaining: 0, resetsAt: new Date(Date.now() + 48 * 3600 * 1000).toISOString() }] } };
   const quotas = Object.fromEntries(["codex", "gemini", "antigravity", "openai", "google"].map((p) => [`${p}/a@example.com`, spent]));
   const spentRoute = async (pins) =>
-    (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", realtime_loop: true, quotas }, questions }, { candidateModels: pool, ...pins })).agentcompass;
+    (await handleSystemOneRequest({ model: "jev-6b-int8", state: { message: "Tune the live loop", realtime_loop: true, quotas }, questions }, { candidateModels: pool, decisionProviderDetails: true, ...pins })).agentcompass;
   for (const pins of [pin, {}]) {
     const route = await spentRoute(pins);
     assert.equal(route.blocked, true);

@@ -20,12 +20,14 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 |---|---|---|
 | `no_route` | `no_route: no candidate can serve this request` | 没有点名，候选池里选不出模型 |
 | `pin_not_in_pool` | `pin_not_in_pool: pinned model <名字> is not among the candidates` | 点名的模型不在候选池里 |
-| `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型不健康 |
+| `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型本身不健康（旗舰，或点名的 family 名字） |
+| `model_unhealthy` | `model_unhealthy: a family row of pinned model <名字> is marked unhealthy` | 点名的旗舰健康，但它匹配到的 family 行不健康；本地日志写明是哪一行 |
+| `model_unhealthy` | `model_unhealthy: the model of pinned bundle <名字> is marked unhealthy` | 点名的 bundle 所用的模型不健康 |
 | `pin_unavailable` | `pin_unavailable: pinned model <名字> cannot serve this request` | 点名的模型因其他原因不可用，例如档位不提供、能力不够 |
 | `invalid_caller_profile` | `invalid_caller_profile: the task profile is invalid` | 调用方给的任务画像不合法 |
 | 其他错误码 | `<错误码>: this request could not be routed` | 其他阻断，例如 `classifier_invalid_output` |
 
-点名也可以是 `pinned bundle <名字>` 或 `pinned effort <档位>`，原因码相同。
+其他原因码里，点名也可以是 `pinned bundle <名字>` 或 `pinned effort <档位>`。健康状态属于模型，所以只点名档位时不会出现 `model_unhealthy`，而是 `pin_unavailable`。
 
 下面第 3 组仍是目录里的条目，只是能力低，所以不给提示，分数按目录计算。
 
@@ -108,9 +110,35 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 ### 会话保持
 
 - 保持前先看当前候选池是否还提供这个档位（`model:effort`、`efforts[]`、provider 表都算）。不提供时，降到候选池提供、且新路由也能接受的最高档，并加警告。新路由能否接受看能力下限和实时响应下限。没有这样的档位，或者用户点名了档位，就结束保持，`why` 为 `effort_gone`，重新路由。
-- 上面的降档只在会话状态跨候选池保留时发生，例如通过 `continuityStore` 选项共享存储。在真实的 Magpie 宿主里改配置会重载运行时、清空存储，会话按新候选池从历史重放，所以结果和新路由相同：能选就按新路由选，选不出就返回 503，不会有"已降档"的警告。
+- `effort_gone` 之后的重新路由沿用会话原来的任务画像，不按本轮文字（例如"继续"）重新判断，所以不会落回刚被拒绝的那一行。hooks 路径这时不调用分类器。这次路由的 `warnings` 带 `<模型>: effort <档位> is no longer offered; routed again`，选不出时这条写本地日志。
+- 上面的降档只在会话状态跨候选池保留时发生，例如通过 `continuityStore` 选项共享存储。在真实的 Magpie 宿主里改配置会重载运行时、清空存储，会话按新候选池从历史重放，所以结果和新路由相同：能选就按新路由选，选不出就返回 503，不会有"已降档"的警告。重放不经过 `effort_gone`：如果第一轮重放被拒，会话状态是空的，这一轮的文字（例如"继续"）会按新任务单独路由，可能选中第一轮被拒的档位。
 - 点名了裸模型名表外的档位（例如候选池 `grok-4.7`、点名 `grok-4.7:medium`）时，新路由接受这个档位，保持也接受，不会每轮重新路由。
 - 保持期间换点名立即生效，`gpt-6-astra-medium`、`gpt-6-astra:medium`、`claude-opus-9` 这些写法都按解析后的结果比较。
+
+### `/v1/systemone` 默认不返回明细
+
+开了 `enableDecisionProvider` 之后，`/v1/systemone` 是网关的公开路由，所有不限模型的网关 key 都能调用，所以这个回答默认只留路由结论：
+
+| 情况 | `agentcompass` 字段 |
+|---|---|
+| 选出模型 | `{ targetModel, targetEffort }` |
+| 选不出 | `{ targetModel: null, blocked: true, error, message }` |
+
+- 以前回答里的账号标识、配额、候选池名、健康状态、能力值、任务画像、`warnings` 现在默认都没有。`warnings` 写本地日志，账号和配额不写。
+- 带点名的拒绝统一成 `pin_unavailable`，文案不带名字，调用方不能借此探测某个名字是否在候选池里、是否健康。这和 middleware 的 503 不同，那边的 503 带原因码和点名的名字。
+- Magpie 只读 `model`、`answers`、`usage`，路由不受影响。如果运营者确实需要明细，比如自己的工具要读，就显式设置 `"decisionProviderDetails": true`（默认关闭，只认 `true`），回答恢复之前的字段，blocked 回答另外多一个 `refusal`。打开后，能调这个接口的 key 都能读到明细。
+
+### 禁用某个档位
+
+要禁用一个模型的某个档位，在候选池里加一行同模型的 `disabled: true`，和裸名或 `efforts[]` 行放在一起：
+
+```json
+["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]
+```
+
+- 这一档不再被任何同账户、同模型的行派发。这个修复之前，裸名或 `efforts[]` 行展开出来的这一档仍可能被选中。
+- 点名这一档时返回 503（`pin_unavailable`），和 AgentCompass 相同。
+- 会话停在这一档时会离开它。
 
 ### 模型健康状态
 

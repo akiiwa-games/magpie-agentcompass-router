@@ -884,6 +884,7 @@ test("7.3 Scenario 3 (`why: cache` & `why: followup` + `keepsEffort`): Warm KV c
         },
       },
       {
+        decisionProviderDetails: true,
         allowExternalScorer: true,
         scorerType: "openai_compatible",
         scorerBaseUrl: "http://127.0.0.1:9999/v1",
@@ -3472,6 +3473,7 @@ test("10.12 Finding 4: Continuation effort ratchet (`keepsEffort`, `handleSystem
       },
     },
     {
+      decisionProviderDetails: true,
       candidateModels: [
         { id: "claude_opus_high", provider: "claude", account: "claude", model: "claude-opus-5-5" },
       ],
