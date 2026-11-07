@@ -45,7 +45,7 @@ import {
   orderSeatsByQuotaEconomics,
   quotaAccountWarnings,
 } from "./quota.js";
-import { clearQuotasCache, loadLiveQuotas, resolveMagpieQuotasFile } from "./quota-loader.js";
+import { clearQuotasCache, getQuotasLoadStatus, loadLiveQuotas, resolveMagpieQuotasFile } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
 export const PROVIDER_ID = "agentcompass";
@@ -633,6 +633,7 @@ export {
   evaluateProviderContinuation,
   firstWords,
   formatQuotaAccountList,
+  getQuotasLoadStatus,
   healthOnlyQuotas,
   isCompactionText,
   isModelQuotaExhausted,

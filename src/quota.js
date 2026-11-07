@@ -742,11 +742,17 @@ function classifyAccount(item, entry, plan, nowMs, maxAgeMs) {
     excluded = true;
   }
 
+  // A pool-level entry (the quotas file itself) reports a failure but is not an account: it excludes nothing.
+  const poolLevel = item.pool_level === true;
+  if (poolLevel) excluded = false;
+
   if (state !== ACCOUNT_STATES.READY) {
     const lastTxt =
       lastSuccessMs === null ? "never read successfully" : `last success ${new Date(lastSuccessMs).toISOString()}`;
     warnings.push(
-      excluded
+      poolLevel
+        ? `${entry.key}: ${state}: ${reason} (${lastTxt}); quota limits may be missing or out of date`
+        : excluded
         ? `${entry.key}: ${state}, excluded from dispatch: ${reason} (${lastTxt})`
         : `${entry.key}: ${state}: ${reason} (${lastTxt}); excluded after ${fmtHours(maxAgeMs)} without a successful reading`
     );
