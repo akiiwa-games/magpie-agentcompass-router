@@ -3709,7 +3709,7 @@ test("10.15 Round-2 B1, M2, m6 + README 2304-profile grid & hooks e2e 94-route n
       "scorer-live.js",
     ];
     for (const f of srcFiles) {
-      const content = execFileSync("git", ["show", `origin/main:src/${f}`], {
+      const content = execFileSync("git", ["show", `${process.env.MAGPIE_PARITY_BASELINE || "ab8baba2aa9b41df1b9e5a76a56c9df8721d5abb"}:src/${f}`], {
         cwd: repoRoot,
         encoding: "utf8",
       });

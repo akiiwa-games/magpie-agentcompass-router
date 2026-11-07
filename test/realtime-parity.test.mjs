@@ -1,6 +1,6 @@
 /**
  * Pins the two invariants the realtime_loop port has to keep:
- *   - non-realtime routing is identical to the pre-branch code (`git merge-base origin/main HEAD`);
+ *   - non-realtime routing is identical to the pre-branch code (the fixed pre-branch commit ab8baba, `MAGPIE_PARITY_BASELINE` overrides);
  *   - realtime responsiveness, step-down and pin identity are identical to AgentCompass (fixture from gen_realtime_parity.py).
  */
 import { test, before, after } from "node:test";
@@ -50,9 +50,10 @@ before(async () => {
   const git = (...args) => execFileSync("git", args, { cwd: ROOT, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }).trim();
   let sha;
   try {
-    sha = git("merge-base", "origin/main", "HEAD");
+    // A fixed commit, not origin/main: once this branch is merged, origin/main is HEAD and the test compares nothing.
+    sha = git("rev-parse", "--verify", `${process.env.MAGPIE_PARITY_BASELINE || "ab8baba2aa9b41df1b9e5a76a56c9df8721d5abb"}^{commit}`);
   } catch {
-    baselineSkip = "no origin/main in this checkout";
+    baselineSkip = "the pre-realtime baseline commit is not in this checkout";
     return;
   }
   baselineDir = fs.mkdtempSync(path.join(os.tmpdir(), "magpie-baseline-"));
