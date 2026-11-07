@@ -161,7 +161,7 @@ $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \tex
 
 ### 4.3 `realtime_loop` 真实 Magpie 验收（Scenario 9–12）
 
-运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `f163e3f`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
+运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `c6be50c`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
 
 ```text
 BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
@@ -170,58 +170,89 @@ BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-
 0.1.2891（sha256 `ffa0785c…`）原始结果：
 
 ```text
-[PASS] Scenario 9 (non-realtime vs origin/main): 408 requests over 8 pools, 408 served, 33 distinct routes, 0 diffs; new turns: 48 rows x 8 samples, 0 diffs, 47 rows rerouted on both builds (origin/main flips on 36 rows)
+[PASS] Scenario 9 (non-realtime vs origin/main): 408 requests over 8 pools, 408 served, 33 distinct routes, 0 diffs; new turns: 48 rows x 8 samples, 0 diffs, 47 rows rerouted on both builds (origin/main flips on 37 rows)
 [PASS] Scenario 10 (realtime routing): ideation gemini-4-argon-high:high -> gpt-6-astra:medium; coding gpt-6.1-sol:high -> gpt-6.1-sol:medium; bulk gemini-3.8-flash-high:high -> claude-sonnet-5-5:low; debug claude-opus-5-5:xhigh -> claude-opus-5-5:medium; bundle claude-opus-5-5:xhigh -> claude-opus-5-5:medium; Argon-only pool -> HTTP 404, upstream calls []
-[PASS] Scenario 11 (realtime session hold): 20 sessions, 0 reroutes, turns {"a":"claude-opus-5-5:medium","b":"claude-opus-5-5:medium","c":"claude-opus-5-5:medium","d":"claude-opus-5-5:medium","e":"claude-opus-5-5:medium"}; flagless follow-ups {"claude-opus-5-5:medium":14,"claude-opus-5-5:xhigh":6}; explicit false {"realtime":"gpt-6-astra:medium","afterFalse":"gpt-6-astra:high"}; /v1/messages claude-opus-5-5:null -> claude-opus-5-5:null
+[PASS] Scenario 11 (realtime session hold): 20 sessions, 0 reroutes, turns {"a":"claude-opus-5-5:medium","b":"claude-opus-5-5:medium","c":"claude-opus-5-5:medium","d":"claude-opus-5-5:medium","e":"claude-opus-5-5:medium"}; flagless follow-ups {"claude-opus-5-5:medium":15,"claude-opus-5-5:xhigh":5}; explicit false {"realtime":"gpt-6-astra:medium","afterFalse":"gemini-4-argon-high:high"}; /v1/messages claude-opus-5-5:null -> claude-opus-5-5:null
 [PASS] Scenario 12 (pinned slow model): Argon gemini-4-argon-high:high / gemini-4-argon-high:high, opus claude-opus-5-5:xhigh, no pin gpt-6-astra:medium; log: middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection
 ```
 
-0.1.3196（sha256 `b82e24ce…`）四个场景同样通过，路由结果相同；随运行变化的只有 flagless follow-ups（medium 13 / xhigh 7）、explicit false 之后那一轮落在哪个运行时（hold 或重路由），以及 origin/main 翻转行数（35）。
+0.1.3196（sha256 `b82e24ce…`）四个场景同样通过，路由结果相同；随运行变化的只有 flagless follow-ups（medium 17 / xhigh 3）、explicit false 之后那一轮落在哪个运行时（hold 或重路由），以及 origin/main 翻转行数（35）。
 
 结论与边界：
 
 - **Scenario 9 的比较口径**：首轮、工具循环、短追问、冷会话新一轮、流式、`/v1/responses`、`/v1/messages`、图片输入、`agentcompass:low`、直连模型与路由组，逐请求比较状态码、模型、effort 和完整上游请求体。温会话的新一轮另行采样比较，因为这类请求 hold 还是重路由取决于接到请求的运行时是否持有该会话的记录，`origin/main` 与自身比较也会翻转；判定标准是两个构建合起来不超过这两种结果。
-- **实时标记要每轮都带**：Scenario 11 的 flagless follow-ups 只记录、不断言。客户端在后续回合不再发送 `realtime_loop` 时，未见过该会话的运行时会按非实时路由（上面 20 次中有 6 次到 `xhigh`，多次运行观察到 1–11 次，次数随运行变化）。Magpie 的中间件运行时之间不共享存储，因此客户端需每轮带标记，或设置插件选项 `realtime_loop: true`。
+- **实时标记要每轮都带**：Scenario 11 的 flagless follow-ups 只记录、不断言。客户端在后续回合不再发送 `realtime_loop` 时，未见过该会话的运行时会按非实时路由（上面 20 次中有 5 次到 `xhigh`，多次运行观察到 1–11 次，次数随运行变化）。Magpie 的中间件运行时之间不共享存储，因此客户端需每轮带标记，或设置插件选项 `realtime_loop: true`。
 - **`/v1/messages` 上看不到 effort**：本场景的上游只有 OpenAI 协议，Magpie 把 `/v1/messages` 转成 chat 后未携带 effort，`origin/main` 同样如此（Scenario 5），所以这条路径只验证了模型选择，没有验证降档。
 - **Argon 单独成池时**：候选全部被排除，请求不改写，虚拟模型名由 Magpie 返回 HTTP 404，上游未被调用。
 
 ### 4.4 真实上游验收（Scenario 13）
 
-上游换成主机的 Codex 登录，网关、插件与路由配置不变，被测提交 `f163e3f`。
+一个 Magpie 实例同时登录 Codex、Claude 订阅和 Grok 三个账户，每个账户各跑一组：非实时、实时、`/v1/responses` 实时、直连点名、关掉插件的对照，以及 12 条成对难例。被测提交 `c6be50c`。
 
 ```text
-REAL_CODEX_AUTH=<auth.json> BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
+REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=<auth.json> BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
 ```
 
 0.1.2891 原始结果：
 
 ```text
-[PASS] Scenario 13 (real upstream): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 11434ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 7599ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 12/12
+[PASS] Scenario 13 (real upstream, codex): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 12507ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 6319ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream, claude): non-realtime claude-opus-5-5:medium (mock claude-opus-5-5:medium) 200 in 5357ms; realtime claude-sonnet-5-5:medium (mock claude-sonnet-5-5:medium) 200 in 27135ms; /v1/responses claude-sonnet-5-5:medium 200; named claude-haiku-5-5:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier claude/claude-haiku-5-5: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream, grok): non-realtime grok-4.7:high (mock grok-4.7:high) 200 in 15889ms; realtime grok-4.7:low (mock grok-4.7:low) 200 in 13859ms; /v1/responses grok-4.7:low 200; named grok-4.7-build-fast:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier grok/grok-4.7-build-fast: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream): accounts codex, claude, grok; host sign-in files changed during the run: []
 ```
 
 0.1.3196 原始结果：
 
 ```text
-[PASS] Scenario 13 (real upstream): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 10614ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 4981ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream, codex): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 8522ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 7172ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 12/12
+[PASS] Scenario 13 (real upstream, claude): non-realtime claude-opus-5-5:medium (mock claude-opus-5-5:medium) 200 in 14910ms; realtime claude-sonnet-5-5:medium (mock claude-sonnet-5-5:medium) 200 in 28167ms; /v1/responses claude-sonnet-5-5:medium 200; named claude-haiku-5-5:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier claude/claude-haiku-5-5: realtime_loop 12/12, work_kind 10/12
+[PASS] Scenario 13 (real upstream, grok): non-realtime grok-4.7:high (mock grok-4.7:high) 200 in 27125ms; realtime grok-4.7:low (mock grok-4.7:low) 200 in 14395ms; /v1/responses grok-4.7:low 200; named grok-4.7-build-fast:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier grok/grok-4.7-build-fast: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream): accounts codex, claude, grok; host sign-in files changed during the run: []
 ```
 
-| 检查项 | 结果 |
-|---|---|
-| 真实上游收到的请求不带 `realtime_loop` | 四条请求（非实时、实时、`/v1/responses` 实时、直连点名）均 HTTP 200 且返回文本，观察插件看到的标记都是 `false`；关掉 AgentCompass 的对照请求看到 `true` |
-| 路由与 mock 一致 | 非实时都是 `gpt-6.1-sol:high`，实时都是 `gpt-6.1-sol:medium` |
-| `openai_compatible` 分类器，12 条成对难例（`codex/gpt-6-luna`） | 三次完整运行，`realtime_loop` 均为 12/12；`work_kind` 为 12/12、12/12、11/12 |
+三个账户在两个版本上都能作为上游，没有 `not_supported`：
 
-0.1.3196 上唯一的不一致是 `non_realtime_fix_flash_sale_bot_en`：`work_kind` 期望 `debug_review`，返回 `general_implementation`，`realtime_loop` 判对。同一条在另两次运行中判对，所以是模型的波动。作为对照，确定性回退在同一批例子上是 `realtime_loop` 6/12、`work_kind` 7/12。
+| 账户 | Magpie 的接入方式 | 沙盒里的准备 |
+|---|---|---|
+| Codex | 读 `~/.codex/auth.json`，直接请求 `chatgpt.com` | 无 |
+| Claude 订阅 | 读 `~/.claude/.credentials.json`，通过 Claude Code 程序发请求 | `magpie claude-code install` 下载 Anthropic 的构建（校验 SHA-256）；预置 `.claude.json`，跳过首次运行和工作目录信任提示 |
+| Grok | `@magpie-community/opencode-grok-auth` 插件读 `~/.grok/auth.json`，请求 `cli-chat-proxy.grok.com` | `magpie plugin add` 安装插件，`magpie plugin login grok "Use Grok Build's current sign-in"`，Magpie 随之安装 Grok Build |
+
+两个版本的四组请求都返回 200 且有文本，观察插件看到的标记都是 `false`，关掉插件的对照看到 `true`；非实时和实时路由都与 mock 一致。
+
+分类器一致率（三次完整运行：提交前一次、0.1.3196、0.1.2891；12 条都是真实回答）：
+
+| 账户 / 分类模型 | `realtime_loop` | `work_kind` |
+|---|---|---|
+| Codex / `codex/gpt-6-luna` | 12/12、12/12、12/12 | 11/12、12/12、11/12 |
+| Claude / `claude/claude-haiku-5-5` | 12/12、12/12、12/12 | 11/12、10/12、11/12 |
+| Grok / `grok/grok-4.7-build-fast` | 12/12、12/12、12/12 | 11/12、11/12、11/12 |
+
+`work_kind` 不一致的例子：
+
+| 例子 | 期望 | 返回 | 出现于 |
+|---|---|---|---|
+| `realtime_loop_course_polling_click_cn` | `computer_use` | `tool_execution` | Claude 三次，Codex 一次 |
+| `non_realtime_design_realtime_trading_dashboard_cn` | `frontend_implementation` | `complex_build_plan` | Grok 三次 |
+| `non_realtime_fix_flash_sale_bot_en` | `debug_review` | `general_implementation` | Codex 一次 |
+| `non_realtime_analyze_orderbook_latency_en` | `exploration_analysis` | `debug_review` | Claude 一次 |
+
+`realtime_loop` 没有判错。作为对照，确定性回退在同一批例子上是 `realtime_loop` 6/12、`work_kind` 7/12。
 
 边界：
 
-- **凭据只放访问令牌**：沙盒副本删掉了 `refresh_token`，也不运行 `magpie accounts import`。刷新令牌会轮换，副本一旦刷新，主机上的 Codex 就会因 `refresh_token_reused` 掉线，而 import 会直接用掉这份登录。副本放在沙盒 tmpfs 上，权限 0600，场景结束即删除并断言已删除。Scenario 13 只验证短时间内的调用，没有覆盖令牌过期后的刷新。
+- **凭据只放访问令牌**：沙盒副本删掉所有刷新令牌字段（并断言已删除），也不运行 `magpie accounts import`。刷新令牌会轮换，副本一旦刷新，主机上的同一账户就会掉线。副本放在沙盒 tmpfs 上，权限 0600，场景结束即删除并断言已删除。Scenario 13 只验证令牌有效期内的调用，没有覆盖过期后的刷新；访问令牌过期后要换新的登录文件才能再跑。
+- **沙盒与主机的隔离**：WSL 默认把 Windows 目录追加到 PATH。Magpie 会在那里找到主机的 `claude`，通过 interop 在主机上运行，用的是主机的登录，而不是沙盒副本。`test/run-linux-sandbox.sh` 现在移除 PATH 中所有 `/mnt/` 条目并清除 `WSLENV`，Scenario 13 断言 PATH 中没有 `/mnt/`，并记录运行期间主机登录文件是否变化（两次最终运行都没有变化）。
+- **隔离修复之前的探测曾在主机上启动 Claude Code**：2026-11-07 01:18–01:28 UTC 的几次探测以这种方式运行了主机的 Claude Code。主机 `~/.claude/.credentials.json` 在 01:27:45 刷新过一次，距其中一次启动 2 秒，当时访问令牌剩余不足 5 分钟；也不排除是主机上其他 Claude 会话触发的。令牌是在主机文件内正常轮换的，没有掉线，`~/.claude.json` 和 `~/.claude/projects` 没有留下探测记录，也没有残留进程。
 - **"不带字段"的证据范围**：真实上游的入站请求抓不到。证据是 Magpie 发往 provider 之前的 `onProvider` 观察结果（`test/fixtures/route-observer`）、上游返回 200，以及插件关闭时能看到标记的对照。
-- **Anthropic 组未运行**：`ANTHROPIC_API_KEY`、`ANTHROPIC_AUTH_TOKEN`、`ANTHROPIC_BASE_URL` 在 Process、User、Machine 三个作用域都未设置，也没有去其他配置文件里找密钥。代码里没有未经测试的 Anthropic 分支。
-- **`effort` 为空的那一行**：直连点名 `codex/gpt-6-luna` 不经路由，所以 `gpt-6-luna:null` 是预期结果。
-- **未设置 `REAL_CODEX_AUTH` 时**：Scenario 13 记为 `skipped`，其余场景照常运行。
+- **`effort` 也只验证到 provider 边界**：路由选的档位在观察插件处与 mock 一致。Claude Code 和 Grok 实际按什么档位运行，没有单独验证。
+- **主会话的 `ANTHROPIC_*` 不参与**：这些是 Claude Code 自身注入的会话令牌，Scenario 13 把 `ANTHROPIC`、`OPENAI`、`XAI`、`GROK`、`CLAUDE` 开头的环境变量都从实例环境里去掉。主机上没有用户自己的 Anthropic API key，所以 API key 这条路径没有测。
+- **`effort` 为空的那一行**：直连点名不经路由，所以 `gpt-6-luna:null`、`claude-haiku-5-5:null`、`grok-4.7-build-fast:null` 是预期结果。
+- **第三方代码**：Grok 这一组会在沙盒里安装 Grok 插件和 Grok Build，并把访问令牌交给它们。只查过插件的 README 和源码中的地址（请求发往 `cli-chat-proxy.grok.com`，刷新走 `auth.x.ai`，副本没有刷新令牌），没有做完整审查；Grok Build 是厂商的程序，也没有审查。
+- **未设置 `REAL_*_AUTH` 时**：对应账户不跑；一个都没设时 Scenario 13 记为 `skipped`，其余场景照常运行。
 
-凭据残留检查（只统计命中数，不输出值）：工作区文件、`origin/main..HEAD` 的补丁和测试日志中，令牌全文、令牌前 32 字符、账户 ID 与账户邮箱的命中数均为 0。
+凭据残留检查（只统计命中数，不输出值）：工作区文件、`origin/main..HEAD` 的补丁、工作区 diff 和测试日志中，三个登录文件的令牌全文与前 32 字符、账户 ID、邮箱等字段的命中数均为 0。
 
 ### 4.5 `gpt-5.3-codex-spark` 的目录条目
 
