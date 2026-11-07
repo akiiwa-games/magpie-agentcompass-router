@@ -30,7 +30,7 @@ import {
   resolveResponsivenessModelKey,
 } from "./catalog.js";
 import { inferTaskProfile, validateProfile } from "./profiler-core.js";
-import { evaluateModelQuota, normalizeQuotaSnapshot } from "./quota.js";
+import { evaluateModelQuota, listQuotaAccounts, normalizeQuotaSnapshot } from "./quota.js";
 
 export const EFFORT_SCALED_CAPABILITIES = [
   "reasoning",
@@ -1645,6 +1645,7 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
           fast: Boolean(quotaEval.fast),
           shortage_probability: quotaEval.shortage_probability ?? 0.0,
           binding_window: quotaEval.binding_window || null,
+          warnings: quotaEval.warnings || [],
         }
       : null,
     components: {
@@ -1987,6 +1988,8 @@ export function rankCandidates(profileInput, options = {}) {
     selected: pinnedCand || eligible[0] || null,
     ranking: eligible,
     allCandidates: evaluated,
+    // Per-account state/reason/last successful reading, so a failing account is visible even when unselected.
+    ...(normalizedQuotas ? { accounts: listQuotaAccounts(normalizedQuotas) } : {}),
   };
 }
 
@@ -2023,9 +2026,10 @@ export function pinOptionsOf(options = {}) {
 export function selectBestRoute(taskOrProfile, options = {}) {
   const result = rankCandidates(taskOrProfile, options);
   const top = result.selected;
-  const warnings = top?.components?.realtime_slow_pin_warning
-    ? [top.components.realtime_slow_pin_warning]
-    : [];
+  const warnings = [
+    ...(top?.components?.realtime_slow_pin_warning ? [top.components.realtime_slow_pin_warning] : []),
+    ...new Set((result.accounts || []).flatMap((a) => a.warnings)),
+  ];
   return {
     ok: Boolean(top),
     targetModel: top ? top.model : null,
@@ -2041,6 +2045,7 @@ export function selectBestRoute(taskOrProfile, options = {}) {
     responsiveness: top?.components?.responsiveness ?? null,
     responsivenessSource: top?.components?.responsiveness_source ?? null,
     warnings,
+    ...(result.accounts ? { accounts: result.accounts } : {}),
     score: top ? top.score : null,
     components: top ? top.components : null,
     profile: result.task.profile,

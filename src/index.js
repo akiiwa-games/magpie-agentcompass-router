@@ -38,8 +38,12 @@ import {
   demandForecast,
   evaluateModelQuota,
   isModelQuotaExhausted,
+  formatQuotaAccountList,
+  healthOnlyQuotas,
+  listQuotaAccounts,
   normalizeQuotaSnapshot,
   orderSeatsByQuotaEconomics,
+  quotaAccountWarnings,
 } from "./quota.js";
 import { clearQuotasCache, loadLiveQuotas, resolveMagpieQuotasFile } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
@@ -408,10 +412,12 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     ...pinOptionsOf(pluginOptions),
   });
   if (!decision.ok && liveQuotas) {
+    // Exhausted windows are ignored here, but expired / failing / signed-out accounts stay excluded.
     decision = selectBestRoute(profile, {
       objective: turnText,
       candidateModels: pluginOptions.candidateModels || pluginOptions.allowedModels,
       catalog: pluginOptions.catalog,
+      quotas: healthOnlyQuotas(liveQuotas, Date.now(), pluginOptions.catalog?.policy),
       ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
       ...pinOptionsOf(pluginOptions),
     });
@@ -486,6 +492,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       targetEffort: effectiveEffort,
       selectedAccount: decision.selectedAccount || null,
       quota: decision.quota || null,
+      ...(decision.warnings?.length ? { warnings: decision.warnings } : {}),
+      ...(decision.accounts ? { accounts: decision.accounts } : {}),
       workKind: decision.workKind,
       difficulty: decision.difficulty,
       requiredAbility: decision.requiredAbility,
@@ -624,13 +632,17 @@ export {
   evaluateModelQuota,
   evaluateProviderContinuation,
   firstWords,
+  formatQuotaAccountList,
+  healthOnlyQuotas,
   isCompactionText,
   isModelQuotaExhausted,
   isShortFollowupMessage,
   keepsEffort,
+  listQuotaAccounts,
   loadLiveQuotas,
   normalizeQuotaSnapshot,
   orderSeatsByQuotaEconomics,
+  quotaAccountWarnings,
   rankCandidates,
   ratchetEffort,
   resolveMagpieQuotasFile,

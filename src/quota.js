@@ -65,6 +65,147 @@ export const DEFAULT_WINDOW_CAPACITY_USD = {
   },
 };
 
+/**
+ * Per-plan API-equivalent USD capacity (`weekly` = long window, `short` = 5h window).
+ * Weekly figures are AgentCompass's plan templates (Codex plus 67 / prolite 175 / pro 325,
+ * Claude pro 156 / max5 1400 / max20 2380, Antigravity pro 31 / ultra 625). Where the template
+ * has no 5h figure, `short` is derived at the template ratio (Claude 376:2380, Codex/Antigravity 1:5).
+ * Plans are matched exactly (`PLAN_ALIASES`), never by substring.
+ */
+const ANTIGRAVITY_ULTRA = DEFAULT_WINDOW_CAPACITY_USD.antigravity;
+const scaleTable = (table, k) =>
+  Object.fromEntries(Object.entries(table).map(([name, usd]) => [name, Math.round(usd * k * 100) / 100]));
+
+export const PLAN_CAPACITY_USD = {
+  codex: {
+    plus: { weekly: 67, short: 13.4 },
+    prolite: { weekly: 175, short: 35 },
+    pro: { weekly: 325, short: 65 },
+  },
+  claude: {
+    pro: { weekly: 156, short: 24.6 },
+    max5: { weekly: 1400, short: 221 },
+    max20: { weekly: 2380, short: 376, weekly_fable: 1190 },
+  },
+  antigravity: {
+    pro: scaleTable(ANTIGRAVITY_ULTRA, 31 / 625),
+    ultra: ANTIGRAVITY_ULTRA,
+  },
+};
+
+const PLAN_ALIASES = {
+  codex: {
+    plus: "plus",
+    pro: "pro",
+    prolite: "prolite",
+    pro_lite: "prolite",
+    pro100: "prolite",
+  },
+  claude: {
+    pro: "pro",
+    max5: "max5",
+    max_5x: "max5",
+    max5x: "max5",
+    max20: "max20",
+    max_20x: "max20",
+    max20x: "max20",
+  },
+  antigravity: {
+    pro: "pro",
+    google_ai_pro: "pro",
+    ultra: "ultra",
+    google_ai_ultra: "ultra",
+  },
+};
+
+/** Plan values that mean the subscription is not paying any more (not a capacity tier). */
+const INACTIVE_PLANS = new Set([
+  "free",
+  "free_tier",
+  "antigravity_free_tier",
+  "expired",
+  "cancelled",
+  "canceled",
+  "inactive",
+  "plan_inactive",
+  "payment_failed",
+  "past_due",
+  "unpaid",
+  "lapsed",
+]);
+
+/** `status` values by state; AgentCompass names (`ready` / `plan_inactive` / `usage_failing` / `auth_failed`). */
+export const ACCOUNT_STATES = Object.freeze({
+  READY: "ready",
+  PLAN_INACTIVE: "plan_inactive",
+  USAGE_FAILING: "usage_failing",
+  AUTH_FAILED: "auth_failed",
+  // Operator switch (`disabled: true`), not a health state; listed so it is never silent either.
+  DISABLED: "disabled",
+});
+
+const STATUS_PLAN_INACTIVE = new Set([
+  "expired",
+  "cancelled",
+  "canceled",
+  "inactive",
+  "plan_inactive",
+  "payment_failed",
+  "past_due",
+  "unpaid",
+  "lapsed",
+]);
+const STATUS_AUTH_FAILED = new Set(["auth_failed", "unauthorized", "forbidden"]);
+const STATUS_USAGE_FAILING = new Set(["error", "failed", "usage_failing", "no_data"]);
+
+/** A usage reading older than this (or failing for this long) takes the account out of dispatch. */
+export const DEFAULT_USAGE_MAX_AGE_HOURS = 6;
+
+const plansProviders = Object.keys(PLAN_CAPACITY_USD);
+
+function planSlug(raw) {
+  return String(raw ?? "")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+}
+
+/**
+ * Map a provider's reported plan label to a known plan key. `inactive` means the subscription is no
+ * longer paying; `known: false` means an unrecognised (or absent) plan, which is sized conservatively.
+ */
+export function normalizePlan(provider, rawPlan) {
+  const slug = planSlug(rawPlan);
+  const prov = String(provider || "").toLowerCase();
+  if (!slug || slug === "none" || slug === "null" || slug === "unknown") {
+    return { raw: slug ? String(rawPlan) : null, key: null, known: false, inactive: false };
+  }
+  if (INACTIVE_PLANS.has(slug)) {
+    return { raw: String(rawPlan), key: null, known: true, inactive: true };
+  }
+  const key = PLAN_ALIASES[prov]?.[slug] ?? null;
+  return { raw: String(rawPlan), key, known: key !== null, inactive: false };
+}
+
+/** Smallest capacity table across a provider's known plans: what an unknown plan is sized as. */
+function conservativePlanTable(provider) {
+  const plans = Object.values(PLAN_CAPACITY_USD[provider] || {});
+  if (plans.length === 0) return null;
+  const out = {};
+  for (const name of Object.keys(plans[0])) {
+    // Only windows every plan prices; plan-specific ones (`weekly_fable`) fall back to the weekly size.
+    if (plans.every((t) => typeof t[name] === "number")) out[name] = Math.min(...plans.map((t) => t[name]));
+  }
+  return out;
+}
+
+/** Capacity table for `(provider, plan)`; unknown plan -> conservative table; no plan tiers for the provider -> null. */
+export function planCapacityTable(provider, planKey) {
+  const prov = String(provider || "").toLowerCase();
+  if (!plansProviders.includes(prov)) return null;
+  return (planKey && PLAN_CAPACITY_USD[prov][planKey]) || conservativePlanTable(prov);
+}
+
 export function clamp(val, low, high) {
   return Math.max(low, Math.min(high, val));
 }
@@ -314,14 +455,26 @@ export function inferWindowHours(windowObj = {}, resetHours = null) {
 
 /**
  * Resolve API-equivalent USD capacity for a subscription window (`allocator.py:window_capacity_usd`).
+ * Order: explicit `capacity_usd` > custom table > the account's plan table (providers with plan tiers;
+ * `planKey` null/unknown is sized conservatively) > the provider-wide priors.
+ * `plan` is `undefined` for callers that carry no plan information, which keeps the provider priors.
  */
-export function resolveWindowCapacityUsd(provider, windowName, windowHours, explicitCapUsd = null, customTable = null) {
+export function resolveWindowCapacityUsd(
+  provider,
+  windowName,
+  windowHours,
+  explicitCapUsd = null,
+  customTable = null,
+  plan = undefined
+) {
   if (typeof explicitCapUsd === "number" && explicitCapUsd > 0) {
     return explicitCapUsd;
   }
   const prov = String(provider || "default").toLowerCase();
   const wid = String(windowName || "").toLowerCase();
+  const planTable = plan === undefined || customTable ? null : planCapacityTable(prov, plan);
   const table =
+    planTable ||
     (customTable && (customTable[prov] || customTable.default)) ||
     DEFAULT_WINDOW_CAPACITY_USD[prov] ||
     DEFAULT_WINDOW_CAPACITY_USD.default;
@@ -335,14 +488,22 @@ export function resolveWindowCapacityUsd(provider, windowName, windowHours, expl
   if (windowHours <= 170) {
     return Number(table?.weekly ?? DEFAULT_WINDOW_CAPACITY_USD.default.weekly);
   }
-  return Number(table?.monthly ?? DEFAULT_WINDOW_CAPACITY_USD.default.monthly);
+  return Number(table?.monthly ?? (planTable ? planTable.weekly * 4 : DEFAULT_WINDOW_CAPACITY_USD.default.monthly));
 }
 
 /**
  * Normalize a single window observation into AgentCompass's canonical `windowState`
  * (`allocator.py:window_state`).
  */
-export function normalizeWindowState(rawWin, provider = "default", nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY, accountStale = false) {
+export function normalizeWindowState(
+  rawWin,
+  provider = "default",
+  nowMs = Date.now(),
+  policy = DEFAULT_SCORING_POLICY,
+  accountStale = false,
+  planKey = undefined,
+  keepRates = true
+) {
   if (!rawWin || typeof rawWin !== "object") return null;
   if (rawWin.unlimited === true) {
     return {
@@ -454,6 +615,8 @@ export function normalizeWindowState(rawWin, provider = "default", nowMs = Date.
     id,
     hours,
     rawWin.capacity_usd ?? rawWin.capacityUsd,
+    null,
+    planKey
   );
 
   return {
@@ -469,21 +632,204 @@ export function normalizeWindowState(rawWin, provider = "default", nowMs = Date.
     targetRemaining: round4(targetRemaining),
     capacityUsd,
     rateLimited: Boolean(rawWin.rate_limited || rawWin.rateLimited),
-    pctPerHour3h: typeof rawWin.pct_per_hour_3h === "number" ? rawWin.pct_per_hour_3h : null,
-    pctPerHour24h: typeof rawWin.pct_per_hour_24h === "number" ? rawWin.pct_per_hour_24h : null,
+    pctPerHour3h: keepRates && typeof rawWin.pct_per_hour_3h === "number" ? rawWin.pct_per_hour_3h : null,
+    pctPerHour24h: keepRates && typeof rawWin.pct_per_hour_24h === "number" ? rawWin.pct_per_hour_24h : null,
     models: Array.isArray(rawWin.models) ? rawWin.models : null,
   };
+}
+
+function firstTimeMs(...vals) {
+  for (const v of vals) {
+    const ms = parseResetTimeMs(v);
+    if (ms !== null) return ms;
+  }
+  return null;
+}
+
+function httpStatusOf(item) {
+  const err = item.error ?? item.quota?.error;
+  const cands = [
+    item.http_status,
+    item.httpStatus,
+    typeof item.status === "number" ? item.status : null,
+    err && typeof err === "object" ? (err.status ?? err.code ?? err.http_status) : null,
+  ];
+  for (const c of cands) {
+    const n = Number(c);
+    if (Number.isFinite(n) && n > 0) return n;
+  }
+  return null;
+}
+
+function fmtHours(ms) {
+  return `${(ms / 3600000).toFixed(1)}h`;
+}
+
+/**
+ * One account's state (`ready` / `plan_inactive` / `usage_failing` / `auth_failed`, plus operator `disabled`),
+ * why, when it last read successfully, and whether it is out of dispatch. Reads structured fields only
+ * (`status`, `error`, HTTP codes, timestamps); never message text.
+ */
+function classifyAccount(item, entry, plan, nowMs, maxAgeMs) {
+  const warnings = [];
+  const status = String(item.status ?? item.quota?.status ?? "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+  const errorValue = item.error ?? item.quota?.error ?? null;
+  const http = httpStatusOf(item);
+  const hasReading = entry.unlimited || entry.windows.some((w) => w.known || w.unlimited);
+  const metered = ["balance", "metered", "api", "payg"].includes(entry.kind);
+
+  const explicitOk = firstTimeMs(
+    item.last_success_at,
+    item.lastSuccessAt,
+    item.last_ok_at,
+    item.lastOkAt,
+    item.quota?.last_success_at
+  );
+  const readAt = firstTimeMs(
+    item.fetched_at,
+    item.fetchedAt,
+    item.updated_at,
+    item.updatedAt,
+    item.read_at,
+    item.quota?.fetched_at
+  );
+
+  let state = ACCOUNT_STATES.READY;
+  let reason = null;
+  let failing = false;
+
+  if (item.disabled === true || status === "disabled") {
+    state = ACCOUNT_STATES.DISABLED;
+    reason = "account is disabled";
+  } else if (http === 401 || http === 403 || STATUS_AUTH_FAILED.has(status)) {
+    state = ACCOUNT_STATES.AUTH_FAILED;
+    reason = `sign-in rejected${http ? ` (HTTP ${http})` : ""}`;
+  } else if (plan.inactive || STATUS_PLAN_INACTIVE.has(status)) {
+    state = ACCOUNT_STATES.PLAN_INACTIVE;
+    reason = `subscription is not active (${plan.inactive ? plan.raw : status})`;
+  } else if (errorValue || entry.stale || STATUS_USAGE_FAILING.has(status) || (!hasReading && !metered)) {
+    failing = true;
+    const detail =
+      typeof errorValue === "string"
+        ? errorValue
+        : errorValue && typeof errorValue === "object" && typeof errorValue.message === "string"
+          ? errorValue.message
+          : entry.stale
+            ? "reading is stale"
+            : !hasReading
+              ? "no usage reading"
+              : status || "reading failed";
+    reason = `usage reading failing: ${detail}`;
+  }
+
+  // Last success: an explicit field, else the time of the readings an account still carries.
+  let lastSuccessMs = explicitOk;
+  if (lastSuccessMs === null && (state === ACCOUNT_STATES.READY || failing) && (hasReading || !failing)) {
+    lastSuccessMs = readAt;
+  }
+
+  // A reading that is simply old counts as failing, even when no error was reported.
+  if (state === ACCOUNT_STATES.READY && !failing && lastSuccessMs !== null && nowMs - lastSuccessMs > maxAgeMs) {
+    failing = true;
+    reason = `usage reading failing: no successful reading for ${fmtHours(nowMs - lastSuccessMs)}`;
+  }
+
+  let excluded = false;
+  if (failing) {
+    state = ACCOUNT_STATES.USAGE_FAILING;
+    excluded = lastSuccessMs === null || nowMs - lastSuccessMs > maxAgeMs;
+  } else if (state !== ACCOUNT_STATES.READY) {
+    excluded = true;
+  }
+
+  if (state !== ACCOUNT_STATES.READY) {
+    const lastTxt =
+      lastSuccessMs === null ? "never read successfully" : `last success ${new Date(lastSuccessMs).toISOString()}`;
+    warnings.push(
+      excluded
+        ? `${entry.key}: ${state}, excluded from dispatch: ${reason} (${lastTxt})`
+        : `${entry.key}: ${state}: ${reason} (${lastTxt}); excluded after ${fmtHours(maxAgeMs)} without a successful reading`
+    );
+  }
+  return { state, reason, lastSuccessMs, excluded, warnings };
+}
+
+function planInfoOf(item, provider, key) {
+  const rawPlan =
+    item.plan ?? item.quota?.plan ?? item.plan_type ?? item.planType ?? item.plan_label ?? item.quota?.plan_type ?? null;
+  const plan = normalizePlan(provider, rawPlan);
+  const warnings = [];
+  const claim = item.plan_claim ?? item.planClaim;
+  if (claim) {
+    const claimed = normalizePlan(provider, claim);
+    if (claimed.key !== plan.key || claimed.inactive !== plan.inactive) {
+      warnings.push(
+        `${key}: plan sources disagree (online "${rawPlan ?? "none"}" vs credential claim "${claim}"); using the online value`
+      );
+    }
+  }
+  if (!plan.known && !plan.inactive && plansProviders.includes(provider)) {
+    warnings.push(
+      `${key}: plan ${plan.raw ? `"${plan.raw}" is not recognized` : "was not reported"}; capacity is sized as the smallest known ${provider} plan`
+    );
+  }
+  return { plan, warnings };
+}
+
+/** Build one canonical account record from a raw quota item (shared by every snapshot format). */
+function buildAccountEntry(
+  item,
+  { key, provider, account, rawWindows, kind, unlimited, balance, stale, nowMs, policy, maxAgeMs }
+) {
+  const { plan, warnings: planWarnings } = planInfoOf(item, provider, key);
+  const planKey = plansProviders.includes(provider) ? plan.key : undefined;
+  // Rates measured under another plan must not be carried over (a tier change reads as a demand jump).
+  const ratePlan = item.rate_plan ?? item.ratePlan;
+  const keepRates = !ratePlan || normalizePlan(provider, ratePlan).key === plan.key;
+  const windows = rawWindows
+    .map((w) => normalizeWindowState(w, provider, nowMs, policy, stale, planKey, keepRates))
+    .filter(Boolean);
+  const entry = {
+    key,
+    provider,
+    account,
+    kind,
+    unlimited,
+    stale,
+    balance,
+    error: item.error || item.quota?.error || null,
+    plan: plan.raw,
+    planKey: plan.key,
+    planKnown: plan.known,
+    windows,
+  };
+  const cls = classifyAccount(item, entry, plan, nowMs, maxAgeMs);
+  entry.state = cls.state;
+  entry.reason = cls.reason;
+  entry.lastSuccessAt = cls.lastSuccessMs === null ? null : new Date(cls.lastSuccessMs).toISOString();
+  entry.excluded = cls.excluded;
+  entry.warnings = [...(cls.state === ACCOUNT_STATES.PLAN_INACTIVE ? [] : planWarnings), ...cls.warnings];
+  return entry;
 }
 
 /**
  * Normalize Magpie's `quotas.json`, `/v1/magpie/quotas` array, AgentCompass `usage.json`,
  * or shorthand `{ provider: { remaining, resetsInHours, windows } }` into a uniform array
  * of account quota records:
- *   `[{ key, provider, account, kind, unlimited, stale, balance, windows: [windowState, ...] }]`
+ *   `[{ key, provider, account, kind, unlimited, stale, balance, plan, windows: [windowState, ...],
+ *       state, reason, lastSuccessAt, excluded, warnings }]`
+ * `state` is the account status shared by dispatch and the account list (see `ACCOUNT_STATES`).
+ * `opts.usageMaxAgeHours` (else `policy.usage_max_age_hours`, else a top-level `usage_max_age_hours`
+ * in the snapshot, else 6) is how long an account may go without a successful reading.
  */
-export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY) {
+export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY, opts = {}) {
   if (!rawQuotas || typeof rawQuotas !== "object") return [];
 
+  const maxAgeHours =
+    [opts?.usageMaxAgeHours, policy?.usage_max_age_hours, rawQuotas.usage_max_age_hours, rawQuotas.usageMaxAgeHours]
+      .map(Number)
+      .find((n) => Number.isFinite(n) && n > 0) ?? DEFAULT_USAGE_MAX_AGE_HOURS;
+  const maxAgeMs = maxAgeHours * 3600000;
   const entries = [];
 
   // Format A: Array from `/v1/magpie/quotas`
@@ -499,32 +845,31 @@ export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = D
           ? item.quota.windows
           : [];
       const stale = Boolean(item.stale || item.status === "stale" || item.error);
-      const windows = rawWindows
-        .map((w) => normalizeWindowState(w, provider, nowMs, policy, stale))
-        .filter(Boolean);
       const kind = String(
-        item.kind ||
-          item.billing ||
-          (windows.length > 0 ? "subscription" : item.balance ? "balance" : "subscription")
+        item.kind || item.billing || (rawWindows.length > 0 ? "subscription" : item.balance ? "balance" : "subscription")
       ).toLowerCase();
-      entries.push({
-        key,
-        provider: provider || inferModelProviderFamily(key),
-        account,
-        kind,
-        unlimited: Boolean(item.unlimited),
-        stale,
-        balance: item.balance || null,
-        error: item.error || null,
-        windows,
-      });
+      entries.push(
+        buildAccountEntry(item, {
+          key,
+          provider: provider || inferModelProviderFamily(key),
+          account,
+          rawWindows,
+          kind,
+          unlimited: Boolean(item.unlimited),
+          balance: item.balance || null,
+          stale,
+          nowMs,
+          policy,
+          maxAgeMs,
+        })
+      );
     }
     return entries;
   }
 
   // Format B: AgentCompass `usage.json` (`{ accounts: { claude: { status, windows: [...] } } }`)
   if (rawQuotas.accounts && typeof rawQuotas.accounts === "object" && !Array.isArray(rawQuotas.accounts)) {
-    return normalizeQuotaSnapshot(rawQuotas.accounts, nowMs, policy);
+    return normalizeQuotaSnapshot(rawQuotas.accounts, nowMs, policy, { usageMaxAgeHours: maxAgeHours, ...opts });
   }
 
   // Format C: Magpie `quotas.json` object (`{ "claude/user@example.com": { quota: { windows: [...] } } }`)
@@ -565,31 +910,83 @@ export function normalizeQuotaSnapshot(rawQuotas, nowMs = Date.now(), policy = D
       ];
     }
 
-    const windows = rawWindows
-      .map((w) => normalizeWindowState(w, provider, nowMs, policy, stale))
-      .filter(Boolean);
-
     const kind = String(
       item.kind ||
         item.billing ||
         item.quota?.kind ||
-        (windows.length > 0 ? "subscription" : item.balance || item.quota?.balance ? "balance" : "subscription")
+        (rawWindows.length > 0 ? "subscription" : item.balance || item.quota?.balance ? "balance" : "subscription")
     ).toLowerCase();
 
-    entries.push({
-      key: rawKey,
-      provider: provider || inferModelProviderFamily(rawKey),
-      account,
-      kind,
-      unlimited: Boolean(item.unlimited || item.quota?.unlimited),
-      stale,
-      balance: item.balance || item.quota?.balance || null,
-      error: item.error || item.quota?.error || null,
-      windows,
-    });
+    entries.push(
+      buildAccountEntry(item, {
+        key: rawKey,
+        provider: provider || inferModelProviderFamily(rawKey),
+        account,
+        rawWindows,
+        kind,
+        unlimited: Boolean(item.unlimited || item.quota?.unlimited),
+        balance: item.balance || item.quota?.balance || null,
+        stale,
+        nowMs,
+        policy,
+        maxAgeMs,
+      })
+    );
   }
 
   return entries;
+}
+
+/**
+ * The account list: one row per account with its state, why, plan and last successful reading.
+ * This is what the plugin shows users (`accounts` in decisions, `formatQuotaAccountList`).
+ */
+export function listQuotaAccounts(rawQuotas, nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY, opts = {}) {
+  if (!rawQuotas || typeof rawQuotas !== "object") return [];
+  const entries = Array.isArray(rawQuotas._normalized)
+    ? rawQuotas._normalized
+    : normalizeQuotaSnapshot(rawQuotas, nowMs, policy, opts);
+  return entries.map((e) => ({
+    key: e.key,
+    provider: e.provider,
+    account: e.account,
+    plan: e.plan,
+    plan_known: e.planKnown,
+    state: e.state,
+    reason: e.reason,
+    last_success_at: e.lastSuccessAt,
+    dispatchable: !e.excluded,
+    warnings: e.warnings,
+  }));
+}
+
+/** Plain-text account list for CLI / status output. */
+export function formatQuotaAccountList(accounts) {
+  if (!Array.isArray(accounts) || accounts.length === 0) return "No quota accounts.";
+  return accounts
+    .map((a) => {
+      const flag = a.dispatchable ? "" : " [excluded from dispatch]";
+      const why = a.reason ? ` - ${a.reason}` : "";
+      return `${a.key}  plan=${a.plan ?? "unknown"}  state=${a.state}${flag}  last_success=${a.last_success_at ?? "never"}${why}`;
+    })
+    .join("\n");
+}
+
+/** Every account's warning (plan unknown, reading failing, excluded, ...), deduplicated. */
+export function quotaAccountWarnings(rawQuotas, nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY) {
+  return [...new Set(listQuotaAccounts(rawQuotas, nowMs, policy).flatMap((a) => a.warnings))];
+}
+
+/**
+ * Quotas for the "everything was filtered" fallback: only account health still applies (expired, failing,
+ * signed-out and disabled accounts stay excluded) while exhausted windows are ignored.
+ */
+export function healthOnlyQuotas(rawQuotas, nowMs = Date.now(), policy = DEFAULT_SCORING_POLICY) {
+  if (!rawQuotas || typeof rawQuotas !== "object") return rawQuotas;
+  const normalized = Array.isArray(rawQuotas._normalized)
+    ? rawQuotas._normalized
+    : normalizeQuotaSnapshot(rawQuotas, nowMs, policy);
+  return { _normalized: normalized, _healthOnly: true };
 }
 
 /**
@@ -747,6 +1144,23 @@ export function evaluateAccountQuotaForModel(
   const excluded = [];
   const kind = String(accountEntry.kind || "subscription").toLowerCase();
   const isMetered = kind === "balance" || kind === "metered" || kind === "api" || kind === "payg";
+
+  // Account health comes first: an expired, signed-out, disabled or long-failing account is never
+  // selectable, whatever its (old) readings say, and `unlimited` does not rescue it.
+  if (accountEntry.excluded) {
+    return {
+      account: accountEntry.key,
+      provider: accountEntry.provider,
+      kind,
+      state: accountEntry.state,
+      eligible: false,
+      excluded: [`${accountEntry.key}: ${accountEntry.state}: ${accountEntry.reason}`],
+      opportunity_cost: 0.0,
+      reset_bonus: 0.0,
+      reset_sunk_weight: 0.0,
+      binding_window: null,
+    };
+  }
 
   if (accountEntry.unlimited) {
     return {
@@ -932,21 +1346,39 @@ export function evaluateModelQuota(
   }
 
   const evaluations = matchingAccounts.map((entry) =>
-    evaluateAccountQuotaForModel(
-      entry,
-      canonical,
-      info,
-      effort,
-      effortScale,
-      taskHours,
-      policy
-    )
+    rawQuotas._healthOnly === true && !entry.excluded
+      ? {
+          account: entry.key,
+          provider: entry.provider,
+          kind: entry.kind,
+          eligible: true,
+          excluded: [],
+          opportunity_cost: 0.0,
+          reset_bonus: 0.0,
+          reset_sunk_weight: 0.0,
+          binding_window: null,
+        }
+      : evaluateAccountQuotaForModel(
+          entry,
+          canonical,
+          info,
+          effort,
+          effortScale,
+          taskHours,
+          policy
+        )
   );
+  // Every matching account that is not `ready` is reported, selected or not (no silent failures).
+  const warnings = [...new Set(matchingAccounts.flatMap((e) => e.warnings || []))];
 
+  evaluations.forEach((e, i) => {
+    e.state = matchingAccounts[i].state;
+  });
   const eligibleAccounts = evaluations.filter((e) => e.eligible);
   if (eligibleAccounts.length === 0) {
     return {
       eligible: false,
+      warnings,
       excluded: evaluations.flatMap((e) => e.excluded),
       account: evaluations[0]?.account || null,
       provider: evaluations[0]?.provider || null,
@@ -964,6 +1396,10 @@ export function evaluateModelQuota(
     const aSub = a.kind !== "metered" ? 1 : 0;
     const bSub = b.kind !== "metered" ? 1 : 0;
     if (aSub !== bSub) return bSub - aSub;
+    // An account whose reading is failing (still inside the grace period) is the last resort among peers.
+    const aReady = a.state === ACCOUNT_STATES.USAGE_FAILING ? 0 : 1;
+    const bReady = b.state === ACCOUNT_STATES.USAGE_FAILING ? 0 : 1;
+    if (aReady !== bReady) return bReady - aReady;
     const aNet = (a.reset_bonus || 0) - (a.opportunity_cost || 0);
     const bNet = (b.reset_bonus || 0) - (b.opportunity_cost || 0);
     return bNet - aNet;
@@ -973,12 +1409,13 @@ export function evaluateModelQuota(
   if (best.kind === "metered" && taskCtx.metered_ok === false) {
     return {
       ...best,
+      warnings,
       eligible: false,
       excluded: [`${best.account}: metered billing is disabled (metered_ok: false)`],
     };
   }
 
-  return best;
+  return { ...best, warnings };
 }
 
 /**
@@ -1030,6 +1467,20 @@ export function isModelQuotaExhausted(
  *      * Otherwise, seats with the lowest opportunity cost / highest sustainable pace go first.
  * 3. Returns a permutation of seat indices `[0 .. seats.length - 1]`.
  */
+const EXCLUDED_SEAT_STATES = new Set([
+  ACCOUNT_STATES.PLAN_INACTIVE,
+  ACCOUNT_STATES.AUTH_FAILED,
+  ACCOUNT_STATES.DISABLED,
+]);
+
+/** A seat's weekly capacity: its own `capacityUsd`, else its plan's, else the smallest known plan of its provider. */
+function seatCapacityUsd(seat) {
+  if (typeof seat.capacityUsd === "number" && seat.capacityUsd > 0) return seat.capacityUsd;
+  const provider = String(seat.provider || "").toLowerCase() || inferModelProviderFamily(String(seat.key || ""));
+  const planKey = normalizePlan(provider, seat.plan).key;
+  return resolveWindowCapacityUsd(provider || "default", "weekly", 168, null, null, planKey);
+}
+
 export function orderSeatsByQuotaEconomics(_pool, seats, options = {}) {
   if (!Array.isArray(seats)) return [];
   if (seats.length <= 1) return seats.map((_, i) => i);
@@ -1047,7 +1498,7 @@ export function orderSeatsByQuotaEconomics(_pool, seats, options = {}) {
   };
 
   const seatTier = (s) => {
-    if (s.resting) return 2;
+    if (s.resting || s.excluded === true || EXCLUDED_SEAT_STATES.has(s.state)) return 2;
     const used = typeof s.used === "number" ? s.used : 0;
     if (used >= 100) return 2;
     if (used >= keepPercent) return 1;
@@ -1087,7 +1538,7 @@ export function orderSeatsByQuotaEconomics(_pool, seats, options = {}) {
       resetHours,
       endHours: resetHours,
       targetRemaining: 100 * Math.min(1.0, resetHours / 168),
-      capacityUsd: 220.0,
+      capacityUsd: seatCapacityUsd(s),
     };
 
     if (!winState.known) {

@@ -16,6 +16,7 @@ import {
   keepsEffort,
 } from "./continuity.js";
 import { extractRequestFacts } from "./profiler-core.js";
+import { healthOnlyQuotas } from "./quota.js";
 import { loadLiveQuotas } from "./quota-loader.js";
 import { scoreTaskLive } from "./scorer-live.js";
 
@@ -318,10 +319,12 @@ export async function onRequest(body, ctx = {}) {
 
   // Graceful fallback if all candidates were filtered out by temporary unhealthy/context/quota constraints
   if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || liveQuotas)) {
+    // Exhausted windows are ignored here, but expired / failing / signed-out accounts stay excluded.
     decision = selectBestRoute(profile, {
       objective: facts.objective,
       candidateModels,
       catalog: options.catalog,
+      quotas: liveQuotas ? healthOnlyQuotas(liveQuotas, now, options.catalog?.policy) : undefined,
       now,
       ...realtimeOption,
       ...pinOptionsOf(options),
@@ -379,6 +382,8 @@ export async function onRequest(body, ctx = {}) {
     hasExplicitCandidates,
     selectedAccount: decision.selectedAccount || null,
     quota: decision.quota || null,
+    ...(decision.warnings?.length ? { warnings: decision.warnings } : {}),
+    ...(decision.accounts ? { accounts: decision.accounts } : {}),
     workKind: decision.workKind,
     difficulty: decision.difficulty,
     requiredAbility: decision.requiredAbility,

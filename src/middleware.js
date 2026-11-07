@@ -30,7 +30,7 @@ import {
   recentUserTurns,
 } from "./continuity.js";
 import { extractRequestFacts, inferTaskProfile } from "./profiler-core.js";
-import { orderSeatsByQuotaEconomics } from "./quota.js";
+import { healthOnlyQuotas, orderSeatsByQuotaEconomics } from "./quota.js";
 
 const ROUTE_CARRIER_KEY = "__agentcompass_route";
 
@@ -436,10 +436,12 @@ function routeClaimed(body, ctx, env, depth = 0) {
   });
 
   if (!decision.ok && (unhealthyModels.length > 0 || minContextTokens > 0 || options.quotas)) {
+    // Exhausted windows are ignored here, but expired / failing / signed-out accounts stay excluded.
     decision = selectBestRoute(profile, {
       objective: facts.objective,
       candidateModels,
       catalog: options.catalog,
+      quotas: options.quotas ? healthOnlyQuotas(options.quotas, now, options.catalog?.policy) : undefined,
       now,
       ...realtimeOption,
       ...pins,

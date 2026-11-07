@@ -25,7 +25,7 @@
     }
   },
   "scripts": {
-    "test": "node --test test/router.test.mjs test/realtime-parity.test.mjs test/sign-in-copy.test.mjs"
+    "test": "node --test test/router.test.mjs test/realtime-parity.test.mjs test/sign-in-copy.test.mjs test/plan-state.test.mjs"
   },
   "keywords": [
     "magpie",
