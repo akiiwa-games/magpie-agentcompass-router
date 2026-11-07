@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# WSL appends Windows' directories to PATH. Magpie looks for agents there (claude, grok), and one found there runs on the
+# host, with the host's own sign-ins.
+PATH=$(echo "$PATH" | tr ':' '\n' | grep -v '^/mnt/' | paste -sd: -)
+export PATH
+unset WSLENV
+
 if [ -d "/mnt/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch" ]; then
   SCRATCH="/mnt/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch"
 else
@@ -35,8 +41,9 @@ if [ -n "${BASELINE_SRC:-}" ]; then
   export BASELINE_PLUGIN_DIR="$SANDBOX/agentcompass-main"
 fi
 
-# REAL_CODEX_AUTH: a Codex auth.json, for Scenario 13's real upstream. It is only read: Scenario 13 keeps a copy without the
-# refresh token on this tmpfs and deletes it. Without it Scenario 13 is reported as skipped.
+# REAL_CODEX_AUTH, REAL_CLAUDE_AUTH, REAL_GROK_AUTH: a Codex auth.json, a Claude .credentials.json and a Grok auth.json, for
+# Scenario 13's real upstreams. They are only read: Scenario 13 keeps copies without the refresh tokens on this tmpfs and
+# deletes them. An account with none is left out; with none at all Scenario 13 is reported as skipped.
 
 export HOME="$SANDBOX/home"
 export TMPDIR="$SANDBOX/tmp"
