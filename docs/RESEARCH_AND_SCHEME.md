@@ -161,35 +161,35 @@ $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \tex
 
 ### 4.3 `realtime_loop` 真实 Magpie 验收（Scenario 9–12）
 
-运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `1156694`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
+运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `c5d59e8`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
 
 ```text
 BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
 ```
 
-0.1.2891（sha256 `ffa0785c…`）原始结果，取自带真实凭据、在隔离 namespace 内的那次运行：
+0.1.2891（sha256 `ffa0785c…`）原始结果，取自带真实凭据、在隔离 namespace 内以 `nobody`（`uid=65534`）运行的那次：
 
 ```text
-[PASS] Scenario 9 (non-realtime vs origin/main): 408 requests over 8 pools, 408 served, 33 distinct routes, 0 diffs; new turns: 48 rows x 8 samples, 0 diffs, 47 rows rerouted on both builds (origin/main flips on 31 rows)
+[PASS] Scenario 9 (non-realtime vs origin/main): 408 requests over 8 pools, 408 served, 33 distinct routes, 0 diffs; new turns: 48 rows x 8 samples, 0 diffs, 47 rows rerouted on both builds (origin/main flips on 36 rows)
 [PASS] Scenario 10 (realtime routing): ideation gemini-4-argon-high:high -> gpt-6-astra:medium; coding gpt-6.1-sol:high -> gpt-6.1-sol:medium; bulk gemini-3.8-flash-high:high -> claude-sonnet-5-5:low; debug claude-opus-5-5:xhigh -> claude-opus-5-5:medium; bundle claude-opus-5-5:xhigh -> claude-opus-5-5:medium; Argon-only pool -> HTTP 404, upstream calls []
-[PASS] Scenario 11 (realtime session hold): 20 sessions, 0 reroutes, turns {"a":"claude-opus-5-5:medium","b":"claude-opus-5-5:medium","c":"claude-opus-5-5:medium","d":"claude-opus-5-5:medium","e":"claude-opus-5-5:medium"}; flagless follow-ups {"claude-opus-5-5:medium":11,"claude-opus-5-5:xhigh":9}; explicit false {"realtime":"gpt-6-astra:medium","afterFalse":"gemini-4-argon-high:high"}; /v1/messages claude-opus-5-5:null -> claude-opus-5-5:null
+[PASS] Scenario 11 (realtime session hold): 20 sessions, 0 reroutes, turns {"a":"claude-opus-5-5:medium","b":"claude-opus-5-5:medium","c":"claude-opus-5-5:medium","d":"claude-opus-5-5:medium","e":"claude-opus-5-5:medium"}; flagless follow-ups {"claude-opus-5-5:medium":17,"claude-opus-5-5:xhigh":3}; explicit false {"realtime":"gpt-6-astra:medium","afterFalse":"gemini-4-argon-high:high"}; /v1/messages claude-opus-5-5:null -> claude-opus-5-5:null
 [PASS] Scenario 12 (pinned slow model): Argon gemini-4-argon-high:high / gemini-4-argon-high:high, opus claude-opus-5-5:xhigh, no pin gpt-6-astra:medium; log: middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection
 ```
 
-0.1.3196（sha256 `b82e24ce…`）四个场景同样通过，路由结果相同；随运行变化的只有 flagless follow-ups（medium 13 / xhigh 7）、explicit false 之后那一轮落在哪个运行时（hold 或重路由），以及 origin/main 翻转行数（36）。
+0.1.3196（sha256 `b82e24ce…`）四个场景同样通过，路由结果相同；随运行变化的只有 flagless follow-ups（medium 16 / xhigh 4）、explicit false 之后那一轮落在哪个运行时（hold 或重路由），以及 origin/main 翻转行数（36）。
 
-不带凭据、不进隔离 namespace 的路径在两个版本上也各跑了一次：Scenario 1–12 全部 PASS，Scenario 13 为 `[SKIP] Scenario 13 (real upstream): no REAL_*_AUTH set`。
+不带凭据的路径在 0.1.2891 上也单独跑了一次：开头的沙盒回归自检（C1 假令牌崩溃 0 转储、C2 `nobody`/`mount.drvfs`/`umount`/`core_pattern`/X11 拒绝、C5 带空格路径哈希校验）通过，Scenario 1–12 全部 PASS，Scenario 13 为 `[SKIP] Scenario 13 (real upstream): no REAL_*_AUTH set`。
 
 结论与边界：
 
 - **Scenario 9 的比较口径**：首轮、工具循环、短追问、冷会话新一轮、流式、`/v1/responses`、`/v1/messages`、图片输入、`agentcompass:low`、直连模型与路由组，逐请求比较状态码、模型、effort 和完整上游请求体。温会话的新一轮另行采样比较，因为这类请求 hold 还是重路由取决于接到请求的运行时是否持有该会话的记录，`origin/main` 与自身比较也会翻转；判定标准是两个构建合起来不超过这两种结果。
-- **实时标记要每轮都带**：Scenario 11 的 flagless follow-ups 只记录、不断言。客户端在后续回合不再发送 `realtime_loop` 时，未见过该会话的运行时会按非实时路由（上面 20 次中有 9 次到 `xhigh`，多次运行观察到 1–11 次，次数随运行变化）。Magpie 的中间件运行时之间不共享存储，因此客户端需每轮带标记，或设置插件选项 `realtime_loop: true`。
+- **实时标记要每轮都带**：Scenario 11 的 flagless follow-ups 只记录、不断言。客户端在后续回合不再发送 `realtime_loop` 时，未见过该会话的运行时会按非实时路由（上面 20 次中有 3–4 次到 `xhigh`，多次运行观察到 1–11 次，次数随运行变化）。Magpie 的中间件运行时之间不共享存储，因此客户端需每轮带标记，或设置插件选项 `realtime_loop: true`。
 - **`/v1/messages` 上看不到 effort**：本场景的上游只有 OpenAI 协议，Magpie 把 `/v1/messages` 转成 chat 后未携带 effort，`origin/main` 同样如此（Scenario 5），所以这条路径只验证了模型选择，没有验证降档。
 - **Argon 单独成池时**：候选全部被排除，请求不改写，虚拟模型名由 Magpie 返回 HTTP 404，上游未被调用。
 
 ### 4.4 真实上游验收（Scenario 13）
 
-一个 Magpie 实例同时登录 Codex、Claude 订阅和 Grok 三个账户，每个账户各跑一组：非实时、实时、`/v1/responses` 实时、直连点名、关掉插件的对照，以及 12 条成对难例。被测提交 `1156694`。
+一个 Magpie 实例同时登录 Codex、Claude 订阅和 Grok 三个账户，每个账户各跑一组：非实时、实时、`/v1/responses` 实时、直连点名、关掉插件的对照，以及 12 条成对难例。被测提交 `c5d59e8`。
 
 ```text
 REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=<auth.json> BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
@@ -198,26 +198,31 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
 0.1.2891 原始结果：
 
 ```text
+[PASS] Sandbox regression checks: C1 fake-token crash dumps=0, C2 nobody/mount.drvfs/umount/core_pattern/X11 refused, C5 path-with-spaces hash verified
 [Sign-in copy] codex: kept tokens.access_token; dropped auth_mode, OPENAI_API_KEY, tokens.id_token, tokens.refresh_token, tokens.account_id, last_refresh
 [Sign-in copy] claude: kept claudeAiOauth.accessToken, claudeAiOauth.scopes; dropped claudeAiOauth.refreshToken, claudeAiOauth.expiresAt, claudeAiOauth.refreshTokenExpiresAt, claudeAiOauth.subscriptionType, claudeAiOauth.subscriptionTypeSource, claudeAiOauth.rateLimitTier
 [Sign-in copy] grok: kept <account>.key; dropped <account>.auth_mode, <account>.create_time, <account>.user_id, <account>.email, <account>.first_name, <account>.profile_image_asset_id, <account>.principal_type, <account>.principal_id, <account>.team_id, <account>.team_zero_data_retention, <account>.coding_data_retention_opt_out, <account>.coding_data_team, <account>.refresh_token, <account>.expires_at, <account>.oidc_issuer, <account>.oidc_client_id
 [Host isolation] control, outside the namespace: 3 sign-in files readable, Windows program on tmpfs runs
-[Host isolation] inside the namespace: sign-in files gone, host drives empty, no host mounts, cmd.exe refused, Windows program on tmpfs refused
-[PASS] Scenario 13 (real upstream, codex): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 9143ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 8055ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 11/12
-[PASS] Scenario 13 (real upstream, claude): non-realtime claude-opus-5-5:medium (mock claude-opus-5-5:medium) 200 in 7245ms; realtime claude-sonnet-5-5:medium (mock claude-sonnet-5-5:medium) 200 in 27842ms; /v1/responses claude-sonnet-5-5:medium 200; named claude-haiku-5-5:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier claude/claude-haiku-5-5: realtime_loop 12/12, work_kind 9/12
-[PASS] Scenario 13 (real upstream, grok): non-realtime grok-4.7:high (mock grok-4.7:high) 200 in 11896ms; realtime grok-4.7:low (mock grok-4.7:low) 200 in 18191ms; /v1/responses grok-4.7:low 200; named grok-4.7-build-fast:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier grok/grok-4.7-build-fast: realtime_loop 12/12, work_kind 11/12
-[PASS] Scenario 13 (real upstream): accounts codex, claude, grok; isolation {"signInFilesVisible":false,"hostDrivesReadable":false,"hostMountsLeft":0,"cmdExe":"refused","windowsProgramOnTmpfs":"refused","pidNamespace":true}
+[Host isolation] inside the namespace (uid=65534, core=1:1): sign-in files gone, host drives empty, no host mounts, X11 masked, cmd.exe refused, Windows program on tmpfs refused, mount.drvfs refused, umount /run/WSL refused, core_pattern refused
+[PASS] Scenario 13 (real upstream, codex): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 8314ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 7164ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream, claude): non-realtime claude-opus-5-5:medium (mock claude-opus-5-5:medium) 200 in 7546ms; realtime claude-sonnet-5-5:medium (mock claude-sonnet-5-5:medium) 200 in 30518ms; /v1/responses claude-sonnet-5-5:medium 200; named claude-haiku-5-5:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier claude/claude-haiku-5-5: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream, grok): non-realtime grok-4.7:high (mock grok-4.7:high) 200 in 33948ms; realtime grok-4.7:low (mock grok-4.7:low) 200 in 15508ms; /v1/responses grok-4.7:low 200; named grok-4.7-build-fast:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier grok/grok-4.7-build-fast: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream): accounts codex, claude, grok; isolation {"signInFilesVisible":false,"hostDrivesReadable":false,"hostMountsLeft":0,"x11SocketVisible":false,"cmdExe":"refused","windowsProgramOnTmpfs":"refused","pidNamespace":true,"uid":65534,"coreLimit":"1:1","mountDrvfs":"refused","umountWsl":"refused","writeCorePattern":"refused"}
+[PASS] Crash dump check: 0 dumps in %TEMP%\wsl-crashes
 [PASS] Host sign-in files: hashes the same before and after the run (3 files)
+[Cleanup] %TEMP%\wsl-crashes dumps from this run removed: 0
 ```
 
-0.1.3196 原始结果（`[Sign-in copy]` 和 `[Host isolation]` 行相同）：
+0.1.3196 原始结果（`[Sign-in copy]`、`[Host isolation]`、`[PASS] Crash dump check` 和 `[Cleanup]` 行相同）：
 
 ```text
-[PASS] Scenario 13 (real upstream, codex): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 10492ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 6853ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 12/12
-[PASS] Scenario 13 (real upstream, claude): non-realtime claude-opus-5-5:medium (mock claude-opus-5-5:medium) 200 in 6237ms; realtime claude-sonnet-5-5:medium (mock claude-sonnet-5-5:medium) 200 in 30517ms; /v1/responses claude-sonnet-5-5:medium 200; named claude-haiku-5-5:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier claude/claude-haiku-5-5: realtime_loop 12/12, work_kind 11/12
-[PASS] Scenario 13 (real upstream, grok): non-realtime grok-4.7:high (mock grok-4.7:high) 200 in 36890ms; realtime grok-4.7:low (mock grok-4.7:low) 200 in 20157ms; /v1/responses grok-4.7:low 200; named grok-4.7-build-fast:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier grok/grok-4.7-build-fast: realtime_loop 12/12, work_kind 10/12
-[PASS] Scenario 13 (real upstream): accounts codex, claude, grok; isolation {"signInFilesVisible":false,"hostDrivesReadable":false,"hostMountsLeft":0,"cmdExe":"refused","windowsProgramOnTmpfs":"refused","pidNamespace":true}
+[PASS] Scenario 13 (real upstream, codex): non-realtime gpt-6.1-sol:high (mock gpt-6.1-sol:high) 200 in 9852ms; realtime gpt-6.1-sol:medium (mock gpt-6.1-sol:medium) 200 in 5937ms; /v1/responses gpt-6.1-sol:medium 200; named gpt-6-luna:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier codex/gpt-6-luna: realtime_loop 12/12, work_kind 10/12
+[PASS] Scenario 13 (real upstream, claude): non-realtime claude-opus-5-5:medium (mock claude-opus-5-5:medium) 200 in 8881ms; realtime claude-sonnet-5-5:medium (mock claude-sonnet-5-5:medium) 200 in 26653ms; /v1/responses claude-sonnet-5-5:medium 200; named claude-haiku-5-5:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier claude/claude-haiku-5-5: realtime_loop 12/12, work_kind 10/12
+[PASS] Scenario 13 (real upstream, grok): non-realtime grok-4.7:high (mock grok-4.7:high) 200 in 21266ms; realtime grok-4.7:low (mock grok-4.7:low) 200 in 16891ms; /v1/responses grok-4.7:low 200; named grok-4.7-build-fast:null 200; flag on the wire: none (plugin off control: observer true, HTTP 200); classifier grok/grok-4.7-build-fast: realtime_loop 12/12, work_kind 11/12
+[PASS] Scenario 13 (real upstream): accounts codex, claude, grok; isolation {"signInFilesVisible":false,"hostDrivesReadable":false,"hostMountsLeft":0,"x11SocketVisible":false,"cmdExe":"refused","windowsProgramOnTmpfs":"refused","pidNamespace":true,"uid":65534,"coreLimit":"1:1","mountDrvfs":"refused","umountWsl":"refused","writeCorePattern":"refused"}
+[PASS] Crash dump check: 0 dumps in %TEMP%\wsl-crashes
 [PASS] Host sign-in files: hashes the same before and after the run (3 files)
+[Cleanup] %TEMP%\wsl-crashes dumps from this run removed: 0
 ```
 
 三个账户在两个版本上都能作为上游，没有 `not_supported`：
@@ -225,31 +230,31 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
 | 账户 | Magpie 的接入方式 | 沙盒里的准备 |
 |---|---|---|
 | Codex | 读 `~/.codex/auth.json`，直接请求 `chatgpt.com` | 无 |
-| Claude 订阅 | 读 `~/.claude/.credentials.json`，通过 Claude Code 程序发请求 | `magpie claude-code install` 下载 Anthropic 的构建（校验 SHA-256）；预置 `.claude.json`，跳过首次运行和工作目录信任提示 |
+| Claude 订阅 | 读 `~/.claude/.credentials.json`，通过 Claude Code 程序发请求 | `magpie claude-code install` 下载 Anthropic 的构建（校验 SHA-256）；预置 `.claude.json`，按当前运行 `uid`（如 `nobody` 下的 `magpie-claude-work-65534`）跳过首次运行和工作目录信任提示 |
 | Grok | `@magpie-community/opencode-grok-auth` 插件读 `~/.grok/auth.json`，请求 `cli-chat-proxy.grok.com` | `magpie plugin add` 安装插件，`magpie plugin login grok "Use Grok Build's current sign-in"`，Magpie 随之安装 Grok Build |
 
 两个版本的四组请求都返回 200 且有文本，观察插件看到的标记都是 `false`，关掉插件的对照看到 `true`；非实时和实时路由都与 mock 一致。
 
-0.1.3196 的这次结果是第二次运行。同一提交上的第一次运行里，Codex 组通过，随后 Claude 组的一个请求等满 240 秒超时（`TimeoutError`），运行失败。同一提交在 0.1.2891 上和 0.1.3196 重跑都通过，所以它是偶发的，原因没有查明：可能是 Claude Code 或上游卡住，也不能排除副本少了 `expiresAt` 的影响。失败退出走同一个 `cleanup`：紧接着的下一次运行正常占用了同样的路径和端口，主机文件哈希也没有变化。
+在提交 `c5d59e8` 上，0.1.2891 和 0.1.3196 均一次运行通过。此前提交 `1156694` 上 0.1.3196 的第一次运行里，Codex 组通过后 Claude 组曾有一个请求等满 240 秒超时（`TimeoutError`），同一提交在 0.1.2891 上和 0.1.3196 重跑都通过，属于偶发，原因没有查明（可能是 Claude Code 或上游偶发卡住；第六轮审查实测确认与去掉 `expiresAt` 无关）。为便于今后直接定位此类问题，Scenario 13 失败时现已额外将 `realLogs` 中的 `claude:` 和 `gateway:` 日志行经 `redactSecrets` 脱敏后输出。失败退出走同一个 `cleanup`：紧接着的下一次运行正常占用了同样的路径和端口，主机文件哈希也没有变化。
 
-分类器一致率（五次完整运行：第四轮的三次，加上提交 `1156694` 的 0.1.3196 和 0.1.2891 各一次；12 条都是真实回答）：
+分类器一致率（七次完整运行：第四轮三次、提交 `1156694` 的 0.1.3196 和 0.1.2891 各一次、提交 `c5d59e8` 的 0.1.2891 和 0.1.3196 各一次；12 条都是真实回答）：
 
 | 账户 / 分类模型 | `realtime_loop` | `work_kind` |
 |---|---|---|
-| Codex / `codex/gpt-6-luna` | 五次都是 12/12 | 11、12、11、12、11（/12） |
-| Claude / `claude/claude-haiku-5-5` | 五次都是 12/12 | 11、10、11、11、9（/12） |
-| Grok / `grok/grok-4.7-build-fast` | 五次都是 12/12 | 11、11、11、10、11（/12） |
+| Codex / `codex/gpt-6-luna` | 七次都是 12/12 | 11、12、11、12、11、11、10（/12） |
+| Claude / `claude/claude-haiku-5-5` | 七次都是 12/12 | 11、10、11、11、9、11、10（/12） |
+| Grok / `grok/grok-4.7-build-fast` | 七次都是 12/12 | 11、11、11、10、11、11、11（/12） |
 
 `work_kind` 不一致的例子：
 
-| 例子 | 期望 | 返回 | 出现于（五次合计） |
+| 例子 | 期望 | 返回 | 出现于（七次合计） |
 |---|---|---|---|
-| `non_realtime_design_realtime_trading_dashboard_cn` | `frontend_implementation` | `complex_build_plan` | Grok 五次 |
-| `realtime_loop_course_polling_click_cn` | `computer_use` | `tool_execution` | Claude 三次，Codex 一次 |
-| `non_realtime_analyze_orderbook_latency_en` | `exploration_analysis` | `debug_review` | Claude 三次 |
-| `non_realtime_write_ticket_script_cn` | `general_implementation` | `self_contained_code` | Claude 一次，Grok 一次 |
+| `non_realtime_design_realtime_trading_dashboard_cn` | `frontend_implementation` | `complex_build_plan` | Grok 七次 |
+| `realtime_loop_course_polling_click_cn` | `computer_use` | `tool_execution` | Claude 四次，Codex 一次 |
+| `non_realtime_analyze_orderbook_latency_en` | `exploration_analysis` | `debug_review` | Claude 五次 |
+| `non_realtime_write_ticket_script_cn` | `general_implementation` | `self_contained_code` | Claude 一次，Grok 一次，Codex 一次 |
 | `realtime_loop_api_orderbook_arbitrage_cn` | `tool_execution` | `computer_use`（Codex 一次）、`debug_review`（Claude 一次） | 两个账户各一次 |
-| `non_realtime_fix_flash_sale_bot_en` | `debug_review` | `general_implementation` | Codex 一次 |
+| `non_realtime_fix_flash_sale_bot_en` | `debug_review` | `general_implementation` | Codex 三次 |
 
 `realtime_loop` 没有判错。作为对照，确定性回退在同一批例子上是 `realtime_loop` 6/12、`work_kind` 7/12。
 
@@ -264,10 +269,11 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
   | Grok | `<account>.key` | 同时去掉 `expires_at` 和 `user_id`：通过，所以都不保留 |
 
   `refresh_token`、`id_token`、`OPENAI_API_KEY` 都不进沙盒，也不运行 `magpie accounts import`。刷新令牌会轮换，副本一旦刷新，主机上的同一账户就会掉线。副本放在沙盒 tmpfs 上，权限 0600，场景结束即删除并断言已删除。Scenario 13 只验证令牌有效期内的调用，没有覆盖过期后的刷新；访问令牌过期后要换新的登录文件才能再跑。
-- **与主机隔离**：Scenario 13 在独立的 mount 和 PID namespace 里运行（`unshare --mount --pid --fork --kill-child --mount-proc`）。`test/run-linux-sandbox.sh` 用 tmpfs 遮蔽 `/mnt/*`、`/mnt/host/*`、`/run/WSL` 以及所有 9p、drvfs、virtiofs 挂载，并清掉 `WSL_INTEROP` 等变量。之后它做这些断言，任何一条不成立就退出（退出码 70），不跑真实凭据：登录文件看不到，通过 `/proc/1/root` 也看不到；主机盘为空；没有遗留的主机挂载；`cmd.exe` 的绝对路径运行不了；tmpfs 上的 Windows 程序运行不了。遮蔽之前在 namespace 外做一次对照，同样的检查能读到登录文件，Windows 程序也能运行（这个对照每次带凭据的运行都会在主机上执行一次 `whoami.exe`）。把假登录文件放在 `/run` 这个没有遮蔽的位置时，脚本确实停在 `[ABORT] The host is still in reach, so no real sign-in may run here: a sign-in file is visible`，退出码 70。
-- **评审之外发现的隔离细节**：`/etc/resolv.conf` 指向被遮蔽的目录，要在遮蔽后重写，否则 DNS 不通；只有 mount namespace 时，root 仍能经 `/proc/<pid>/root` 看到外面，所以需要 PID namespace；`/usr/lib/wsl/drivers` 也是主机挂载；继承来的工作目录可能在主机盘上，所以遮蔽前先 `cd /`。
-- **主机文件哈希**：运行前后比较三个登录文件的 sha256，变化即 `[FAIL]` 并退出 1（上面的 `[PASS] Host sign-in files` 行）。这只能说明哈希变了，不能说明是谁改的，主机上其他会话的刷新也会触发。本轮第一次到最后一次运行之间，三个哈希都没有变。
-- **异常退出**：`cleanup` 用 `pkill -f "$SANDBOX/"` 结束沙盒路径下的所有进程（包括 `real/magpie` 网关，以及 namespace 的 PID 1，后者一死 namespace 内全部进程都结束），再删除沙盒目录。TERM、HUP、INT 各有 trap，工作放在后台运行，这样信号能立刻触发。实测时运行停在 Scenario 13，`real/magpie web` 已启动：
+- **防止崩溃转储写入主机磁盘（C1）**：WSL 的 `/proc/sys/kernel/core_pattern` 默认是 `|/wsl-capture-crash %t %E %p %s`，该辅助程序在所有 namespace 之外运行，会把崩溃进程的内存转储（含环境变量和堆内的访问令牌）写到 Windows 主机的 `%TEMP%\wsl-crashes`，`ulimit -c 0`、mount/PID namespace 和非 root 用户都挡不住管道型转储。`test/run-linux-sandbox.sh` 在读取任何登录凭据之前执行 `prlimit --pid $$ --core=1:1`（`RLIMIT_CORE=1` 是 Linux 内核规定的不对管道型 `core_pattern` 转储的特殊值），覆盖 `sign-in-copy.mjs` 及沙盒内所有子进程；运行结束及 `cleanup` 时还会检查并删除本次运行在 `%TEMP%\wsl-crashes` 下产生的文件并报告数量，每次运行开头的回归自检与 namespace 内的隔离验证也会让携带假令牌的子进程触发 `SIGSEGV`/`SIGABRT` 并确认产生的转储数为 0。
+- **与主机隔离及非特权降权（C2）**：Scenario 13 在独立的 mount 和 PID namespace 里运行（`unshare --mount --pid --fork --kill-child --mount-proc`）。`test/run-linux-sandbox.sh` 先以 root 用 tmpfs 遮蔽 `/mnt/*`、`/mnt/host/*`、`/run/WSL`、`/tmp/.X11-unix` 以及所有 9p、drvfs、virtiofs 挂载，并清掉 `WSL_INTEROP` 等变量；检查登录文件不可见、`/proc/1/root` 下也不可见、主机盘与 `/tmp/.X11-unix` 为空、无遗留主机挂载、`cmd.exe` 与 tmpfs 上的 Windows 程序均被拒绝。随后通过 `chown -R nobody "$SANDBOX"` 与 `exec su -p -s /bin/sh nobody` 降为非 root 用户 `nobody`（`uid=65534`；不使用 `unshare --user --map-root-user`，因为后者全局 uid 仍为 0，仍可写 `core_pattern` 等内核钩子），并在 `nobody` 下断言：`uid != 0`、`RLIMIT_CORE` 为 `1:1`、`umount /run/WSL` 失败、`mount.drvfs` 失败、写 `/proc/sys/kernel/core_pattern`（及 `modprobe`、`uevent_helper`）失败，任何一条不成立就退出（退出码 70）。遮蔽之前在 namespace 外做一次对照，同样的检查能读到登录文件，Windows 程序也能运行（这个对照每次带凭据的运行都会在主机上执行一次 `whoami.exe`）。
+- **评审之外发现的隔离细节**：`/etc/resolv.conf` 指向被遮蔽的目录，要在遮蔽后重写，否则 DNS 不通；只有 mount namespace 时，root 仍能经 `/proc/<pid>/root` 看到外面，所以需要 PID namespace；`/usr/lib/wsl/drivers` 也是主机挂载；继承来的工作目录可能在主机盘上，所以遮蔽前先 `cd /`；Claude Code 的工作目录名按 `process.getuid()` 编号（`nobody` 下为 `magpie-claude-work-65534`），`.claude.json` 需按当前 `uid` 预置信任。
+- **主机文件哈希与带空格路径（C5）**：运行前后逐行（`IFS` 设为换行并关闭通配）对登录文件路径执行 `sha256sum`，任何文件读取失败或哈希变化即 `[FAIL]` 并退出 1（不会因空白分词或管道吞掉 `sha256sum` 错误而误报 PASS）。每次运行开头的自检专门在含空格的路径上验证哈希一致性、缺失文件报错、修改文件报错以及 namespace 内不可见。本轮第一次到最后一次运行之间，三个主机登录文件的哈希都没有变。
+- **异常退出**：`cleanup` 用 `pkill -f "$SANDBOX/"` 结束沙盒路径下的所有进程（包括 `real/magpie` 网关，以及 namespace 的 PID 1，后者一死 namespace 内全部进程都结束），再删除沙盒目录并检查清理 `%TEMP%\wsl-crashes`。TERM、HUP、INT 各有 trap，工作放在后台运行，这样信号能立刻触发。实测时运行停在 Scenario 13，`real/magpie web` 已启动：
 
   | 退出方式 | 凭据 | 脚本退出码 | 沙盒目录 | 相关进程 | 13429 网关 | 探针字符串命中 |
   |---|---|---:|---|---:|---|---:|
@@ -279,10 +285,14 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
   | SIGTERM，当时 `claude`、`claude-tui-helper`、`claude-mcp-helper` 在运行 | 真实副本 | 143 | 已删 | 0 | 不通 | – |
   | SIGTERM，当时在 Grok 组（发信号时列表里没有 Grok 进程） | 真实副本 | 143 | 已删 | 0 | 不通 | – |
 
-  `kill -9` 外层脚本本身无法捕获，没有覆盖：这种情况下副本和网关会留到下一次运行开头的 `rm -rf`，或者 `wsl --terminate`。
+  `kill -9` 外层脚本本身无法被捕获：旧的网关和子进程不会随外层脚本立即停止，下一次运行开头的 `rm -rf` 只删文件、杀不了网关，且若旧实例仍在往目录里写文件会因 `Directory not empty` 失败（下一次运行退出码 1），随后由那次运行退出触发的 `cleanup`（`pkill` 加 `rm -rf`）把旧进程和文件一并清掉，或通过 `wsl --terminate` 清除；若不启动新运行，读代码看旧的 namespace 不受影响，会继续跑完并由 bun 的 `finally` 删副本（此自然跑完路径未用真实 e2e 单独实测）。
 - **实例环境用白名单**：`realEnv` 只列出 `PATH`、`MAGPIE_BUN`、`MAGPIE_WEB_KEY`、`NO_COLOR`、`HOME`、`TMPDIR`、`XDG_*`、`MAGPIE_ADDR`，`CODEX_HOME`、`REAL_*_AUTH` 等都不会带进去。异常退出实测时读 `/proc/<pid>/environ`，真实实例的环境变量名正是这些。
-- **错误脱敏**：`call.error`、`controlWithPluginOff.error`、分类器错误和登录步骤的错误，写进报告或日志前都经过 `redactSecrets`，去掉邮箱、JWT 形状和 32 字符以上的 token。
-- **隔离的边界**：namespace 内仍是 root，和主机共用内核，这不是安全边界，防的是误用，不是恶意代码。主机网络和 Docker Desktop 的 guest 服务仍然可达。
+- **错误脱敏**：`call.error`、`controlWithPluginOff.error`、分类器错误、登录步骤的错误以及 Scenario 13 失败时输出的 `claude:`/`gateway:` 日志行，写进报告或日志前都经过 `redactSecrets`，去掉邮箱、JWT 形状和 32 字符以上的 token。
+- **隔离的边界**：遮蔽完成后进程已降为非特权用户 `nobody`（`uid=65534`），撤销 `/run/WSL` 遮蔽、调用 `mount.drvfs` 重新挂载主机盘、改写 `core_pattern`/`modprobe`/`uevent_helper` 内核钩子均被拒绝，`/tmp/.X11-unix` 已遮蔽，`RLIMIT_CORE=1:1` 阻止向 `%TEMP%\wsl-crashes` 写崩溃转储；但沙盒仍与主机共用 Linux 内核，这不是对抗内核漏洞的安全边界，防的是误用与非特权越界。主机网络（NAT 网关上非仅绑 `127.0.0.1` 的端口）仍然可达；Docker Desktop 的 guest 服务在 Docker Desktop 未运行时不存在，本轮未验证。
+- **已知限制（留待后续处理，C3 / C4 / C6）**：
+  - **C3（`redactSecrets` 可绕过形式）**：`test/sign-in-copy.mjs` 的 `redactSecrets` 可脱敏常规邮箱、完整 JWT、UUID 和 32 字符以上的 `[A-Za-z0-9_-]` 令牌，但未处理 URL/JSON/HTML 转义的邮箱（如 `%40`、`\u0040`、`&#64;`）、base64 编码的短邮箱、含 `+`/`/`/`. ` 分隔的长令牌、点号被编码或拆成短段的 JWT，以及不足 32 字符的短令牌（目前无证据表明真实上游错误文本含这些形式）。
+  - **C4（白名单未校验保留字段内容类型）**：`copySignIn` 按字段名白名单保留并检查被丢弃字段值是否出现在保留字段中，但尚未校验保留字段本身的值类型与格式（例如限制令牌必须是不含 `{}"` 和空白的字符串、`scopes` 必须是形如 `^[a-z_]+:[a-z_:]+$` 的字符串数组）；三种真实凭据文件形状均正常。
+  - **C6（单元测试未覆盖的 7 个变异）**：第六轮变异测试的 19 个变异中有 7 个未被现有单测捕获（`stripEffortSuffix` 改为 `startsWith`、`copySignIn` 去掉 `refresh` 短值规则、被丢弃字段名不脱敏、数组递归分支、嵌套遍历限制、Grok 账户正则放宽、CLI 写文件 `0600` 权限检查），当前代码行为正确，后续可补齐对应回归断言。
 - **隔离修复之前的探测曾在主机上启动 Claude Code**：2026-11-07 01:18–01:28 UTC 的几次探测以这种方式运行了主机的 Claude Code。主机 `~/.claude/.credentials.json` 在 01:27:45 刷新过一次，距其中一次启动 2 秒，当时访问令牌剩余不足 5 分钟；也不排除是主机上其他 Claude 会话触发的。令牌是在主机文件内正常轮换的，没有掉线，`~/.claude.json` 和 `~/.claude/projects` 没有留下探测记录，也没有残留进程。
 - **"不带字段"的证据范围**：真实上游的入站请求抓不到。证据是 Magpie 发往 provider 之前的 `onProvider` 观察结果（`test/fixtures/route-observer`）、上游返回 200，以及插件关闭时能看到标记的对照。
 - **`effort` 也只验证到 provider 边界**：路由选的档位在观察插件处与 mock 一致。Claude Code 和 Grok 实际按什么档位运行，没有单独验证。
@@ -291,7 +301,7 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
 - **第三方代码**：Grok 这一组会在沙盒里安装 Grok 插件和 Grok Build，并把访问令牌交给它们。插件版本没有固定（查过 0.2.4 的 README 和源码中的地址：请求发往 `cli-chat-proxy.grok.com`，刷新走 `auth.x.ai`，副本没有刷新令牌），没有做完整审查；Grok Build 是厂商的程序，也没有审查。
 - **未设置 `REAL_*_AUTH` 时**：对应账户不跑；一个都没设时 Scenario 13 记为 `skipped`，其余场景照常运行。
 
-凭据残留检查（只统计命中数，不输出值）：工作区文件、`origin/main..HEAD` 的补丁、工作区 diff 和测试日志中，三个登录文件里长度 16 以上的字符串（全文、前 32 字符、JWT 的中段和签名段）以及 Codex `id_token` 里的邮箱，令牌和账户标识的命中数都是 0。唯一的命中是公开地址 `https://auth.x.ai`（`oidc_issuer` 的值），在单元测试的假账户键里。这一检查在提交前还发现过 Grok 的 OAuth client ID 混进了这个测试夹具，已换成虚构值，没有进入任何提交。
+凭据残留检查（只统计命中数，不输出值）：工作区文件、`origin/main..HEAD` 的补丁、工作区 diff、测试日志以及 `%TEMP%\wsl-crashes` 中，三个登录文件里长度 16 以上的字符串（全文、前 32 字符、JWT 的中段和签名段）以及 Codex `id_token` 里的邮箱，令牌和账户标识的命中数都是 0。唯一的命中是公开地址 `https://auth.x.ai`（`oidc_issuer` 的值），在单元测试的假账户键里。这一检查在提交前还发现过 Grok 的 OAuth client ID 混进了这个测试夹具，已换成虚构值，没有进入任何提交。
 
 ### 4.5 `gpt-5.3-codex-spark` 的目录条目
 

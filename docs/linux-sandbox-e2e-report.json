@@ -1,12 +1,12 @@
 {
-  "timestamp": "2026-11-07T03:22:43.511Z",
+  "timestamp": "2026-11-07T05:33:56.620Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
   "magpieVersion": "magpie 0.1.2891",
   "magpieBinarySha256": "ffa0785ccc41d093c8fdbc96351372c5f2553dc2cb67e5b0ec2b0fa8e3488c09",
-  "pluginCommit": "1156694",
+  "pluginCommit": "c5d59e8",
   "baselineCommit": "ab8baba",
   "scenarios": {
     "scenario1_cli_lifecycle": {
@@ -31,9 +31,9 @@
       "carrierStripped": true,
       "scorerCalls": 0,
       "configuredScorerDelayMs": 1600,
-      "routedElapsedMs": 4,
-      "baselineElapsedMs": 2,
-      "overheadMs": 2,
+      "routedElapsedMs": 5,
+      "baselineElapsedMs": 1,
+      "overheadMs": 4,
       "noCandidateModelsStatus": 400
     },
     "scenario4_model_dna_differentiation": {
@@ -65,7 +65,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 306,
+      "timeoutFallbackElapsedMs": 307,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     "scenario7_mode_b_systemone_group": {
@@ -139,7 +139,7 @@
         "rows": 48,
         "diffs": 0,
         "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 31
+        "originMainRowsThatFlipOnThePool": 36
       }
     },
     "scenario10_realtime_routing": {
@@ -187,10 +187,10 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 11,
-          "claude-opus-5-5:xhigh": 9
+          "claude-opus-5-5:medium": 17,
+          "claude-opus-5-5:xhigh": 3
         },
-        "differFromTurn1": 9,
+        "differFromTurn1": 3,
         "asserted": false
       },
       "explicitFalse": {
@@ -210,9 +210,9 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:23:01 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:34:17 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     "scenario13_real_upstream": {
@@ -221,9 +221,15 @@
         "signInFilesVisible": false,
         "hostDrivesReadable": false,
         "hostMountsLeft": 0,
+        "x11SocketVisible": false,
         "cmdExe": "refused",
         "windowsProgramOnTmpfs": "refused",
-        "pidNamespace": true
+        "pidNamespace": true,
+        "uid": 65534,
+        "coreLimit": "1:1",
+        "mountDrvfs": "refused",
+        "umountWsl": "refused",
+        "writeCorePattern": "refused"
       },
       "accounts": {
         "codex": {
@@ -246,23 +252,23 @@
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 9143,
+              "ms": 8314,
               "status": 200
             },
             "realtime": {
               "real": "gpt-6.1-sol:medium",
               "mock": "gpt-6.1-sol:medium",
-              "ms": 8055,
+              "ms": 7164,
               "status": 200
             },
             "realtimeResponses": {
               "real": "gpt-6.1-sol:medium",
-              "ms": 5737,
+              "ms": 10629,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1582,
+              "ms": 1714,
               "status": 200
             }
           },
@@ -277,18 +283,18 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3197,
-              7859
+              3229,
+              12693
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
             "disagreements": [
               {
-                "id": "realtime_loop_api_orderbook_arbitrage_cn",
-                "expected": true,
-                "got": true,
-                "expectedKind": "tool_execution",
-                "gotKind": "computer_use"
+                "id": "non_realtime_fix_flash_sale_bot_en",
+                "expected": false,
+                "got": false,
+                "expectedKind": "debug_review",
+                "gotKind": "general_implementation"
               }
             ]
           }
@@ -314,23 +320,23 @@
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 7245,
+              "ms": 7546,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 27842,
+              "ms": 30518,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 27982,
+              "ms": 26661,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 2445,
+              "ms": 2514,
               "status": 200
             }
           },
@@ -345,26 +351,12 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              2511,
-              5779
+              2726,
+              5994
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "9/12",
+            "workKindAgreement": "11/12",
             "disagreements": [
-              {
-                "id": "realtime_loop_api_orderbook_arbitrage_cn",
-                "expected": true,
-                "got": true,
-                "expectedKind": "tool_execution",
-                "gotKind": "debug_review"
-              },
-              {
-                "id": "non_realtime_write_ticket_script_cn",
-                "expected": false,
-                "got": false,
-                "expectedKind": "general_implementation",
-                "gotKind": "self_contained_code"
-              },
               {
                 "id": "non_realtime_analyze_orderbook_latency_en",
                 "expected": false,
@@ -405,23 +397,23 @@
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 11896,
+              "ms": 33948,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 18191,
+              "ms": 15508,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 13249,
+              "ms": 13993,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 1806,
+              "ms": 2435,
               "status": 200
             }
           },
@@ -436,8 +428,8 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              12421,
-              24997
+              10057,
+              25323
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
@@ -467,8 +459,8 @@
       "test": "Scenario 3: Mode A latency/budget (`agentcompass/auto` -> middleware.js [moejs]; 1,600ms scorer configured but never called; no candidateModels -> 400)",
       "routedModel": "claude-opus-5-5",
       "routedEffort": "xhigh",
-      "routedElapsedMs": 4,
-      "overheadMs": 2,
+      "routedElapsedMs": 5,
+      "overheadMs": 4,
       "pass": true
     },
     {
@@ -491,7 +483,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 306,
+      "timeoutFallbackElapsedMs": 307,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     {
@@ -568,7 +560,7 @@
         "rows": 48,
         "diffs": 0,
         "rowsComparedOnBothBuilds": 47,
-        "originMainRowsThatFlipOnThePool": 31
+        "originMainRowsThatFlipOnThePool": 36
       }
     },
     {
@@ -618,10 +610,10 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:medium": 11,
-          "claude-opus-5-5:xhigh": 9
+          "claude-opus-5-5:medium": 17,
+          "claude-opus-5-5:xhigh": 3
         },
-        "differFromTurn1": 9,
+        "differFromTurn1": 3,
         "asserted": false
       },
       "explicitFalse": {
@@ -642,9 +634,9 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:23:00 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:23:01 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:34:16 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:34:17 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     {
@@ -654,9 +646,15 @@
         "signInFilesVisible": false,
         "hostDrivesReadable": false,
         "hostMountsLeft": 0,
+        "x11SocketVisible": false,
         "cmdExe": "refused",
         "windowsProgramOnTmpfs": "refused",
-        "pidNamespace": true
+        "pidNamespace": true,
+        "uid": 65534,
+        "coreLimit": "1:1",
+        "mountDrvfs": "refused",
+        "umountWsl": "refused",
+        "writeCorePattern": "refused"
       },
       "accounts": {
         "codex": {
@@ -679,23 +677,23 @@
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 9143,
+              "ms": 8314,
               "status": 200
             },
             "realtime": {
               "real": "gpt-6.1-sol:medium",
               "mock": "gpt-6.1-sol:medium",
-              "ms": 8055,
+              "ms": 7164,
               "status": 200
             },
             "realtimeResponses": {
               "real": "gpt-6.1-sol:medium",
-              "ms": 5737,
+              "ms": 10629,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1582,
+              "ms": 1714,
               "status": 200
             }
           },
@@ -710,18 +708,18 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3197,
-              7859
+              3229,
+              12693
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
             "disagreements": [
               {
-                "id": "realtime_loop_api_orderbook_arbitrage_cn",
-                "expected": true,
-                "got": true,
-                "expectedKind": "tool_execution",
-                "gotKind": "computer_use"
+                "id": "non_realtime_fix_flash_sale_bot_en",
+                "expected": false,
+                "got": false,
+                "expectedKind": "debug_review",
+                "gotKind": "general_implementation"
               }
             ]
           }
@@ -747,23 +745,23 @@
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 7245,
+              "ms": 7546,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 27842,
+              "ms": 30518,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 27982,
+              "ms": 26661,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 2445,
+              "ms": 2514,
               "status": 200
             }
           },
@@ -778,26 +776,12 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              2511,
-              5779
+              2726,
+              5994
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "9/12",
+            "workKindAgreement": "11/12",
             "disagreements": [
-              {
-                "id": "realtime_loop_api_orderbook_arbitrage_cn",
-                "expected": true,
-                "got": true,
-                "expectedKind": "tool_execution",
-                "gotKind": "debug_review"
-              },
-              {
-                "id": "non_realtime_write_ticket_script_cn",
-                "expected": false,
-                "got": false,
-                "expectedKind": "general_implementation",
-                "gotKind": "self_contained_code"
-              },
               {
                 "id": "non_realtime_analyze_orderbook_latency_en",
                 "expected": false,
@@ -838,23 +822,23 @@
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 11896,
+              "ms": 33948,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 18191,
+              "ms": 15508,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 13249,
+              "ms": 13993,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 1806,
+              "ms": 2435,
               "status": 200
             }
           },
@@ -869,8 +853,8 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              12421,
-              24997
+              10057,
+              25323
             ],
             "realtimeLoopAgreement": "12/12",
             "workKindAgreement": "11/12",
@@ -888,5 +872,5 @@
       }
     }
   ],
-  "hostEffortReadyMs": 1077
+  "hostEffortReadyMs": 1087
 }

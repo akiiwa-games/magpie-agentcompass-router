@@ -1,17 +1,17 @@
 {
-  "timestamp": "2026-11-07T03:31:28.507Z",
+  "timestamp": "2026-11-07T05:44:08.486Z",
   "platform": "linux",
   "arch": "x64",
   "release": "6.18.40.1-microsoft-standard-WSL2",
   "sandboxRoot": "/run/magpie-sandbox",
   "magpieVersion": "magpie 0.1.3196",
   "magpieBinarySha256": "b82e24ceb937e9d1470e44754224c2ac68a8578612c31d3768dd50bbb90941f0",
-  "pluginCommit": "1156694",
+  "pluginCommit": "c5d59e8",
   "baselineCommit": "ab8baba",
   "scenarios": {
     "scenario1_cli_lifecycle": {
       "pass": true,
-      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  gateway middleware  onRequest, onAccount, onProvider, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure\n  agentcompass (AgentCompass, 1 models)  signed in\n2026/11/07 03:31:28 plugin: host starts with no proxy NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt NODE_USE_SYSTEM_CA=1",
+      "pluginListOutput": "/run/magpie-sandbox/agentcompass  on\n  gateway middleware  onRequest, onAccount, onProvider, onResponse · routings agentcompass/agentcompass, agentcompass/agentcompass-pure\n  agentcompass (AgentCompass, 1 models)  signed in\n2026/11/07 05:44:08 plugin: host starts with no proxy NODE_EXTRA_CA_CERTS=/etc/ssl/certs/ca-certificates.crt NODE_USE_SYSTEM_CA=1",
       "magpieName": "AgentCompass",
       "hasSvgDataUriIcon": true
     },
@@ -31,9 +31,9 @@
       "carrierStripped": true,
       "scorerCalls": 0,
       "configuredScorerDelayMs": 1600,
-      "routedElapsedMs": 3,
+      "routedElapsedMs": 4,
       "baselineElapsedMs": 2,
-      "overheadMs": 1,
+      "overheadMs": 2,
       "noCandidateModelsStatus": 400
     },
     "scenario4_model_dna_differentiation": {
@@ -65,7 +65,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 306,
+      "timeoutFallbackElapsedMs": 308,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     "scenario7_mode_b_systemone_group": {
@@ -187,15 +187,15 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:xhigh": 7,
-          "claude-opus-5-5:medium": 13
+          "claude-opus-5-5:medium": 16,
+          "claude-opus-5-5:xhigh": 4
         },
-        "differFromTurn1": 7,
+        "differFromTurn1": 4,
         "asserted": false
       },
       "explicitFalse": {
         "realtime": "gpt-6-astra:medium",
-        "afterFalse": "gpt-6-astra:high"
+        "afterFalse": "gemini-4-argon-high:high"
       },
       "anthropic": [
         "claude-opus-5-5:null",
@@ -210,9 +210,9 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 03:31:45 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:31:45 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:31:46 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 05:44:29 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:44:29 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:44:30 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     "scenario13_real_upstream": {
@@ -221,9 +221,15 @@
         "signInFilesVisible": false,
         "hostDrivesReadable": false,
         "hostMountsLeft": 0,
+        "x11SocketVisible": false,
         "cmdExe": "refused",
         "windowsProgramOnTmpfs": "refused",
-        "pidNamespace": true
+        "pidNamespace": true,
+        "uid": 65534,
+        "coreLimit": "1:1",
+        "mountDrvfs": "refused",
+        "umountWsl": "refused",
+        "writeCorePattern": "refused"
       },
       "accounts": {
         "codex": {
@@ -246,23 +252,23 @@
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 10492,
+              "ms": 9852,
               "status": 200
             },
             "realtime": {
               "real": "gpt-6.1-sol:medium",
               "mock": "gpt-6.1-sol:medium",
-              "ms": 6853,
+              "ms": 5937,
               "status": 200
             },
             "realtimeResponses": {
               "real": "gpt-6.1-sol:medium",
-              "ms": 6754,
+              "ms": 6846,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1659,
+              "ms": 2062,
               "status": 200
             }
           },
@@ -277,12 +283,27 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3226,
-              7890
+              3229,
+              11955
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "12/12",
-            "disagreements": []
+            "workKindAgreement": "10/12",
+            "disagreements": [
+              {
+                "id": "non_realtime_write_ticket_script_cn",
+                "expected": false,
+                "got": false,
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
+              },
+              {
+                "id": "non_realtime_fix_flash_sale_bot_en",
+                "expected": false,
+                "got": false,
+                "expectedKind": "debug_review",
+                "gotKind": "general_implementation"
+              }
+            ]
           }
         },
         "claude": {
@@ -306,23 +327,23 @@
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 6237,
+              "ms": 8881,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 30517,
+              "ms": 26653,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 41896,
+              "ms": 25305,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 3224,
+              "ms": 2820,
               "status": 200
             }
           },
@@ -337,12 +358,19 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              2480,
-              6819
+              2681,
+              6842
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "11/12",
+            "workKindAgreement": "10/12",
             "disagreements": [
+              {
+                "id": "realtime_loop_course_polling_click_cn",
+                "expected": true,
+                "got": true,
+                "expectedKind": "computer_use",
+                "gotKind": "tool_execution"
+              },
               {
                 "id": "non_realtime_analyze_orderbook_latency_en",
                 "expected": false,
@@ -383,23 +411,23 @@
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 36890,
+              "ms": 21266,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 20157,
+              "ms": 16891,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 17000,
+              "ms": 18965,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 2102,
+              "ms": 1920,
               "status": 200
             }
           },
@@ -414,19 +442,12 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              8932,
-              25798
+              7950,
+              21277
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "10/12",
+            "workKindAgreement": "11/12",
             "disagreements": [
-              {
-                "id": "non_realtime_write_ticket_script_cn",
-                "expected": false,
-                "got": false,
-                "expectedKind": "general_implementation",
-                "gotKind": "self_contained_code"
-              },
               {
                 "id": "non_realtime_design_realtime_trading_dashboard_cn",
                 "expected": false,
@@ -452,8 +473,8 @@
       "test": "Scenario 3: Mode A latency/budget (`agentcompass/auto` -> middleware.js [moejs]; 1,600ms scorer configured but never called; no candidateModels -> 400)",
       "routedModel": "claude-opus-5-5",
       "routedEffort": "xhigh",
-      "routedElapsedMs": 3,
-      "overheadMs": 1,
+      "routedElapsedMs": 4,
+      "overheadMs": 2,
       "pass": true
     },
     {
@@ -476,7 +497,7 @@
       "healthyScorerModeB": "gemini-4-argon-high",
       "http500FallbackModeB": "gemini-4-argon-high",
       "timeoutFallbackModeB": "gemini-4-argon-high",
-      "timeoutFallbackElapsedMs": 306,
+      "timeoutFallbackElapsedMs": 308,
       "modeAWithScorerDown": "gemini-3.8-flash-high"
     },
     {
@@ -603,15 +624,15 @@
       },
       "flaglessFollowups": {
         "routes": {
-          "claude-opus-5-5:xhigh": 7,
-          "claude-opus-5-5:medium": 13
+          "claude-opus-5-5:medium": 16,
+          "claude-opus-5-5:xhigh": 4
         },
-        "differFromTurn1": 7,
+        "differFromTurn1": 4,
         "asserted": false
       },
       "explicitFalse": {
         "realtime": "gpt-6-astra:medium",
-        "afterFalse": "gpt-6-astra:high"
+        "afterFalse": "gemini-4-argon-high:high"
       },
       "anthropic": [
         "claude-opus-5-5:null",
@@ -627,9 +648,9 @@
       "pinnedOpusXhigh": "claude-opus-5-5:xhigh",
       "withoutPin": "gpt-6-astra:medium",
       "warningLines": [
-        "2026/11/07 03:31:45 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:31:45 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
-        "2026/11/07 03:31:46 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
+        "2026/11/07 05:44:29 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:44:29 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/gemini-4-argon-high (gemini-4-argon-high@high) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection",
+        "2026/11/07 05:44:30 middleware /run/magpie-sandbox/agentcompass [warn]: agentcompass: pinned upstream/claude-opus-5-5 (claude-opus-5-5@xhigh) responsiveness 0.00 is below the realtime_loop floor 0.5 (too slow per turn for a live loop); kept per explicit user selection"
       ]
     },
     {
@@ -639,9 +660,15 @@
         "signInFilesVisible": false,
         "hostDrivesReadable": false,
         "hostMountsLeft": 0,
+        "x11SocketVisible": false,
         "cmdExe": "refused",
         "windowsProgramOnTmpfs": "refused",
-        "pidNamespace": true
+        "pidNamespace": true,
+        "uid": 65534,
+        "coreLimit": "1:1",
+        "mountDrvfs": "refused",
+        "umountWsl": "refused",
+        "writeCorePattern": "refused"
       },
       "accounts": {
         "codex": {
@@ -664,23 +691,23 @@
             "nonRealtime": {
               "real": "gpt-6.1-sol:high",
               "mock": "gpt-6.1-sol:high",
-              "ms": 10492,
+              "ms": 9852,
               "status": 200
             },
             "realtime": {
               "real": "gpt-6.1-sol:medium",
               "mock": "gpt-6.1-sol:medium",
-              "ms": 6853,
+              "ms": 5937,
               "status": 200
             },
             "realtimeResponses": {
               "real": "gpt-6.1-sol:medium",
-              "ms": 6754,
+              "ms": 6846,
               "status": 200
             },
             "namedDirectly": {
               "real": "gpt-6-luna:null",
-              "ms": 1659,
+              "ms": 2062,
               "status": 200
             }
           },
@@ -695,12 +722,27 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              3226,
-              7890
+              3229,
+              11955
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "12/12",
-            "disagreements": []
+            "workKindAgreement": "10/12",
+            "disagreements": [
+              {
+                "id": "non_realtime_write_ticket_script_cn",
+                "expected": false,
+                "got": false,
+                "expectedKind": "general_implementation",
+                "gotKind": "self_contained_code"
+              },
+              {
+                "id": "non_realtime_fix_flash_sale_bot_en",
+                "expected": false,
+                "got": false,
+                "expectedKind": "debug_review",
+                "gotKind": "general_implementation"
+              }
+            ]
           }
         },
         "claude": {
@@ -724,23 +766,23 @@
             "nonRealtime": {
               "real": "claude-opus-5-5:medium",
               "mock": "claude-opus-5-5:medium",
-              "ms": 6237,
+              "ms": 8881,
               "status": 200
             },
             "realtime": {
               "real": "claude-sonnet-5-5:medium",
               "mock": "claude-sonnet-5-5:medium",
-              "ms": 30517,
+              "ms": 26653,
               "status": 200
             },
             "realtimeResponses": {
               "real": "claude-sonnet-5-5:medium",
-              "ms": 41896,
+              "ms": 25305,
               "status": 200
             },
             "namedDirectly": {
               "real": "claude-haiku-5-5:null",
-              "ms": 3224,
+              "ms": 2820,
               "status": 200
             }
           },
@@ -755,12 +797,19 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              2480,
-              6819
+              2681,
+              6842
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "11/12",
+            "workKindAgreement": "10/12",
             "disagreements": [
+              {
+                "id": "realtime_loop_course_polling_click_cn",
+                "expected": true,
+                "got": true,
+                "expectedKind": "computer_use",
+                "gotKind": "tool_execution"
+              },
               {
                 "id": "non_realtime_analyze_orderbook_latency_en",
                 "expected": false,
@@ -801,23 +850,23 @@
             "nonRealtime": {
               "real": "grok-4.7:high",
               "mock": "grok-4.7:high",
-              "ms": 36890,
+              "ms": 21266,
               "status": 200
             },
             "realtime": {
               "real": "grok-4.7:low",
               "mock": "grok-4.7:low",
-              "ms": 20157,
+              "ms": 16891,
               "status": 200
             },
             "realtimeResponses": {
               "real": "grok-4.7:low",
-              "ms": 17000,
+              "ms": 18965,
               "status": 200
             },
             "namedDirectly": {
               "real": "grok-4.7-build-fast:null",
-              "ms": 2102,
+              "ms": 1920,
               "status": 200
             }
           },
@@ -832,19 +881,12 @@
             "cases": 12,
             "answered": 12,
             "msPerCase": [
-              8932,
-              25798
+              7950,
+              21277
             ],
             "realtimeLoopAgreement": "12/12",
-            "workKindAgreement": "10/12",
+            "workKindAgreement": "11/12",
             "disagreements": [
-              {
-                "id": "non_realtime_write_ticket_script_cn",
-                "expected": false,
-                "got": false,
-                "expectedKind": "general_implementation",
-                "gotKind": "self_contained_code"
-              },
               {
                 "id": "non_realtime_design_realtime_trading_dashboard_cn",
                 "expected": false,
@@ -858,5 +900,5 @@
       }
     }
   ],
-  "hostEffortReadyMs": 1075
+  "hostEffortReadyMs": 1080
 }
