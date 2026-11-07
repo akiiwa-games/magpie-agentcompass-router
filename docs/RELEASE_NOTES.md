@@ -4,12 +4,12 @@
 
 插件不再用正则、词表或消息长度猜任务类型。任务画像只来自分类模型或调用方传入的 `body.profile`。
 
-**升级影响**：靠 `agentcompass/auto` 或 `routeAllModels` 自动路由、又没有配分类模型的用户，请求会变成未路由，响应和日志里带 `未路由：分类不可用`。如果也没配 `defaultModel`，`agentcompass/auto` 这个名字会原样发给上游，通常得到 404。
+**升级影响**：Mode A（中间件）访问不了分类模型，所以靠 `agentcompass/auto` 或 `routeAllModels` 走 Mode A 自动路由的用户，如果客户端不传 `body.profile`，请求会变成未路由，响应和日志里带 `未路由：分类不可用`。如果也没配 `defaultModel`，`agentcompass/auto` 这个名字没有对应的模型，通常得到 404。
 
 **处理办法**（任选其一）：
 
-- 配分类模型：`allowExternalScorer: true` 加 `scorerBaseUrl`、`scorerCommand` 或 `scorer`。
-- 调用方在请求里传 `body.profile`。
+- 改用 Mode B（`/v1/systemone` 路由组）并配分类模型：`allowExternalScorer: true` 加 `scorerBaseUrl`、`scorerCommand` 或 `scorer`。只配分类模型、继续走 Mode A 不会恢复路由。
+- 客户端每次请求都传 `body.profile`。
 - 只想要一个固定回退时配 `defaultModel`，这时请求不做路由。
 
 直接请求具体模型的用户不受影响。各入口的行为见 README 的 `Without a classifier` / `没有分类模型时`。

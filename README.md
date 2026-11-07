@@ -100,6 +100,7 @@ An unrouted request records nothing in the session store, so it starts no sessio
 ### Known limitations
 
 - **Mode A can't ask a classifier.** The package ships no `magpie.hooks` and `moejs` has no network, so on Mode A a profile comes with the request or not at all.
+- **Mode A can't read a quotas file.** `moejs` has no file system, so a `quotasPath` there always reports `quotas_unreadable: missing`, even when the file exists. Give Mode A its readings inline with `quotas`, or use the file from `/v1/systemone`.
 - **A client that sends `body.profile` sends it on every request of a session.** Magpie hands each request a pooled runtime, and only a runtime that served the session has anything to hold it by. In the sandbox a tool-loop step sent with no profile mid-session was held on 4 to 10 of 20 requests and got Magpie's 404 on the rest.
 - **A request carries this turn's answer, and no earlier one's.** A new turn with a different profile holds on a runtime that served the session and goes where the new profile says on one that didn't (3 to 5 of 20 in the sandbox for a realtime session). With the same profile on every turn nothing moves.
 - **A warm session doesn't ask the classifier about each new turn.** Holds run first, so a harder task in a warm session on a light model moves only if the caller's profile says so.
@@ -293,6 +294,7 @@ magpie group set <group> effort=auto classifier=agentcompass/agentcompass-system
 #### 已知限制
 
 - **模式 A 问不了分类模型。** 包里没有 `magpie.hooks`，`moejs` 没有网络，模式 A 的画像只能随请求带来。
+- **模式 A 读不了配额文件。** `moejs` 没有文件系统，在这里配 `quotasPath` 总是报 `quotas_unreadable: missing`，文件存在时也一样。模式 A 请用 `quotas` 直接传读数，或者在 `/v1/systemone` 上用配额文件。
 - **客户端用 `body.profile` 时，会话的每个请求都要带。** Magpie 给每个请求分配池里的运行时，只有服务过该会话的运行时才能保持。沙盒里会话中途不带画像的工具循环请求，20 次中有 4 到 10 次被保持，其余收到 Magpie 的 404。
 - **请求只带当前轮的答案，不带前一轮的。** 新一轮画像变了时，服务过该会话的运行时保持，没服务过的按新画像走（沙盒里实时会话 20 次中有 3 到 5 次）。每轮画像不变则不会移动。
 - **温会话不会每轮都问分类模型。** 保持判断在前，所以轻量模型上的温会话遇到更难的任务时，只有调用方画像说明了才会移动。
