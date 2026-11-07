@@ -103,7 +103,7 @@ An unrouted request records nothing in the session store, so it starts no sessio
 - **A request carries this turn's answer, and no earlier one's.** A new turn with a different profile holds on a runtime that served the session and goes where the new profile says on one that didn't (4 of 20 in the sandbox for a realtime session). With the same profile on every turn nothing moves.
 - **A warm session doesn't ask the classifier about each new turn.** Holds run first, so a harder task in a warm session on a light model moves only if the caller's profile says so.
 - **Streams aren't annotated.** A stream goes through `onEvent`, which the plugin doesn't export, so a streamed reply says nothing of not being routed; Magpie's log does.
-- **The classifier sees the first and last 4000 characters** of a long turn (`capTextSlice`), to bound the work.
+- **The classifier sees a bounded part of a long turn**, to bound the work: a request's text is cut to 4,000 characters, head and tail, when it is extracted (`capTextSlice`), and the `openai_compatible` classifier is sent at most 12,000 of what it is given.
 
 ### Names by install source
 
@@ -287,7 +287,7 @@ magpie group set <group> effort=auto classifier=agentcompass/agentcompass-system
 - **请求只带当前轮的答案，不带前一轮的。** 新一轮画像变了时，服务过该会话的运行时保持，没服务过的按新画像走（沙盒里实时会话 20 次中有 4 次）。每轮画像不变则不会移动。
 - **温会话不会每轮都问分类模型。** 保持判断在前，所以轻量模型上的温会话遇到更难的任务时，只有调用方画像说明了才会移动。
 - **流式回复没有标注。** 流式走 `onEvent`，插件没有导出它，所以流式回复不会说明未路由；日志会写。
-- **分类模型只看长文本的首尾各 4000 字符**（`capTextSlice`），用于限制工作量。
+- **分类模型只看长文本的一部分**，用于限制工作量：提取请求文本时截成首尾合计 4000 字符（`capTextSlice`），`openai_compatible` 分类模型最多收到传给它的前 12000 字符。
 
 #### 各安装来源下的名称
 
