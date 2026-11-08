@@ -2496,7 +2496,12 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
     "deepseek-v4.1-flash-free",
   ].map((m) => `upstream/${m}`);
   const t0 = 1_700_000_000_000;
-  const runtime = (store, now, profile) => ({ protocol: "chat", state: {}, ...(profile ? { profile } : {}), options: { candidateModels, continuityStore: store, now } });
+  const runtime = (store, now, profile, affinityMode) => ({
+    protocol: "chat",
+    state: {},
+    ...(profile ? { profile } : {}),
+    options: { candidateModels, continuityStore: store, now, ...(affinityMode ? { affinityMode } : {}) },
+  });
   const first = {
     role: "user",
     content: "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.",
@@ -2563,8 +2568,8 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
     { role: "assistant", content: null, tool_calls: [{ id: "c3", type: "function", function: { name: "read_file", arguments: "{}" } }] },
     { role: "tool", tool_call_id: "c3", content: "package lock" },
   ];
-  const decide = (store, messages, at, profile) => {
-    const ctx = runtime(store, at, profile);
+  const decide = (store, messages, at, profile, affinityMode) => {
+    const ctx = runtime(store, at, profile, affinityMode);
     const out = mwOnRequest({ model: "agentcompass/auto", messages }, ctx);
     return { model: out.model, held: ctx.state.agentcompass?.continuation?.held, why: ctx.state.agentcompass?.continuation?.why };
   };
@@ -2586,6 +2591,223 @@ test("7.7 Pooled runtimes: two runtimes with their own stores agree on the turn-
   const loopE = decide(new SessionContinuityStore(), bigLoop, t0 + 30 * 60_000, auditTask);
   assert.equal(loopE.model, bigTurn1.model, "a tool loop holds turn 1's route on a fresh runtime whatever the pause");
   assert.equal(loopE.why, "turn");
+
+  // In `session` and `strict` affinity modes, the runtime with the record holds within 24h (`STICK_KEEP_MS`),
+  // and expires the session after 24h (`t0 + 25h`). A fresh runtime whose state is replayed from history
+  // (`ageKnown: false`) does not know the session's age, so past 24h both runtimes agree on going cold
+  // between turns while still holding an in-turn tool loop.
+  for (const mode of ["session", "strict"]) {
+    const within24hStore = new SessionContinuityStore();
+    mwOnRequest({ model: "agentcompass/auto", messages: [big] }, runtime(within24hStore, t0, auditTask, mode));
+    const heldWithin24h = decide(within24hStore, bigBulk, t0 + 30 * 60_000, bulkTask, mode);
+    assert.equal(heldWithin24h.held, true, `${mode}: runtime with record holds within 24h`);
+    assert.equal(heldWithin24h.why, mode);
+    assert.equal(heldWithin24h.model, bigTurn1.model);
+
+    for (const [label, messages, profile] of [
+      [`${mode} mode: "继续" 25 h later`, bigFollow, nudge],
+      [`${mode} mode: a new mechanical turn 25 h later`, bigBulk, bulkTask],
+    ]) {
+      const withRecord = new SessionContinuityStore();
+      mwOnRequest({ model: "agentcompass/auto", messages: [big] }, runtime(withRecord, t0, auditTask, mode));
+      const a = decide(withRecord, messages, t0 + 25 * 3_600_000, profile, mode);
+      const b = decide(new SessionContinuityStore(), messages, t0 + 25 * 3_600_000, profile, mode);
+      assert.equal(a.held, false, `${label}: the runtime with the record expires the session past 24h (${a.why})`);
+      assert.equal(a.why, "cold");
+      assert.deepEqual(b, a, `${label}: a fresh runtime agrees with the runtime that has the record past 24h`);
+    }
+
+    const loopMode = decide(new SessionContinuityStore(), bigLoop, t0 + 25 * 3_600_000, auditTask, mode);
+    assert.equal(loopMode.model, bigTurn1.model, `${mode}: a tool loop still holds turn 1's route on a fresh runtime`);
+    assert.equal(loopMode.why, "turn");
+  }
+});
+
+test("7.8 All candidate accounts unavailable returns accounts_unavailable refusal code, while capability or effort exclusion stays no_route", async () => {
+  const nowMs = Date.parse("2026-04-12T12:00:00Z");
+  const allUnavailableQuotas = {
+    updated_at: "2026-04-12T11:55:00Z",
+    accounts: {
+      "claude:main": {
+        provider: "claude",
+        label: "main",
+        status: "auth_failed",
+        plan_type: "max_20x",
+        five_hour: { remaining: 80, reset_at: "2026-04-12T16:00:00Z" },
+        seven_day: { remaining: 80, reset_at: "2026-04-18T00:00:00Z" },
+      },
+      "codex:main": {
+        provider: "codex",
+        label: "main",
+        status: "plan_inactive",
+        plan_type: "free",
+        five_hour: { remaining: 80, reset_at: "2026-04-12T16:00:00Z" },
+        seven_day: { remaining: 80, reset_at: "2026-04-18T00:00:00Z" },
+      },
+      "grok:main": {
+        provider: "grok",
+        label: "main",
+        status: "usage_failing",
+        disabled: true,
+        five_hour: { remaining: 80, reset_at: "2026-04-12T16:00:00Z" },
+      },
+    },
+  };
+
+  const scenario13CPool = [
+    "claude/claude-opus-5-5",
+    "claude/claude-sonnet-5-5",
+    "codex/gpt-6.1-sol",
+    "codex/gpt-6-astra",
+    "grok/grok-4.7-build-fast",
+  ];
+
+  const codingObjective = "Perform a mechanical batch rename of `foo_bar` to `fooBar` across the JSON fixtures using a uniform rule.";
+  const coupledObjective = "Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.";
+
+  // 1. selectBestRoute & middleware 503 when all candidates are excluded due to account unavailability
+  const sel = selectBestRoute(codingObjective, {
+    candidateModels: scenario13CPool,
+    quotas: allUnavailableQuotas,
+    nowMs,
+  });
+  assert.equal(sel.ok, false);
+  assert.equal(sel.blocked, true);
+  assert.equal(sel.error, "accounts_unavailable");
+  assert.equal(sel.refusal, "accounts_unavailable: every candidate account is unavailable");
+
+  // Also on a coupled task when every candidate in the pool clears the floor and is excluded
+  // solely due to account unavailability
+  const selCoupled = selectBestRoute(coupledObjective, {
+    candidateModels: [
+      "claude/claude-opus-5-5",
+      "claude/claude-sonnet-5-5:high",
+      "codex/gpt-6.1-sol:high",
+      "codex/gpt-6-astra",
+    ],
+    quotas: allUnavailableQuotas,
+    nowMs,
+  });
+  assert.equal(selCoupled.ok, false);
+  assert.equal(selCoupled.error, "accounts_unavailable");
+  assert.equal(selCoupled.refusal, "accounts_unavailable: every candidate account is unavailable");
+
+  let rejected = null;
+  const warnings = [];
+  const origWarn = console.warn;
+  console.warn = (...args) => warnings.push(args.join(" "));
+  try {
+    mwOnRequest(
+      {
+        model: "agentcompass/auto",
+        messages: [{ role: "user", content: codingObjective }],
+      },
+      {
+        protocol: "chat",
+        state: {},
+        options: {
+          candidateModels: scenario13CPool,
+          quotas: allUnavailableQuotas,
+          nowMs,
+        },
+        reject(status, message) {
+          rejected = { status, message };
+        },
+      }
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+  assert.deepEqual(rejected, {
+    status: 503,
+    message: "agentcompass: accounts_unavailable: every candidate account is unavailable",
+  });
+  assert.ok(!rejected.message.includes("claude:main") && !rejected.message.includes("codex:main"));
+  assert.ok(warnings.some((w) => w.includes("claude:main: auth_failed") && w.includes("codex:main: plan_inactive")));
+
+  // 2. Hook and System-One synthetic refusal honor accounts_unavailable without leaking pool details
+  let hookRejected = null;
+  const hookBody = {
+    model: "agentcompass/auto",
+    messages: [{ role: "user", content: codingObjective }],
+  };
+  const hookCtx = {
+    state: {},
+    options: {
+      candidateModels: scenario13CPool,
+      quotas: allUnavailableQuotas,
+      nowMs,
+    },
+    reject(status, message) {
+      hookRejected = { status, message };
+    },
+  };
+  await hookOnRequest(hookBody, hookCtx);
+  assert.deepEqual(hookRejected, {
+    status: 503,
+    message: "agentcompass: accounts_unavailable: every candidate account is unavailable",
+  });
+  const sys1 = await handleSystemOneRequest(
+    {
+      model: "agentcompass-systemone",
+      state: { turn: codingObjective, quotas: allUnavailableQuotas },
+      questions: { intent: { criteria: {} } },
+    },
+    {
+      candidateModels: scenario13CPool,
+      now: nowMs,
+    }
+  );
+  assert.deepEqual(sys1.agentcompass, {
+    targetModel: null,
+    blocked: true,
+    error: "accounts_unavailable",
+    message: "every candidate account is unavailable",
+  });
+
+  // 3. If any candidate in the pool is excluded due to capability or effort, refusal stays no_route
+  const baseProfile = classifierAnswer(coupledObjective);
+  // 3a. Capability exclusion: grok-4.7-build-fast cannot serve a visual task (`needs_visual: true`)
+  const visualSel = selectBestRoute(
+    { ...baseProfile, needs_visual: true },
+    {
+      candidateModels: ["claude/claude-opus-5-5", "grok/grok-4.7-build-fast"],
+      quotas: allUnavailableQuotas,
+      nowMs,
+    }
+  );
+  assert.equal(visualSel.ok, false);
+  assert.equal(visualSel.refusal, "no_route: no candidate can serve this request");
+
+  // 3b. Ability floor exclusion on a model whose highest effort cannot clear the floor (`claude-haiku-5-5` on coupled)
+  const floorModelSel = selectBestRoute(coupledObjective, {
+    candidateModels: ["claude/claude-opus-5-5", "claude/claude-haiku-5-5"],
+    quotas: allUnavailableQuotas,
+    nowMs,
+  });
+  assert.equal(floorModelSel.ok, false);
+  assert.equal(floorModelSel.refusal, "no_route: no candidate can serve this request");
+
+  // 3c. Explicit effort exclusion below ability floor (`codex/gpt-6.1-sol:low` on a coupled task where floor is 3.60)
+  const explicitLowSel = selectBestRoute(baseProfile, {
+    candidateModels: ["claude/claude-opus-5-5:high", "codex/gpt-6.1-sol:low"],
+    quotas: allUnavailableQuotas,
+    nowMs,
+  });
+  assert.equal(explicitLowSel.ok, false);
+  assert.equal(explicitLowSel.refusal, "no_route: no candidate can serve this request");
+
+  // 3d. Explicit effort exclusion due to realtime_loop responsiveness (`codex/gpt-6-astra:high` on realtime_loop)
+  const rtSel = selectBestRoute(
+    { ...classifierAnswer(codingObjective), realtime_loop: true },
+    {
+      candidateModels: ["claude/claude-opus-5-5:medium", "codex/gpt-6-astra:high"],
+      quotas: allUnavailableQuotas,
+      nowMs,
+    }
+  );
+  assert.equal(rtSel.ok, false);
+  assert.equal(rtSel.refusal, "no_route: no candidate can serve this request");
 });
 
 const REALTIME_BASE_PROFILE = {

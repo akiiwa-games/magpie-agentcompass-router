@@ -8,6 +8,7 @@
  */
 
 import {
+  blockedRefusal,
   candidateOffers,
   effortGoneWarning,
   heldBundle,
@@ -378,6 +379,9 @@ export async function onRequest(body, ctx = {}) {
     const failedCarrier = {
       v: 1,
       ok: false,
+      blocked: true,
+      error: decision.error || "no_route",
+      refusal: decision.refusal,
       accountBlocked: true,
       reason: decision.reason || "no_eligible_candidate",
       targetModel: null,
@@ -414,7 +418,7 @@ export async function onRequest(body, ctx = {}) {
     ctx.state.sessionKey = sessionKey;
     ctx.state.route = failedCarrier;
     ctx.state.agentcompass = failedCarrier;
-    ctx.reject?.(503, `No eligible model/account available (${failedCarrier.reason}).`);
+    ctx.reject?.(503, `agentcompass: ${blockedRefusal(failedCarrier)}`);
     return undefined;
   }
 

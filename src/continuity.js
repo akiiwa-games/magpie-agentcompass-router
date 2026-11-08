@@ -889,7 +889,8 @@ export function effectiveRealtimeLoop(facts = {}, sessionState = null, options =
  *   - `"capability_outgrown"`: new turn requires visual/GUI/frontier capability the current model lacks
  *   - `"compacted"`: conversation was `/compact`-ed (token count dropped > 50%)
  *   - `"cold"`: KV cache TTL expired (`now - updatedAt > coldAfterMs`) or cache < 1024 tokens, or the state has no
- *     age (`ageKnown: false`, decided again from the history), so no TTL-gated hold applies
+ *     age (`ageKnown: false`, decided again from the history), so no age-gated hold (including the 24h session
+ *     retention in `session`/`strict` modes) applies
  *   - `"turn_mode"`: `affinityMode === "turn"` and request is a new user turn (`within === false`)
  *   - `"off"`: `affinityMode === "off"`
  */
@@ -1208,7 +1209,11 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     };
   }
 
-  if (affinityMode === "strict" || affinityMode === "session") {
+  // A state decided again from the history (`ageKnown: false`) has no age, so no age-gated hold
+  // (including the 24h session retention in `session`/`strict` modes) applies outside a tool loop.
+  const ageKnown = sessionState.ageKnown !== false;
+
+  if (ageKnown && (affinityMode === "strict" || affinityMode === "session")) {
     return {
       shouldHold: true,
       why: affinityMode,
@@ -1226,8 +1231,6 @@ export function evaluateProviderContinuation(facts = {}, sessionState = null, op
     ...sessionState,
     ...options,
   });
-  // A state decided again from the history (`ageKnown: false`) has no age, so it is never within a TTL
-  const ageKnown = sessionState.ageKnown !== false;
   const withinCacheTtl = ageKnown && ageMs <= ttlMs;
 
   // Warm KV cache hold (`tokens >= 1024` or `cached === true` within TTL)

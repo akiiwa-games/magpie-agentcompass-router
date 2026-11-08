@@ -1353,6 +1353,7 @@ export function evaluateAccountQuotaForModel(
       kind,
       state: accountEntry.state,
       eligible: false,
+      accountUnavailable: true,
       excluded: [`${accountEntry.key}: ${accountEntry.state}: ${accountEntry.reason}`],
       opportunity_cost: 0.0,
       reset_bonus: 0.0,
@@ -1549,6 +1550,7 @@ export function evaluateModelQuota(
     const allWarnings = [...new Set(normalized.flatMap((e) => e.warnings || []))];
     return {
       eligible: false,
+      accountUnavailable: true,
       warnings: allWarnings,
       excluded: expiredPool.map((e) => `${e.key}: ${e.state}: ${e.reason}`),
       account: expiredPool[0].key,
@@ -1592,6 +1594,7 @@ export function evaluateModelQuota(
   if (eligibleAccounts.length === 0) {
     return {
       eligible: false,
+      accountUnavailable: evaluations.length > 0 && evaluations.every((e) => e.accountUnavailable === true),
       warnings,
       excluded: evaluations.flatMap((e) => e.excluded),
       account: evaluations[0]?.account || null,

@@ -32,7 +32,8 @@ Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。�
 
 | 503 原因码 | 文案（前缀 `agentcompass: `） | 什么时候出现 |
 |---|---|---|
-| `no_route` | `no_route: no candidate can serve this request` | 没有点名，候选池里选不出模型 |
+| `no_route` | `no_route: no candidate can serve this request` | 没有点名，候选池里选不出模型（有候选因能力、档位或窗口余额被排除） |
+| `accounts_unavailable` | `accounts_unavailable: every candidate account is unavailable` | 没有点名，所有候选都因账户不可用被排除 |
 | `pin_not_in_pool` | `pin_not_in_pool: pinned model <名字> is not among the candidates` | 点名的模型不在候选池里 |
 | `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型不健康（旗舰，或点名的 family 名字） |
 | `model_unhealthy` | `model_unhealthy: the model of pinned bundle <名字> is marked unhealthy` | 点名的 bundle 所用的模型不健康 |
