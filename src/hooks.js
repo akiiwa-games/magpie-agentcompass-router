@@ -157,7 +157,7 @@ export async function onRequest(body, ctx = {}) {
   const store = options.continuityStore || defaultContinuityStore;
   const now = Number.isFinite(options.now) ? Number(options.now) : Date.now();
   const sessionKey = facts.sessionKey || computeSessionKey(body, ctx);
-  const sessionState = sessionKey ? store.get(sessionKey, now) : null;
+  const sessionState = sessionKey ? store.get(sessionKey, now, { keepExpired: true }) : null;
   const { candidateModels, hasExplicitCandidates, canRewriteModel } = resolveCandidateModels(
     body,
     ctx,

@@ -39,6 +39,7 @@ import {
 } from "./allocator.js";
 import { canonicalModel } from "./catalog.js";
 import {
+  STICK_KEEP_MS,
   bodyUpTo,
   computeSessionKey,
   defaultContinuityStore,
@@ -283,10 +284,9 @@ function replayedState(body, ctx, env, chain, stale, depth) {
     turn: earlier.facts.turn || 1,
     anchor: chain.prior.stamp,
     replayed: true,
-    // The history carries no time, so the age of a replayed turn is unknown: it holds only where age doesn't
-    // matter (the tool-loop lock, `within`), and any age-gated hold (`cache`, `realtime_loop`, and the 24h session
-    // retention in `session`/`strict` modes) counts as cold. Given an age of 0 instead, a fresh runtime would hold
-    // a session the runtime with the record lets go cold.
+    // The history carries no time, so the age of a replayed turn is unknown: in `cache` mode it holds only where
+    // age doesn't matter (the tool-loop lock, `within`), and a TTL-gated hold (`cache`, `realtime_loop`) counts
+    // as cold. Given an age of 0 instead, a fresh runtime would hold a session the runtime with the record lets go cold.
     ageKnown: false,
   };
 }
@@ -305,8 +305,10 @@ function routeClaimed(body, ctx, env, depth = 0) {
   const sessionKey = facts.sessionKey || computeSessionKey(body, ctx, facts.firstWords);
   const chain = turnChain(body, facts);
   const affinityMode = options.affinityMode || options.affinity || "cache";
-  let sessionState = sessionKey ? store.get(sessionKey, now) : null;
+  let sessionState = sessionKey ? store.get(sessionKey, now, { keepExpired: true }) : null;
+  const expiredRecord = Boolean(sessionState?.updatedAt && now - sessionState.updatedAt > STICK_KEEP_MS);
   if (
+    !expiredRecord &&
     affinityMode !== "off" &&
     chain?.prior &&
     (!sessionState || (sessionState.anchor && !chain.accepts.includes(sessionState.anchor)))

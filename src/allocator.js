@@ -1858,7 +1858,9 @@ export function evaluateCandidate(candidate, taskCtx, catalog = {}) {
   if (tooSlow && excluded.length === 1) {
     out.too_slow = true;
   }
-  if (nonQuotaExcludedCount === 0 && quotaEval && !quotaEval.eligible && quotaEval.accountUnavailable === true) {
+  if (nonQuotaExcludedCount > 0) {
+    out.non_quota_excluded = true;
+  } else if (quotaEval && !quotaEval.eligible && quotaEval.accountUnavailable === true) {
     out.account_unavailable = true;
   }
 
@@ -2367,7 +2369,13 @@ export function rankCandidates(profileInput, options = {}) {
     .filter((c) => !expanded.includes(c))
     .map((c) => {
       const row = evaluateCandidate(c, taskCtx, catalog);
-      return { ...row, eligible: false, account_unavailable: false, excluded: [whenFailure(c, taskCtx), ...row.excluded] };
+      return {
+        ...row,
+        eligible: false,
+        non_quota_excluded: true,
+        account_unavailable: false,
+        excluded: [whenFailure(c, taskCtx), ...row.excluded],
+      };
     });
 
   return {
@@ -2727,7 +2735,9 @@ const ACCOUNTS_UNAVAILABLE_REFUSAL = "accounts_unavailable: every candidate acco
 
 function allCandidatesAccountUnavailable(result) {
   const all = result.allCandidates;
-  return Array.isArray(all) && all.length > 0 && all.every((c) => c.account_unavailable === true);
+  if (!Array.isArray(all) || all.length === 0) return false;
+  const capable = all.filter((c) => !c.non_quota_excluded);
+  return capable.length > 0 && capable.every((c) => c.account_unavailable === true);
 }
 
 /** What a client hears when a route is refused: what it pinned, a code, one sentence. The pool and its quotas stay in the local log. */
