@@ -410,7 +410,10 @@ e2e_rc=0
 wait $! || e2e_rc=$?
 
 if [ -f "$SANDBOX/e2e-report.json" ]; then
-  cp "$SANDBOX/e2e-report.json" "${REPORT_OUT:-$REPO/docs/linux-sandbox-e2e-report.json}"
+  # A tracked report under docs/ is the record of one build: a run writes there only when REPORT_OUT names the file.
+  report_out="${REPORT_OUT:-$SYSTEM_TMP/magpie-sandbox-e2e-report.json}"
+  cp "$SANDBOX/e2e-report.json" "$report_out"
+  echo "report: $report_out"
 fi
 
 if [ -n "$HOST_SIGN_INS" ]; then
