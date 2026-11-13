@@ -1114,6 +1114,7 @@ async function main() {
       // 6c. Slower than scorerTimeoutMs -> not routed, quickly
       scorerForceStatus = 200;
       scorerDelayMs = 2000;
+      const calls6c = scorerCalls.length;
       const t6c = Date.now();
       const r6c = await groupReq(creative + " (variant c)");
       const timeoutElapsedMs = Date.now() - t6c;
@@ -1121,6 +1122,12 @@ async function main() {
       const up6c = lastUp();
       assert.equal(up6c.model, "gpt-6-luna");
       assert.ok(timeoutElapsedMs < 1500, `A classifier timeout should cost little (<1500ms), took ${timeoutElapsedMs}ms`);
+      // Magpie gave up on the call, but the double answers it after its delay and only then counts it. Wait for that, so that
+      // the call is not counted in the middle of a later scenario that asserts no classifier call.
+      for (let waited = 0; scorerCalls.length === calls6c && waited < scorerDelayMs + 3000; waited += 50) {
+        await new Promise((r) => setTimeout(r, 50));
+      }
+      assert.equal(scorerCalls.length, calls6c + 1, "the abandoned classifier call must have reached the double, and only once");
 
       // 6d. No classifier configured: not routed, no call
       await setPluginOptions(basePluginOptions);
@@ -1467,7 +1474,7 @@ async function main() {
       await setPluginOptions(basePluginOptions);
       assert.deepEqual(mismatches, [], `Every request must reach the upstream as the engine routes it: ${JSON.stringify(mismatches.slice(0, 5), null, 2)}`);
       assert.ok(routes.size >= 4, `The pools must exercise several routes: ${[...routes].join(", ")}`);
-      assert.equal(scorerCalls.length, scorerBefore9, "Mode A must not call a classifier");
+      assert.equal(scorerCalls.length, scorerBefore9, `Mode A must not call a classifier: ${JSON.stringify(scorerCalls.slice(scorerBefore9))}`);
 
       report.scenarios.scenario9_pools_names_and_protocols = { pass: true, requests: sent, distinctRoutes: routes.size, expectedPerPool: perPool };
       report.steps.push({
