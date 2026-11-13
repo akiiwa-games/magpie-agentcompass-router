@@ -3,57 +3,53 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { listQuotaAccounts, normalizeQuotaSnapshot } from "../src/index.js";
+import { buildFleet } from "../src/fleet.js";
+import { PLAN_CAPACITY } from "../src/reference-data.js";
 
 const T0 = 1_700_000_000_000;
 const HOUR = 3600 * 1000;
 const iso = (ms) => new Date(ms).toISOString();
 const win = (over = {}) => ({ name: "7d", remaining: 80, used: 20, resetHours: 100, ...over });
 
-const cap = (provider, plan, windowName = "7d") =>
-  normalizeQuotaSnapshot(
-    { [`${provider}/a`]: { kind: "subscription", plan, quota: { windows: [win({ name: windowName })] } } },
-    T0
-  )[0].windows[0].capacityUsd;
-const entry = (provider, plan) =>
-  normalizeQuotaSnapshot({ [`${provider}/a`]: { kind: "subscription", plan, quota: { windows: [win()] } } }, T0)[0];
+const account = (provider, plan, windowName = "7d", extra = {}) => {
+  const entries = normalizeQuotaSnapshot({ [`${provider}/a`]: { kind: "subscription", plan, ...extra, quota: { windows: [win({ name: windowName })] } } }, T0);
+  return { entry: entries[0], spec: buildFleet({ entries, nowMs: T0 }).fleet.accounts[`${provider}/a`] };
+};
+const cap = (provider, plan, windowId) => account(provider, plan, windowId).spec.capacity_usd[windowId];
+const entry = (provider, plan) => account(provider, plan).entry;
 
-test("Codex: plus 5h = 10; pro100 (alias prolite) and pro have no 5h window of their own", () => {
-  assert.equal(cap("codex", "plus", "five_hour"), 10);
-  assert.equal(cap("codex", "team", "five_hour"), 10, "team seats use the Plus prior");
-  assert.equal(cap("codex", "pro100"), 175);
-  assert.equal(cap("codex", "prolite"), 175);
-  assert.equal(cap("codex", "pro"), 325);
-  // A 5h window reported for a plan without one is observation-only (null capacity), not sized as weekly.
-  assert.equal(cap("codex", "prolite", "five_hour"), null);
-  assert.equal(cap("codex", "pro", "five_hour"), null);
+test("a plan's window capacity is the pinned community data's, for every plan and window the data holds", () => {
+  let checked = 0;
+  for (const [family, plans] of Object.entries(PLAN_CAPACITY)) {
+    for (const [plan, windows] of Object.entries(plans)) {
+      for (const [id, row] of Object.entries(windows)) {
+        if (row.capacity_usd === null) continue;
+        assert.equal(cap(family, plan, id), row.capacity_usd, `${family} ${plan} ${id}`);
+        checked++;
+      }
+    }
+  }
+  assert.ok(checked > 20);
 });
 
-test("Claude: 5h pro 18 / max5 94 / max20 376; max5 weekly_fable 700; bare max is max5", () => {
-  assert.equal(cap("claude", "pro", "five_hour"), 18);
-  assert.equal(cap("claude", "max5", "five_hour"), 94);
-  assert.equal(cap("claude", "max20", "five_hour"), 376);
-  assert.equal(cap("claude", "max5", "weekly_fable"), 700);
-  assert.equal(cap("claude", "max20", "weekly_fable"), 1190);
-  assert.equal(cap("claude", "max"), 1400);
+test("a window the plan does not have is observation-only: no capacity of its own", () => {
+  // Codex Pro has one weekly pool; a five-hour reading on it is not sized
+  assert.equal(account("codex", "pro", "five_hour").spec.capacity_usd.five_hour, undefined);
+  assert.equal(cap("codex", "pro", "usage"), PLAN_CAPACITY.codex.pro.usage.capacity_usd);
+});
+
+test("a plan's other names resolve to it: team seats, prolite, a bare max", () => {
+  assert.equal(cap("codex", "team", "five_hour"), PLAN_CAPACITY.codex.plus.five_hour.capacity_usd, "team seats use the Plus prior");
+  assert.equal(cap("codex", "prolite", "usage"), PLAN_CAPACITY.codex.pro100.usage.capacity_usd);
   assert.equal(entry("claude", "max").planKnown, true);
-  assert.equal(entry("claude", "max").planKey, "max5");
+  assert.equal(cap("claude", "max", "seven_day"), PLAN_CAPACITY.claude.max.seven_day.capacity_usd);
 });
 
-test("Antigravity: ultra5 and pro use the template values, ultra falls back to ultra20, unknown to pro", () => {
-  assert.equal(cap("antigravity", "ultra5", "gemini-weekly"), 156);
-  assert.equal(cap("antigravity", "ultra5", "gemini-5h"), 45.5);
-  assert.equal(cap("antigravity", "ultra5", "3p-weekly"), 22);
-  assert.equal(cap("antigravity", "ultra5", "3p-5h"), 4.4);
-  assert.equal(cap("antigravity", "pro", "gemini-weekly"), 31);
-  assert.equal(cap("antigravity", "pro", "gemini-5h"), 9.1);
-  assert.equal(cap("antigravity", "pro", "3p-weekly"), 4.4);
-  assert.equal(cap("antigravity", "pro", "3p-5h"), 0.9);
-  assert.equal(cap("antigravity", "ultra20", "gemini-weekly"), 625);
-  assert.equal(cap("antigravity", "Google AI Ultra", "gemini-weekly"), 625);
-  assert.equal(cap("antigravity", "ultra", "3p-5h"), 17.6);
-  const unknown = entry("antigravity", "mystery");
-  assert.equal(unknown.planKnown, false);
-  assert.equal(unknown.windows[0].capacityUsd, 31, "unknown is the smallest paid tier, never Ultra");
+test("an unknown plan is no plan: capacity unknown, and no smaller tier stands in for it", () => {
+  const { entry: e, spec } = account("antigravity", "mystery", "gemini-weekly");
+  assert.equal(e.planKnown, false);
+  assert.equal(spec.capacity_unknown, true);
+  assert.deepEqual(spec.capacity_usd, {});
 });
 
 test("status rows carry status, reason, last_success_at, and the usage_failing fields", () => {
@@ -121,16 +117,13 @@ test("plan: the online plan wins and a disagreement is exposed as plan_conflict"
     listQuotaAccounts({ "codex/a": { kind: "subscription", quota: { windows: [win()] }, ...item } }, T0)[0];
   const conflict = row({ plan: "plus", plan_claim: "pro" });
   assert.deepEqual(conflict.plan_conflict, { online: "plus", credential: "pro" });
-  assert.equal(cap("codex", "plus"), 67);
+  assert.equal(cap("codex", "plus", "usage"), PLAN_CAPACITY.codex.plus.usage.capacity_usd);
   assert.equal(row({ plan: "plus", plan_claim: "plus" }).plan_conflict, undefined);
   assert.equal(row({ plan: "plus" }).plan_conflict, undefined);
 
   // No online plan: the credential claim is the fallback, and there is nothing to conflict with.
-  const [e] = normalizeQuotaSnapshot(
-    { "codex/a": { kind: "subscription", plan_claim: "pro", quota: { windows: [win()] } } },
-    T0
-  );
-  assert.equal(e.windows[0].capacityUsd, 325);
-  assert.equal(e.planKnown, true);
-  assert.equal(e.planConflict, null);
+  const entries = normalizeQuotaSnapshot({ "codex/a": { kind: "subscription", plan_claim: "pro", quota: { windows: [win({ name: "usage" })] } } }, T0);
+  assert.equal(buildFleet({ entries, nowMs: T0 }).fleet.accounts["codex/a"].capacity_usd.usage, PLAN_CAPACITY.codex.pro.usage.capacity_usd);
+  assert.equal(entries[0].planKnown, true);
+  assert.equal(entries[0].planConflict, null);
 });

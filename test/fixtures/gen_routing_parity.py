@@ -1,10 +1,14 @@
 """Regenerate test/fixtures/agentcompass-routing-parity.json from AgentCompass's allocator.py at a pinned commit.
 
-    python -X utf8 test/fixtures/gen_routing_parity.py [--commit <sha>] [--sample N] [--out <path>]
+    python -I -X utf8 test/fixtures/gen_routing_parity.py [--repo <checkout>] [--commit <sha>] [--sample N] [--out <path>]
 
-The grid crosses model spellings, effort subsets, realtime or not, how the user pins, and profile boundaries. Both sides get
-the same explicit bundles and the same profile; test/routing-parity.test.mjs routes each row with the JS port and classifies
-every difference. Without --sample the whole grid is written, for a local report; the committed fixture is a sample of it.
+The checkout comes from --repo or the MAGPIE_AGENTCOMPASS_REPO environment variable; the commit from --commit,
+MAGPIE_AGENTCOMPASS_COMMIT, or test/fixtures/agentcompass-pin.json. Nothing about any machine is written to the pin.
+
+The grid crosses model spellings, effort subsets, how the user pins, and task profiles (four demand categories, boundaries of
+difficulty, access, image input, fast, and hours). Both sides get the same explicit bundles and the same profile, no usage and
+no local state; `allocator.plan` is the reference. test/routing-parity.test.mjs routes each row with the JS port and compares
+the winner and its score. Without --sample the whole grid is written, for a local report; the committed fixture is a sample.
 Reads AgentCompass only through `git archive <commit>`, never a working tree.
 """
 import argparse
@@ -21,11 +25,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 PIN = json.load(open(os.path.join(HERE, "agentcompass-pin.json"), encoding="utf-8"))
 
 parser = argparse.ArgumentParser()
-parser.add_argument("--repo", default=os.environ.get("MAGPIE_AGENTCOMPASS_REPO", PIN["repo"]))
+parser.add_argument("--repo", default=os.environ.get("MAGPIE_AGENTCOMPASS_REPO"))
 parser.add_argument("--commit", default=os.environ.get("MAGPIE_AGENTCOMPASS_COMMIT", PIN["commit"]))
 parser.add_argument("--sample", type=int, default=1)
 parser.add_argument("--out", default=os.path.join(HERE, "agentcompass-routing-parity.json"))
 args = parser.parse_args()
+if not args.repo:
+    sys.exit("pass --repo <AgentCompass checkout> or set MAGPIE_AGENTCOMPASS_REPO")
 
 work = tempfile.mkdtemp(prefix="ac-parity-")
 archive = subprocess.run(
@@ -38,24 +44,26 @@ scripts = os.path.join(work, "skills/agent-compass/scripts")
 references = os.path.join(work, "skills/agent-compass/references")
 os.environ["ROUTER_LAUNCH_FAILURES"] = "off"
 os.environ.setdefault("AGENT_COMPASS_HOME", tempfile.mkdtemp())
+os.environ["AGENTCOMPASS_PUBLIC_DATA"] = "off"
 sys.path.insert(0, scripts)
 import accounts_override  # noqa: E402
 import allocator  # noqa: E402
+import account_fleet  # noqa: E402
+import task_intake  # noqa: E402
 from capability_catalog import compose  # noqa: E402
 
 base = accounts_override.normalize(json.loads(open(os.path.join(references, "accounts.json"), encoding="utf-8-sig").read()))
 capabilities = compose(base)
-policy = base["scoring"]
 dispatch = base.get("dispatch_efforts") or {}
 NOW = datetime(2026, 11, 7, tzinfo=timezone.utc)
 
-SPELLINGS = [k for k, v in base["models"].items() if isinstance(v, dict) and k != "basis"] + [
+MODEL_KEYS = [k for k, v in base["models"].items() if isinstance(v, dict) and k != "basis"]
+SPELLINGS = MODEL_KEYS + [
     "claude-opus-5-5-20261001", "claude-opus-4-6@20250514", "gpt-6-astra-preview", "gpt-6.1-sol-latest",
     "openrouter/anthropic/claude-opus-4-6:free", "OpenAI/GPT-6-Astra-Latest", "CLAUDE-OPUS-5-5",
-    "claude-opus-9", "claude-sonnet-6", "gpt-6.2-sol-preview", "gpt-6.2-luna-20261101", "gemini-4-pro-exp",
-    "gemini-4-flash-exp", "grok-4-fast", "deepseek-r2-preview", "minimax-m4", "minimax-m4-flash", "glm-6-flash",
-    "claude-opus-5-5[1m]", "gpt-5.4", "o4-mini-2025-04-16", "totally-unknown-model", "gpt-5.3-codex-spark",
-    "gpt-6-astra-medium", "claude-opus-5-5-medium", "gemini-2.5-pro",
+    "claude-opus-9", "claude-sonnet-6", "gpt-6.2-sol-preview", "gemini-4-pro-exp", "grok-4-fast",
+    "deepseek-r2-preview", "minimax-m4", "glm-6-flash", "claude-opus-5-5[1m]", "gpt-5.4",
+    "o4-mini-2025-04-16", "totally-unknown-model", "gpt-6-astra-medium", "claude-opus-5-5-medium", "gemini-2.5-pro",
 ]
 EFFORT_SUBSETS = [["high"], ["low", "high"], ["medium", "high", "xhigh"], ["low", "medium", "high", "xhigh", "max"]]
 POOLS = [
@@ -68,60 +76,85 @@ POOLS = [
     ["grok-bot", "gpt-6-pro", "claude-opus-5-5", "gpt-6-luna"],
     ["deepseek-v4.1-flash-free", "glm-5.3-flash-free", "minimax-m3.1-flash", "mimo-v2.6-flash-free"],
     ["gpt-6-luna", "gemini-3.8-flash-high"],
-    # A family row beside the model it folds to, each pinned in turn (contract R1): it is another model.
+    # A family row beside the model it folds to, each pinned in turn: it is another model.
     ["claude-opus-5-5", "claude-opus-9"],
     ["claude-opus-9", "claude-opus-5-5"],
 ]
-EVERY_ROW = [k for k, v in base["models"].items() if isinstance(v, dict) and k != "basis"]
-KINDS = [k for k in capabilities["routes"]]
-BASE = {"context_scale": 1, "needs_visual": False, "needs_gui": False, "local_only": False, "expected_hours": 1.0,
-        "hours_confidence": "medium", "urgency": "unknown", "multi_task": False, "task_count": "1"}
-BOUNDARIES = {
-    "routine": {"reasoning_depth": 1, "code_complexity": 0, "divergence": 1, "hallucination_risk": 1, "error_cost": 1, "interaction_style": "text_only"},
-    "runbook_critical": {"reasoning_depth": 1, "code_complexity": 0, "divergence": 1, "hallucination_risk": 2, "error_cost": 3, "interaction_style": "engineering"},
-    "standard": {"reasoning_depth": 2, "code_complexity": 2, "context_scale": 2, "divergence": 1, "hallucination_risk": 2, "error_cost": 2, "interaction_style": "engineering"},
-    "strict_review": {"reasoning_depth": 2, "code_complexity": 0, "divergence": 1, "hallucination_risk": 3, "error_cost": 2, "interaction_style": "exploration"},
-    "risky": {"reasoning_depth": 2, "code_complexity": 2, "divergence": 2, "hallucination_risk": 3, "error_cost": 2, "interaction_style": "engineering"},
-    "coupled": {"reasoning_depth": 3, "code_complexity": 3, "context_scale": 3, "divergence": 2, "hallucination_risk": 2, "error_cost": 2, "interaction_style": "engineering"},
-    "critical": {"reasoning_depth": 3, "code_complexity": 2, "context_scale": 2, "divergence": 1, "hallucination_risk": 2, "error_cost": 3, "interaction_style": "engineering"},
-    "frontier": {"reasoning_depth": 4, "code_complexity": 3, "context_scale": 3, "divergence": 3, "hallucination_risk": 3, "error_cost": 3, "interaction_style": "advisory"},
-    "visual": {"reasoning_depth": 2, "code_complexity": 1, "divergence": 1, "hallucination_risk": 2, "error_cost": 2, "interaction_style": "engineering", "needs_visual": True},
-    "gui": {"reasoning_depth": 2, "code_complexity": 0, "divergence": 1, "hallucination_risk": 2, "error_cost": 2, "interaction_style": "engineering", "needs_visual": True, "needs_gui": True},
-    "local": {"reasoning_depth": 2, "code_complexity": 2, "divergence": 1, "hallucination_risk": 2, "error_cost": 2, "interaction_style": "engineering", "local_only": True},
+EVERY_ROW = list(MODEL_KEYS)
+KINDS = list(task_intake.PROFILE_KINDS)
+BASE = {"work_kind": "general_implementation", "reasoning_depth": 2, "code_complexity": 2, "needs_visual": False,
+        "needs_gui": False, "local_only": False, "wants_fast": False, "read_only_review": False, "access": "write",
+        "expected_hours": 1.0, "hours_confidence": "medium", "urgency": "normal", "interaction_style": "engineering",
+        "multi_task": False, "task_count": "1",
+        "axis_demand": {"divergence": 1, "coding": 2, "aesthetics": 0, "tool_operation": 0}}
+
+
+def shape(demand=None, **changes):
+    return {**BASE, **changes, "axis_demand": {**BASE["axis_demand"], **(demand or {})}}
+
+
+SHAPES = {
+    "routine": shape({"divergence": 0, "coding": 0}, reasoning_depth=1, code_complexity=0, access="read-only", interaction_style="text_only"),
+    "light": shape({"divergence": 0, "coding": 1}, reasoning_depth=1, code_complexity=1),
+    "standard": shape(),
+    "review": shape({"coding": 2}, code_complexity=0, access="read-only", read_only_review=True, interaction_style="exploration"),
+    "design": shape({"divergence": 3, "coding": 1}, reasoning_depth=3, interaction_style="advisory"),
+    "coupled": shape({"divergence": 2, "coding": 3}, reasoning_depth=3, code_complexity=3, expected_hours=4.0),
+    "frontier": shape({"divergence": 3, "coding": 3, "aesthetics": 1, "tool_operation": 1}, reasoning_depth=4, code_complexity=3, expected_hours=8.0),
+    "aesthetic": shape({"divergence": 1, "coding": 2, "aesthetics": 3}, reasoning_depth=2, code_complexity=2),
+    "visual": shape({"coding": 1, "tool_operation": 3}, code_complexity=1, needs_visual=True),
+    "gui": shape({"coding": 0, "tool_operation": 2}, code_complexity=0, access="read-only", needs_visual=True, needs_gui=True),
+    "tools": shape({"coding": 1, "tool_operation": 2}, code_complexity=1),
+    "local": shape(local_only=True),
+    "fast": shape(wants_fast=True, urgency="high", expected_hours=0.25),
+    "relaxed": shape(urgency="low", expected_hours=12.0, hours_confidence="low"),
 }
-PROFILES = [{**BASE, **shape, "work_kind": kind} for kind in KINDS for shape in BOUNDARIES.values()]
-SINGLE_MODEL_PROFILES = [i for i, p in enumerate(PROFILES) if list(BOUNDARIES.values()).index(
-    next(s for s in BOUNDARIES.values() if all(p.get(k) == v for k, v in s.items()))) in (0, 2, 7)]
-# none / the model / the model and an effort / `model:effort`.
-PIN_MODES = ["none", "model", "model+effort", "model:effort"]
+SHAPE_NAMES = list(SHAPES)
+PROFILES = []
+for kind in KINDS:
+    for name in SHAPE_NAMES:
+        PROFILES.append({**SHAPES[name], "work_kind": kind})
+# One representative of each shape for the single-model grid, the standard kind only.
+SINGLE_MODEL_PROFILES = [i for i, p in enumerate(PROFILES) if p["work_kind"] == "general_implementation"]
+PIN_MODES = ["none", "model", "model+effort", "model:effort"]  # none / the model / the model and an effort / `model:effort`.
 
 
-def own_provider(key):
+def own_provider(name):
     # A real launch provider for the model; a gateway, with no dispatch row, otherwise.
+    key = account_fleet.row_key(name, base)
     return next((p for p, table in dispatch.items() if key in table), "openrouter")
 
 
 def make_bundles(models, efforts):
     out = {}
     for name in models:
-        key = allocator.canonical(name, base)
-        provider = own_provider(key)
+        provider = own_provider(name)
         for effort in efforts:
-            bundle_id = f"{name}:{effort}"
-            out[bundle_id] = {"provider": provider, "model": name, "effort": effort}
+            out[f"{name}:{effort}"] = {"provider": provider, "model": name, "effort": effort}
     return out
 
 
 def account_spec(bundles):
     accounts = {}
     for bundle_id, bundle in bundles.items():
-        spec = accounts.setdefault(bundle["provider"], {"billing": "subscription", "verified": True, "bundles": {}})
+        spec = accounts.setdefault(bundle["provider"], {"family": None, "billing": "subscription", "verified": True,
+                                                         "unmetered": True, "windows": {}, "capacity_usd": {}, "bundles": {}})
         spec["bundles"][bundle_id] = bundle
     return {**base, "accounts": accounts}
 
 
-def route(bundles, profile, realtime, pin, pin_model, pin_effort):
-    task_raw = {"profile": profile, "realtime_loop": realtime, "needs": {"realtime_loop": realtime}}
+def valid(profile):
+    try:
+        task_intake.normalize_task({"objective": "parity", "profile": profile}, base["scoring"], capabilities, base)
+    except Exception as err:  # noqa: BLE001
+        if os.environ.get('PARITY_DEBUG'):
+            print('invalid profile:', err, file=sys.stderr)
+        return False
+    return True
+
+
+def route(bundles, profile, pin, pin_model, pin_effort):
+    task_raw = {"objective": "parity", "profile": profile, "expected_hours": profile["expected_hours"]}
     if pin == "model":
         task_raw["constraints"] = {"model": pin_model}
     elif pin == "model+effort":
@@ -129,29 +162,25 @@ def route(bundles, profile, realtime, pin, pin_model, pin_effort):
     elif pin == "model:effort":
         task_raw["constraints"] = {"model": f"{pin_model}:{pin_effort}"}
     accounts = account_spec(bundles)
-    task = allocator.normalize_task(task_raw, policy, capabilities, accounts)
-    unavailable = ["dot_text"]
-    host_policy = {"allowed_accounts": list(accounts["accounts"])}
-    candidates, eligible, _ = allocator.rank(task, {}, policy, accounts, capabilities, NOW, unavailable=unavailable, host_policy_config=host_policy)
-    # As `plan()`: a model named without an effort, too slow at every effort it can run, takes its fastest one.
-    if (not eligible and task.get("realtime_loop") and task["constraint_model"] and not task.get("constraint_effort")
-            and not task.get("constraint_bundle") and any(c.get("too_slow") and len(c["excluded"]) == 1 for c in candidates)):
-        task["slow_pin_fallback"] = True
-        _, eligible, _ = allocator.rank(task, {}, policy, accounts, capabilities, NOW, unavailable=unavailable, host_policy_config=host_policy)
-        fastest = max((c["components"].get("responsiveness") or 0.0 for c in eligible), default=0.0)
-        eligible = [c for c in eligible if (c["components"].get("responsiveness") or 0.0) >= fastest]
-    top = eligible[0] if eligible else None
-    if not top:
+    result = allocator.plan(task_raw, {"accounts": {}}, NOW, unavailable=(), accounts=accounts, overrides=[],
+                            host_policy_config={"allowed_accounts": list(accounts["accounts"])}, read_local_state=False)
+    if result.get("choice") in (None, "none"):
         return None
+    top = next(c for c in result["ranking"] if c["id"] == result["choice"])
     return [top["bundle"]["model"], top["bundle"].get("effort"), top["score"]]
 
 
 rows = []
 seen = 0
+VALID = {}
 
 
-def emit(pool_ref, subset, profile_index, realtime, pin, models):
+def emit(pool_ref, subset, profile_index, pin, models):
     global seen
+    if profile_index not in VALID:
+        VALID[profile_index] = valid(PROFILES[profile_index])
+    if not VALID[profile_index]:
+        return
     seen += 1
     if (seen - 1) % args.sample:
         return
@@ -159,37 +188,34 @@ def emit(pool_ref, subset, profile_index, realtime, pin, models):
     pin_model = models[0]
     pin_effort = EFFORT_SUBSETS[subset][0]
     try:
-        result = route(bundles, PROFILES[profile_index], bool(realtime), PIN_MODES[pin], pin_model, pin_effort)
+        result = route(bundles, PROFILES[profile_index], PIN_MODES[pin], pin_model, pin_effort)
     except Exception as err:  # noqa: BLE001 - a refusal is a result to compare, not a crash of the generator
-        result = ["!" + type(err).__name__, str(err)[:80], None]
-    rows.append([pool_ref, subset, profile_index, realtime, pin, result])
+        result = ["!" + type(err).__name__, None, None]
+    rows.append([pool_ref, subset, profile_index, pin, result])
 
 
 for spelling_index, spelling in enumerate(SPELLINGS):
     for subset in range(len(EFFORT_SUBSETS)):
-        for realtime in (0, 1):
-            for pin in range(len(PIN_MODES)):
-                for profile_index in SINGLE_MODEL_PROFILES:
-                    emit(spelling_index, subset, profile_index, realtime, pin, [spelling])
+        for pin in range(len(PIN_MODES)):
+            for profile_index in SINGLE_MODEL_PROFILES:
+                emit(spelling_index, subset, profile_index, pin, [spelling])
 for pool_index, pool in enumerate(POOLS):
     for subset in range(len(EFFORT_SUBSETS)):
-        for realtime in (0, 1):
-            for pin in range(len(PIN_MODES)):
-                for profile_index in range(len(PROFILES)):
-                    emit(len(SPELLINGS) + pool_index, subset, profile_index, realtime, pin, pool)
+        for pin in range(len(PIN_MODES)):
+            for profile_index in range(len(PROFILES)):
+                emit(len(SPELLINGS) + pool_index, subset, profile_index, pin, pool)
 # The whole catalog at every effort, unpinned: what the default pool of a gateway would pick from.
-for realtime in (0, 1):
-    for profile_index in range(len(PROFILES)):
-        emit(len(SPELLINGS) + len(POOLS), len(EFFORT_SUBSETS) - 1, profile_index, realtime, 0, EVERY_ROW)
+for profile_index in range(len(PROFILES)):
+    emit(len(SPELLINGS) + len(POOLS), len(EFFORT_SUBSETS) - 1, profile_index, 0, EVERY_ROW)
 
 fixture = {
     "source": {"repo": "AgentCompass", "commit": args.commit, "file": "skills/agent-compass/scripts/allocator.py"},
+    "now": NOW.isoformat(),
     "grid_size": seen,
     "sample": args.sample,
     "spellings": SPELLINGS,
     "pools": [*POOLS, EVERY_ROW],
-    "providers": {name: own_provider(allocator.canonical(name, base)) for pool in [SPELLINGS, *POOLS] for name in pool},
-    "canonical": {name: allocator.canonical(name, base) for pool in [SPELLINGS, *POOLS] for name in pool},
+    "providers": {name: own_provider(name) for pool in [SPELLINGS, *POOLS] for name in pool},
     "effort_subsets": EFFORT_SUBSETS,
     "pin_modes": PIN_MODES,
     "profiles": PROFILES,

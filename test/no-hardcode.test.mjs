@@ -17,6 +17,7 @@ import { handleSystemOneRequest } from "../src/index.js";
 import { onProvider, onRequest as mwOnRequest, onResponse as mwOnResponse } from "../src/middleware.js";
 import { UNROUTED_NOTICE, extractRequestFacts } from "../src/profiler-core.js";
 import { clearProfileCache } from "../src/scorer-live.js";
+import { profile } from "./profile.mjs";
 import { BASE_TASK, KEYWORD_CORPUS } from "./task_text_corpus.mjs";
 
 const SRC = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "src");
@@ -24,44 +25,18 @@ const NOW = 1790000000000;
 const POOL = ["claude-opus-5-5", "gpt-6-astra", "gpt-6.1-sol", "claude-sonnet-5-5", "gemini-3.8-flash-high", "gemini-4-argon-high", "grok-4.7"];
 
 const PROFILES = {
-  routine: {
-    work_kind: "bounded_bulk_work",
-    reasoning_depth: 1,
-    code_complexity: 1,
-    context_scale: 1,
-    divergence: 1,
-    hallucination_risk: 1,
-    error_cost: 1,
-    needs_visual: false,
-    needs_gui: false,
-    local_only: false,
-    realtime_loop: false,
-    interaction_style: "engineering",
-    expected_hours: 0.4,
-    hours_confidence: "medium",
-    urgency: "unknown",
-    multi_task: false,
-    task_count: "1",
-  },
-  coupled: {
+  routine: profile({ work_kind: "bounded_bulk_work", reasoning_depth: 1, code_complexity: 1, expected_hours: 0.4, axis_demand: { divergence: 0, coding: 1 } }),
+  coupled: profile({
     work_kind: "debug_review",
     reasoning_depth: 3,
     code_complexity: 0,
-    context_scale: 3,
-    divergence: 2,
-    hallucination_risk: 3,
-    error_cost: 2,
-    needs_visual: false,
-    needs_gui: false,
+    access: "read-only",
+    read_only_review: true,
     local_only: true,
-    realtime_loop: false,
-    interaction_style: "engineering",
     expected_hours: 2,
     hours_confidence: "high",
-    urgency: "normal",
-    multi_task: false,
-    task_count: "1",
-  },
+    axis_demand: { divergence: 2, coding: 3 },
+  }),
 };
 
 const quiet = (t) => t.mock.method(console, "warn", () => {});
@@ -92,7 +67,7 @@ const routeOf = (route) => ({
   targetEffort: route?.targetEffort,
   workKind: route?.workKind,
   difficulty: route?.difficulty,
-  requiredAbility: route?.requiredAbility,
+  axisDemand: route?.axisDemand,
   score: route?.score,
   profile: route?.profile,
   why: route?.continuation?.why,
@@ -271,10 +246,10 @@ test("no classifier: a virtual name goes on as it is, or as the model the operat
 
 test("the router's fields never reach the upstream when a request is not routed", (t) => {
   quiet(t);
-  const body = requestOf(BASE_TASK, { realtime_loop: true, needs: { gui: true } });
+  const body = requestOf(BASE_TASK, { needs: { gui: true }, profile: { work_kind: "other_or_mixed" } });
   const ctx = { state: {}, options: { candidateModels: POOL, now: NOW, continuityStore: new SessionContinuityStore() } };
   assert.equal(mwOnRequest(body, ctx), body);
-  assert.equal("realtime_loop" in body, false);
+  assert.equal("profile" in body, false);
   assert.equal("needs" in body, false);
 });
 
@@ -499,6 +474,15 @@ const NO_TASK_TEXT_FILES = {
   "catalog.js": "model names and the routing table; takes model names only",
   "quota.js": "subscription windows and seats; takes model and account names only",
   "quota-loader.js": "reads a quota file named in the plugin options",
+  "axis-scores.js": "category scores, targets and the fit over them: numbers and model names only",
+  "candidate-eval.js": "scores one bundle against a task profile's structured fields: model, effort and window names only",
+  "candidate-ranking.js": "orders scored candidates: numbers only",
+  "fleet.js": "turns a pool of model names and quota entries into accounts and bundles",
+  "plans.js": "plan names and window ids of subscriptions",
+  "quota-economy.js": "prices a window's spend: numbers and window ids",
+  "quota-pools.js": "quota pools, windows and reset times",
+  "reference-data.js": "generated from the pinned AgentCompass data: scores, plan capacity, tables",
+  "user-scores.js": "the user's own category scores for a model, as typed in the settings",
 };
 
 // Everything the two passes find, by its exact text, with why it is not a look at a task's meaning. A new look fails until it is here.
@@ -570,10 +554,16 @@ const EXCEPTIONS = [
     why: "the schema's enums on a profile's structured fields, and whether the classifier's choice is one of the question's keys: no word of a label means anything by itself",
     sites: [
       "index.js: choices.includes(choice)",
-      "profiler-core.js: INTERACTION_STYLES.includes(style)",
-      'profiler-core.js: "high"].includes(raw.hours_confidence)',
-      'profiler-core.js: "high"].includes(raw.urgency)',
       "profiler-core.js: TASK_COUNTS.includes(value)",
+      "profiler-core.js: PROFILE_KINDS.includes(raw.work_kind)",
+      "profiler-core.js: ACCESS_LEVELS.includes(raw.access)",
+      "profiler-core.js: levels.includes(raw[name])",
+      "profiler-core.js: INTERACTION_STYLES.includes(raw.interaction_style)",
+      "task-intake.js: return PROFILE_KINDS.includes(named)",
+      "task-intake.js: GENERIC_CALLER_KINDS.includes(caller)",
+      "task-intake.js: DIFFICULTY_ORDER.includes(difficulty)",
+      "task-intake.js: COUPLINGS.includes(coupling)",
+      "task-intake.js: DIRECT_SOURCES.includes(resolved.source)",
     ],
   },
 ];
@@ -646,8 +636,8 @@ test("static scan: the removed classifiers stay removed, and the model-name file
   for (const file of Object.keys(NO_TASK_TEXT_FILES)) {
     const src = fs.readFileSync(path.join(SRC, file), "utf8");
     assert.doesNotMatch(src, /from "\.\/(?:continuity|scorer-live|hooks|middleware|index)\.js"/, file);
-    // Validating a profile is all the allocator takes from the profiler: no task's text gets that far.
-    assert.doesNotMatch(src.replace('import { unroutedDecision, validateProfile } from "./profiler-core.js";', ""), /from "\.\/profiler-core\.js"/, file);
+    // Validating a profile and the unrouted notice are all these take from the profiler: no task's text gets that far.
+    assert.doesNotMatch(src.replace(/import \{ (?:PROFILE_KINDS, validateProfile|unroutedDecision) \} from "\.\/profiler-core\.js";/, ""), /from "\.\/profiler-core\.js"/, file);
     assert.doesNotMatch(codeOf(src), /\b(?:objective|turnText|lastUserText|userSaid|previousUser)\b/, file);
   }
   for (const file of ["hooks.js", "middleware.js", "index.js"]) {

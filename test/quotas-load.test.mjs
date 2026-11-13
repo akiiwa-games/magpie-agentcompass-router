@@ -11,29 +11,12 @@ import { onRequest as hookOnRequest } from "../src/hooks.js";
 import { SessionContinuityStore } from "../src/continuity.js";
 import { clearQuotasCache, getQuotasLoadStatus, listQuotaAccounts, loadLiveQuotas, selectBestRoute } from "../src/index.js";
 import { getQuotasLoadStatus as statusFromLoader } from "../src/quota-loader.js";
+import { profile } from "./profile.mjs";
 
 const T0 = 1_700_000_000_000;
 const win = { name: "7d", remaining: 80, used: 20, resetHours: 100 };
 const good = (extra = {}) => ({ "claude/a": { kind: "subscription", plan: "max5", quota: { windows: [win] }, ...extra } });
-const implProfile = {
-  work_kind: "general_implementation",
-  reasoning_depth: 2,
-  code_complexity: 2,
-  context_scale: 2,
-  divergence: 1,
-  hallucination_risk: 2,
-  error_cost: 2,
-  needs_visual: false,
-  needs_gui: false,
-  local_only: true,
-  realtime_loop: false,
-  interaction_style: "engineering",
-  expected_hours: 1,
-  hours_confidence: "medium",
-  urgency: "unknown",
-  multi_task: false,
-  task_count: "1",
-};
+const implProfile = profile();
 
 function withTmp(fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "quotas-load-"));
@@ -174,7 +157,7 @@ test("a file that breaks after a good read keeps the last snapshot, so an expire
     assert.equal(d10h.targetModel, null);
   }));
 
-test("M3a: a quotas file broken from startup stops dispatch once failing_since exceeds 6h", () =>
+test("M3a: a quotas file broken from startup is excluded once failing_since exceeds 6h, and says so", () =>
   withTmp((dir) => {
     const quotasPath = path.join(dir, "quotas.json");
     fs.writeFileSync(quotasPath, "{ nope");
@@ -185,11 +168,12 @@ test("M3a: a quotas file broken from startup stops dispatch once failing_since e
     const [pool7h] = listQuotaAccounts(q7h, T0 + 7 * 3600_000);
     assert.equal(pool7h.key, "pool/quotas");
     assert.equal(pool7h.dispatchable, false);
+    // No account depends on the file, so nothing the file holds is at stake: gateway rows still route, and the warning says why
     const d7h = selectBestRoute(implProfile, {
       candidateModels: ["claude-sonnet-4-6"],
       now: T0 + 7 * 3600_000,
       quotas: q7h,
     });
-    assert.equal(d7h.ok, false);
-    assert.equal(d7h.targetModel, null);
+    assert.equal(d7h.ok, true);
+    assert.ok(d7h.warnings.some((w) => /pool\/quotas: usage_failing, excluded from dispatch/.test(w)));
   }));

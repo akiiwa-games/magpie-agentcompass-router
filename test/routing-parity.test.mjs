@@ -1,7 +1,7 @@
 /**
- * Routes the AgentCompass parity grid (fixtures/gen_routing_parity.py) with the JS port. Both sides must pick the same
- * model and effort, and a row where they do not must have a reason in `REASONS`. The committed fixture is a sample; point
- * MAGPIE_ROUTING_PARITY_FIXTURE at a whole grid for the local report.
+ * Routes the AgentCompass parity grid (fixtures/gen_routing_parity.py) with the JS port. Both sides must pick the same model and
+ * effort with the same score (to 1e-9), and a row where they do not must have a reason in `REASONS`. The committed fixture is a
+ * sample; point MAGPIE_ROUTING_PARITY_FIXTURE at a whole grid for the local report.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -22,7 +22,7 @@ test("the parity grid comes from the pinned AgentCompass commit", () => {
   assert.ok(FIXTURE.rows.length > 1000);
 });
 
-test("every difference from allocator.py on the parity grid has a named reason", (t) => {
+test("every difference from allocator.py on the parity grid has a named reason, and equal winners score equal", (t) => {
   const byReason = new Map();
   const unexplained = [];
   for (const row of FIXTURE.rows) {

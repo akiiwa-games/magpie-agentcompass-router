@@ -6,7 +6,7 @@ export function onProvider(body, ctx = {}) {
     `route-observer ${JSON.stringify({
       model: body?.model ?? null,
       effort: body?.reasoning_effort ?? body?.reasoning?.effort ?? null,
-      flag: Boolean(body && ("realtime_loop" in body || "realtime_loop" in needs)),
+      flag: Boolean(body && ("profile" in body || "profile" in needs || "axis_demand" in body)),
       provider: ctx.provider?.id ?? null,
     })}`
   );
