@@ -26,7 +26,6 @@ import { canonicalModel } from "./catalog.js";
 import {
   computeSessionKey,
   defaultContinuityStore,
-  effectiveRealtimeLoop,
   evaluateProviderContinuation,
   keepsEffort,
 } from "./continuity.js";
@@ -165,8 +164,6 @@ export async function onRequest(body, ctx = {}) {
   );
   const liveQuotas = loadLiveQuotas(options, now);
 
-  const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
-  const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
   const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
 
   let cont = evaluateProviderContinuation(facts, sessionState, {
@@ -182,34 +179,22 @@ export async function onRequest(body, ctx = {}) {
     cacheTtl: options.cacheTtl,
     models: options.catalog?.models,
     aliases: options.catalog?.aliases,
-    realtime_loop:
-      typeof facts.realtime_loop === "boolean"
-        ? facts.realtime_loop
-        : typeof options.realtime_loop === "boolean"
-          ? options.realtime_loop
-          : undefined,
   });
 
   // Fast path: Hold active session Provider/Model without calling the intent classifier
   if (cont.shouldHold && cont.model) {
-    const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
     const keptEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
       facts.estimatedInputTokens,
       now,
-      {
-        ...options,
-        ...realtimeOption,
-      }
+      options
     );
     const canonical = canonicalModel(cont.model, options.catalog?.aliases);
-    // A realtime session stays on the name it was routed to (`gpt-5.3-codex`, not its canonical `gpt-6.1-sol`).
-    const heldModel =
-      heldRealtime && sessionState?.target ? sessionState.target : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
+    const heldModel = heldTarget(cont.model, sessionState, candidateModels, options.catalog);
     // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
     const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
-    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState), realtimeLoop: heldRealtime }) : keptEffort;
+    const heldEffort = pool ? heldEffortOn(pool, heldModel, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState) }) : keptEffort;
     const effortGone = heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins));
     if (effortGone) {
       cont = {
@@ -231,7 +216,6 @@ export async function onRequest(body, ctx = {}) {
             provider: cont.provider || sessionState?.provider || "",
             workKind: sessionState?.workKind || "general_implementation",
             difficulty: sessionState?.difficulty || "routine",
-            realtimeLoop: heldRealtime,
             why: cont.why,
             held: true,
             pinnedBundle: pins.pinnedBundle,
@@ -259,8 +243,7 @@ export async function onRequest(body, ctx = {}) {
         ...(heldAccounts ? { accounts: heldAccounts } : {}),
         workKind: sessionState?.workKind || "general_implementation",
         difficulty: sessionState?.difficulty || "routine",
-        realtimeLoop: heldRealtime,
-        requiredAbility: null,
+        axisDemand: sessionState?.profile?.axis_demand || null,
         score: null,
         components: null,
         profile: sessionState?.profile || null,
@@ -342,8 +325,8 @@ export async function onRequest(body, ctx = {}) {
     minContextTokens,
     quotas: liveQuotas,
     meteredOk: options.meteredOk,
+    userScores: options.userScores,
     now,
-    ...realtimeOption,
     ...pins,
     continuity: {
       previousModel: cont.previousModel || null,
@@ -368,8 +351,8 @@ export async function onRequest(body, ctx = {}) {
             minContextTokens,
             quotas: undefined,
             meteredOk: options.meteredOk,
+            userScores: options.userScores,
             now,
-            ...realtimeOption,
             ...pins,
           }).ok)
     );
@@ -396,8 +379,7 @@ export async function onRequest(body, ctx = {}) {
       ...(decision.accounts ? { accounts: decision.accounts } : {}),
       workKind: decision.workKind,
       difficulty: decision.difficulty,
-      requiredAbility: decision.requiredAbility,
-      realtimeLoop: Boolean(decision.realtimeLoop),
+      axisDemand: decision.axisDemand,
       score: null,
       components: null,
       profile: decision.profile || profile,
@@ -424,7 +406,6 @@ export async function onRequest(body, ctx = {}) {
 
   let finalEffort = decision.targetEffort;
   if (
-    !decision.realtimeLoop &&
     sessionState &&
     canonicalModel(decision.targetModel) === canonicalModel(sessionState.model) &&
     cont.why !== "cold" &&
@@ -438,7 +419,7 @@ export async function onRequest(body, ctx = {}) {
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
-      { ...options, ...realtimeOption }
+      options
     );
     if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept, options.catalog)) finalEffort = kept;
   }
@@ -451,7 +432,6 @@ export async function onRequest(body, ctx = {}) {
         effort: finalEffort,
         workKind: decision.workKind,
         difficulty: decision.difficulty,
-        realtimeLoop: Boolean(decision.realtimeLoop),
         why: cont.why,
         held: false,
         profile: decision.profile,
@@ -476,8 +456,7 @@ export async function onRequest(body, ctx = {}) {
     ...(decision.accounts ? { accounts: decision.accounts } : {}),
     workKind: decision.workKind,
     difficulty: decision.difficulty,
-    requiredAbility: decision.requiredAbility,
-    realtimeLoop: Boolean(decision.realtimeLoop),
+    axisDemand: decision.axisDemand,
     score: decision.score,
     components: decision.components,
     profile: decision.profile,

@@ -12,7 +12,7 @@
  *    - Shape A (`jevLevelled` probe in `decide.go:310`): `state.kinds` + `questions.levels` + `questions.work0..N`
  *    - Shape B (`jevBody` turn classification in `decide.go:167`): `state.turn` / `state.message` +
  *      `state.previous_message_kind` / `state.previous_message_reasoning` + `questions.intent` / `questions.level` + `questions.effort`
- *    - Shape C (Direct AgentCompass 10-field `/v1/systemone` query): `state.task` + `questions.work_kind` / `reasoning_depth` / etc.
+ *    - Shape C (Direct AgentCompass task-profile `/v1/systemone` query): `state.task` + `questions.work_kind` / `reasoning_depth` / etc.
  */
 
 import {
@@ -28,14 +28,13 @@ import {
   rankCandidates,
   selectBestRoute,
 } from "./allocator.js";
-import { CANONICAL_ROUTES, canonicalModel } from "./catalog.js";
+import { ROUTES, canonicalModel } from "./catalog.js";
 import {
   SessionContinuityStore,
   analyzeTurnState,
   coldAfterMs,
   computeSessionKey,
   defaultContinuityStore,
-  effectiveRealtimeLoop,
   evaluateProviderContinuation,
   firstWords,
   keepsEffort,
@@ -44,14 +43,11 @@ import {
   stripAgentNoise,
   userSaidFromText,
 } from "./continuity.js";
+import { FIVE_AXES } from "./axis-scores.js";
 import { extractRequestFacts } from "./profiler-core.js";
 import {
-  computeWindowCost,
-  demandForecast,
-  evaluateModelQuota,
   isModelQuotaExhausted,
   formatQuotaAccountList,
-  healthOnlyQuotas,
   listQuotaAccounts,
   normalizeQuotaSnapshot,
   orderSeatsByQuotaEconomics,
@@ -214,17 +210,6 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       : "";
 
   const rawTaskObj = state.task && typeof state.task === "object" ? state.task : {};
-  const explicitStateRt =
-    typeof state.realtime_loop === "boolean"
-      ? state.realtime_loop
-      : state.needs && typeof state.needs === "object" && typeof state.needs.realtime_loop === "boolean"
-        ? state.needs.realtime_loop
-        : typeof rawTaskObj.realtime_loop === "boolean"
-          ? rawTaskObj.realtime_loop
-          : rawTaskObj.needs && typeof rawTaskObj.needs === "object" && typeof rawTaskObj.needs.realtime_loop === "boolean"
-            ? rawTaskObj.needs.realtime_loop
-            : chatFacts?.realtime_loop;
-
   const store = pluginOptions.continuityStore || defaultContinuityStore;
   const candidateModels = pluginOptions.candidateModels || pluginOptions.allowedModels;
   const chatSessionKey = chatFacts ? chatFacts.sessionKey || computeSessionKey(bodyObj, { options: pluginOptions }) : "";
@@ -243,7 +228,6 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
           cacheTtl: pluginOptions.cacheTtl,
           models: pluginOptions.catalog?.models,
           aliases: pluginOptions.catalog?.aliases,
-          realtime_loop: explicitStateRt,
         })
       : null;
 
@@ -277,19 +261,14 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   };
 
   if (chatCont && chatCont.shouldHold && chatCont.model) {
-    const realtimeLoop = effectiveRealtimeLoop(chatFacts, chatSessionState, pluginOptions);
-    const heldRealtime = chatSessionState?.realtimeLoop === true && realtimeLoop !== false;
     const heldEffort = keepsEffort(
       chatSessionState,
       chatCont.effort || chatSessionState?.effort || "high",
       chatFacts.estimatedInputTokens,
       now,
-      {
-        ...pluginOptions,
-        ...(realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop }),
-      }
+      pluginOptions
     );
-    const heldModel = heldRealtime && chatSessionState?.target ? chatSessionState.target : chatCont.model;
+    const heldModel = chatCont.model;
     store.recordRequest(
       chatSessionKey,
       {
@@ -298,7 +277,6 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
         provider: chatCont.provider || chatSessionState?.provider || "",
         workKind: chatSessionState?.workKind || "general_implementation",
         difficulty: chatSessionState?.difficulty || "routine",
-        realtimeLoop: heldRealtime,
         why: chatCont.why,
         held: true,
       },
@@ -361,7 +339,6 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     objective: turnText,
     previousUser: prevUser,
     hasVisualInput: Boolean(state.has_visual_input || chatFacts?.hasVisualInput),
-    ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
   };
 
   const caller = resolveCallerProfile(
@@ -373,14 +350,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   const { profile, meta } = caller?.error
     ? { profile: null, meta: { source: "caller", reason: caller.error } }
     : caller
-      ? {
-          profile: explicitStateRt !== undefined ? { ...caller.profile, realtime_loop: explicitStateRt } : caller.profile,
-          meta: { source: "caller" },
-        }
-      : await scoreTaskLive(taskFacts, {
-          ...scorerOptions,
-          ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
-        });
+      ? { profile: caller.profile, meta: { source: "caller" } }
+      : await scoreTaskLive(taskFacts, scorerOptions);
 
   if (!profile) {
     const unrouted = unroutedDecision(meta.reason);
@@ -408,8 +379,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
       ...(Array.isArray(pluginOptions.unhealthyModels) ? pluginOptions.unhealthyModels : []),
     ],
     meteredOk: pluginOptions.meteredOk,
+    userScores: pluginOptions.userScores,
     now,
-    ...(explicitStateRt !== undefined ? { realtime_loop: explicitStateRt } : {}),
     ...pins,
   });
   if (decision.blocked) {
@@ -425,7 +396,6 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
         effort: decision.targetEffort || "high",
         workKind: decision.workKind,
         difficulty: decision.difficulty,
-        realtimeLoop: Boolean(decision.realtimeLoop),
         why: chatCont?.why || "first",
         held: false,
       },
@@ -454,10 +424,8 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
   matchedChoice = answers.intent?.choice || answers.level?.choice || "";
 
   // Monotonic effort ratchet (`keepsEffort`) when continuing on the same kind/intent
-  // (do not ratchet back up when `realtime_loop` intentionally stepped down effort).
   let effectiveEffort = decision.targetEffort;
   if (
-    !decision.realtimeLoop &&
     !pinsFixEffort(pins) &&
     prevReasoning &&
     ((prevKind && matchedChoice && prevKind === matchedChoice) ||
@@ -472,31 +440,30 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
     answers.effort = buildEffortAnswer(effectiveEffort, 0.9);
   }
 
-  // Case 3: Direct 10-field System-One questions (when called as a general Jev endpoint)
+  // Case 3: Direct task-profile System-One questions (when called as a general Jev endpoint)
   if (questions.work_kind && !answers.work_kind) {
     answers.work_kind = { choice: decision.workKind, confidence: 0.9 };
   }
   if (questions.interaction_style && !answers.interaction_style) {
     answers.interaction_style = { choice: profile.interaction_style, confidence: 0.9 };
   }
-  for (const dim of [
-    "reasoning_depth",
-    "code_complexity",
-    "context_scale",
-    "divergence",
-    "hallucination_risk",
-    "error_cost",
-  ]) {
+  for (const dim of ["reasoning_depth", "code_complexity"]) {
     if (questions[dim] && !answers[dim]) {
       const low = dim === "code_complexity" ? 0 : 1;
       answers[dim] = { score: Math.max(0, (profile[dim] ?? low) - low) };
     }
   }
-  for (const flag of ["needs_visual", "needs_gui", "local_only", "realtime_loop"]) {
+  for (const axis of FIVE_AXES) {
+    const name = `demand_${axis}`;
+    if (questions[name] && !answers[name]) answers[name] = { score: (profile.axis_demand || {})[axis] ?? 0 };
+  }
+  for (const flag of ["needs_visual", "needs_gui", "local_only", "wants_fast", "read_only_review", "multi_task"]) {
     if (questions[flag] && !answers[flag]) {
       answers[flag] = { noul: profile[flag] ? 0.95 : 0.05 };
     }
   }
+  if (questions.access && !answers.access) answers.access = { choice: profile.access, confidence: 0.9 };
+  if (questions.task_count && !answers.task_count) answers.task_count = { choice: profile.task_count, confidence: 0.9 };
 
   return {
     model,
@@ -510,8 +477,7 @@ export async function handleSystemOneRequest(bodyObj, pluginOptions = {}) {
           quota: decision.quota || null,
           workKind: decision.workKind,
           difficulty: decision.difficulty,
-          requiredAbility: decision.requiredAbility,
-          realtimeLoop: Boolean(decision.realtimeLoop),
+          axisDemand: decision.axisDemand,
           warnings: decision.warnings,
           ...(decision.accounts ? { accounts: decision.accounts } : {}),
           continuation: {
@@ -556,7 +522,7 @@ export async function AgentCompassRouterPlugin(input, pluginOptions = {}) {
         decide: true,
         models: {
           [DECISION_MODEL_ID]: {
-            name: "AgentCompass System-One Profiler (10D + Model DNA)",
+            name: "AgentCompass System-One Profiler (4 categories + quota economy)",
             decides: true,
             reasoning: true,
             tool_call: false,
@@ -638,21 +604,17 @@ export default {
   server: AgentCompassRouterPlugin,
 };
 export {
-  CANONICAL_ROUTES,
+  ROUTES,
   SessionContinuityStore,
   analyzeTurnState,
   clearQuotasCache,
   coldAfterMs,
   computeSessionKey,
-  computeWindowCost,
   defaultContinuityStore,
-  demandForecast,
-  evaluateModelQuota,
   evaluateProviderContinuation,
   firstWords,
   formatQuotaAccountList,
   getQuotasLoadStatus,
-  healthOnlyQuotas,
   isModelQuotaExhausted,
   keepsEffort,
   listQuotaAccounts,

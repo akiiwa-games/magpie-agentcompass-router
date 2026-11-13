@@ -43,7 +43,6 @@ import {
   bodyUpTo,
   computeSessionKey,
   defaultContinuityStore,
-  effectiveRealtimeLoop,
   evaluateProviderContinuation,
   keepsEffort,
   recentUserTurns,
@@ -68,22 +67,18 @@ const DEFAULT_VIRTUAL_MODELS = [
 ];
 
 /**
- * `realtime_loop`, `needs.gui` and `profile` in a request are for the router: an upstream may refuse a field it does
+ * `needs.gui` and `profile` in a request are for the router: an upstream may refuse a field it does
  * not know. Whether one was dropped.
  */
 function dropRouterFields(body) {
   let dropped = false;
-  if (typeof body.realtime_loop === "boolean") {
-    delete body.realtime_loop;
-    dropped = true;
-  }
   if (body.profile && typeof body.profile === "object") {
     delete body.profile;
     dropped = true;
   }
   const needs = body.needs;
   if (needs && typeof needs === "object") {
-    const flags = ["realtime_loop", "gui"].filter((flag) => typeof needs[flag] === "boolean");
+    const flags = ["gui"].filter((flag) => typeof needs[flag] === "boolean");
     for (const flag of flags) delete needs[flag];
     if (flags.length > 0) {
       if (Object.keys(needs).length === 0) delete body.needs;
@@ -273,7 +268,6 @@ function replayedState(body, ctx, env, chain, stale, depth) {
     provider: "",
     workKind: d.workKind || "general_implementation",
     difficulty: d.difficulty || "routine",
-    realtimeLoop: Boolean(d.realtimeLoop),
     profile: d.profile || null,
     pinnedBundle: d.pins?.pinnedBundle || null,
     tokens,
@@ -285,7 +279,7 @@ function replayedState(body, ctx, env, chain, stale, depth) {
     anchor: chain.prior.stamp,
     replayed: true,
     // The history carries no time, so the age of a replayed turn is unknown: in `cache` mode it holds only where
-    // age doesn't matter (the tool-loop lock, `within`), and a TTL-gated hold (`cache`, `realtime_loop`) counts
+    // age doesn't matter (the tool-loop lock, `within`), and a TTL-gated hold (`cache`) counts
     // as cold. Given an age of 0 instead, a fresh runtime would hold a session the runtime with the record lets go cold.
     ageKnown: false,
   };
@@ -316,8 +310,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
     sessionState = replayedState(body, ctx, env, chain, sessionState, depth);
   }
   const anchor = chain?.stamp || "";
-  const realtimeLoop = effectiveRealtimeLoop(facts, sessionState, options);
-  const realtimeOption = realtimeLoop === undefined ? {} : { realtime_loop: realtimeLoop };
   const pins = mergePinOptions(pinOptionsOf(options), body, body.task);
   const liveQuotas = loadLiveQuotas(options, now);
 
@@ -334,33 +326,20 @@ function routeClaimed(body, ctx, env, depth = 0) {
     cacheTtl: options.cacheTtl,
     models: options.catalog?.models,
     aliases: options.catalog?.aliases,
-    realtime_loop:
-      typeof facts.realtime_loop === "boolean"
-        ? facts.realtime_loop
-        : typeof options.realtime_loop === "boolean"
-          ? options.realtime_loop
-          : undefined,
   });
 
   if (cont.shouldHold && cont.model) {
-    const heldRealtime = sessionState?.realtimeLoop === true && realtimeLoop !== false;
     const keptEffort = keepsEffort(
       sessionState,
       cont.effort || sessionState?.effort || "high",
       facts.estimatedInputTokens,
       now,
-      {
-        ...options,
-        ...realtimeOption,
-      }
+      options
     );
-    const target =
-      heldRealtime && sessionState?.target
-        ? sessionState.target
-        : heldTarget(cont.model, sessionState, candidateModels, options.catalog);
+    const target = heldTarget(cont.model, sessionState, candidateModels, options.catalog);
     // Contract R2: a hold runs what the pool offers now. Nothing at or below the held effort, or a pin that names it: route again.
     const pool = Array.isArray(candidateModels) && candidateModels.length > 0 ? candidateModels : null;
-    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState), realtimeLoop: heldRealtime }) : keptEffort;
+    const heldEffort = pool ? heldEffortOn(pool, target, keptEffort, options.catalog, { pins, profile: sessionProfile(sessionState) }) : keptEffort;
     if (heldEffort === null || (heldEffort !== keptEffort && pinsFixEffort(pins))) {
       cont = {
         shouldHold: false,
@@ -383,7 +362,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
           provider: cont.provider || sessionState?.provider || "",
           workKind: sessionState?.workKind || "general_implementation",
           difficulty: sessionState?.difficulty || "routine",
-          realtimeLoop: heldRealtime,
           why: cont.why,
           held: true,
           anchor,
@@ -401,7 +379,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
           ...(heldAccounts ? { accounts: heldAccounts } : {}),
           workKind: sessionState?.workKind || "general_implementation",
           difficulty: sessionState?.difficulty || "routine",
-          realtimeLoop: heldRealtime,
+          axisDemand: sessionState?.profile?.axis_demand || null,
           profile: sessionState?.profile || null,
           pins,
           warnings: [...stepWarnings, ...heldWarnings],
@@ -451,8 +429,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
     minContextTokens,
     quotas: liveQuotas,
     meteredOk: options.meteredOk,
+    userScores: options.userScores,
     now,
-    ...realtimeOption,
     ...pins,
     continuity: {
       previousModel: cont.previousModel || null,
@@ -494,8 +472,8 @@ function routeClaimed(body, ctx, env, depth = 0) {
               minContextTokens,
               quotas: undefined,
               meteredOk: options.meteredOk,
+              userScores: options.userScores,
               now,
-              ...realtimeOption,
               ...pins,
             }).ok)
       );
@@ -510,7 +488,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
 
   let finalEffort = decision.targetEffort;
   if (
-    !decision.realtimeLoop &&
     sessionState &&
     canonicalModel(decision.targetModel) === canonicalModel(sessionState.model) &&
     cont.why !== "cold" &&
@@ -524,7 +501,7 @@ function routeClaimed(body, ctx, env, depth = 0) {
       decision.targetEffort,
       facts.estimatedInputTokens,
       now,
-      { ...options, ...realtimeOption }
+      options
     );
     if (!candidateModels || candidateOffers(candidateModels, decision.targetModel, kept, options.catalog)) finalEffort = kept;
   }
@@ -540,7 +517,6 @@ function routeClaimed(body, ctx, env, depth = 0) {
       effort: finalEffort,
       workKind: decision.workKind,
       difficulty: decision.difficulty,
-      realtimeLoop: Boolean(decision.realtimeLoop),
       why: cont.why,
       held: false,
       anchor,
@@ -655,7 +631,6 @@ export function onRequest(body, ctx = {}) {
               effort: decision.targetEffort || "high",
               workKind: decision.workKind || "general_implementation",
               difficulty: decision.difficulty || "routine",
-              realtimeLoop: Boolean(decision.realtimeLoop),
               why: decision.continuation?.why || "first",
               held: Boolean(decision.continuation?.held),
               profile: decision.profile,
@@ -805,8 +780,8 @@ export function onProvider(body, ctx = {}) {
         minContextTokens: prevDecision.minContextTokens || 0,
         quotas: liveQuotas,
         meteredOk: options.meteredOk,
+        userScores: options.userScores,
         now,
-        realtime_loop: Boolean(prevDecision.realtimeLoop),
         ...mergePinOptions(pinOptionsOf(options), prevDecision.pins),
       });
       logRouteWarnings(routed.warnings);
