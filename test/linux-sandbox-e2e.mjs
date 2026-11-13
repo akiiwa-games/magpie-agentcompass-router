@@ -11,7 +11,7 @@
  *
  * Routing rests on a task profile (v0.6.0: the work kind, the reasoning depth, `access`, the per-category `axis_demand` of
  * divergence / coding / aesthetics / tool_operation at levels 0..3, hours and urgency): from the request (`body.profile`) on
- * Mode A, from a classifier or the state on Mode B. Without one a request is not routed (README, "Without a classifier").
+ * Mode A, from a classifier or the state on Mode B. Without one a request is not routed (`docs/reference.md`, "Without a profile").
  * A task's words decide nothing.
  *
  * What a route should be is not written into this file: the scores, the quota economy and the data gates are AgentCompass's

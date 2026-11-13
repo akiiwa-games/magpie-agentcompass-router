@@ -1,216 +1,38 @@
-# 发布说明
+# Release notes
 
-## 0.2.0：对齐 AgentCompass v0.6.0（固定在 974eb49）
+One entry per version, newest first. What a version changes in the code is in `git log`; this lists what a user has to know to upgrade.
 
-评分引擎换成 AgentCompass v0.6.0 的实现，逐模块移植，与 `allocator.plan` 对拍一致：对拍网格 58,016 行里，抽取的 19,339 行（每三行取一行）上，选中的模型、档位和分数（1e-9 内）全部相同；仓库里提交的样本是 1,451 行（`npm test` 跑它）。
+## 0.2.0 - 2026-11-13
 
-**打分**
+The engine is AgentCompass v0.6.0 (pinned at `974eb49`, the `v0.6.0` tag), ported module by module: four capability categories (`divergence`, `coding`, `aesthetics`, `tool_operation`) in place of the 6D/7D vectors and the 3D model profile, data gates, and the quota economy. `test/routing-parity.test.mjs` compares the port with AgentCompass's `allocator.plan` on a committed sample of 1,451 rows; the grid it is drawn from has 58,016. How the engine scores is AgentCompass's ([technical reference](https://github.com/akiiwa-games/AgentCompass/blob/v0.6.0/docs/technical-reference.md#1-how-scoring--allocation-work)).
 
-- 四类能力：`divergence`、`coding`、`aesthetics`、`tool_operation`，画像里用 `axis_demand`（各 0..3 级）表示需求。每个 `<模型, 档位>` 行的净分 `N = fit + continuity + boost - quota_cost`，`fit = Σ w·(min(z, cap) − t1) / Σ w`。`tool_operation` 三级要求模型有图片输入。
-- 数据门禁（规则 B）：需求的类别没有数据、计费账号没有标价、图片输入未知、该档位没有 Time/Task、窗口容量未知，这一行不进自动路由；点名该模型仍可派发，并在 `warnings` 里带上数据错误。
-- 不再有能力下限、过度合格惩罚和实时降档：由 fit 与配额经济选档位。排序键依次是净分、等待小时、完成小时、美元、类别级别。
-- 配额经济 v3.1：5 小时窗口只做可行性闸门，24 小时及以上的窗口按机会成本定价；窗口确认耗尽或低于启动下限则排除。账号的 `plan` 未上报时容量未知，该账号不进自动路由，请在 `quotas` 里写上 `plan`。
-- 点名：`constraintModel` / `pinnedModel`（可带 `:档位` 或 `-档位`）、`constraintEffort` / `pinnedEffort`、`pinnedBundle`；点名不可用时返回原因码，不换别的模型。
-- 新选项 `userScores`：自己给某个模型的类别打分（1..3 级），优先于维护者数据和实测。
+**Upgrading**
 
-**升级影响**
+- **The profile changed.** `axis_demand`, `access`, `wants_fast` and `read_only_review` are required; `context_scale`, `hallucination_risk`, `error_cost`, the top-level `divergence` and `realtime_loop` are gone. A profile of the old shape is refused with `invalid_caller_profile`; nothing reads it for compatibility. A valid one: [reference](reference.md#task-profile).
+- **`realtime_loop` is removed** (the option, the request field and the `realtime_loop` session hold).
+- **A family or unknown name has no scores.** `claude-opus-9` is no longer scored as a generic row or as an estimate of its family: automatic routing does not pick it, and naming it dispatches it with a data-error warning.
+- **An account with no `plan` has unknown capacity** and is out of automatic routing: put `plan` in `quotas`.
+- **No ability floor, over-qualification penalty or realtime step-down.** The fit and the quota economy choose the effort.
+- **New option `userScores`**: your own category scores for a model, ahead of the maintainers' and measured ones.
+- **Removed exports**: from `catalog.js`, `DEFAULT_MODELS`, `DEFAULT_SCORING_POLICY`, `KIND_TRAITS`, `CANONICAL_ROUTES`, `EFFORT_CURVES` and `resolveModelSpec`; from `index.js`, `computeWindowCost`, `demandForecast`, `evaluateModelQuota`, `CANONICAL_ROUTES` and `healthOnlyQuotas`; from `continuity.js`, `effectiveRealtimeLoop`. `ROUTES` is new. `canonicalModel` returns a family or unknown name as it is.
+- **Held sessions**: the difficulty-driven raise on `capability_outgrown` is gone; a request that needs images or a GUI outgrows a model that takes no images.
+- **Bare names in a pool**: when a provider has a table of efforts and the model is not in it, the row has no efforts, so a step-down never lands on an unverified effort; `antigravity` and `gemini` no longer borrow another provider's table.
+- **A quotas file broken for over 6 hours** excludes only `pool/quotas` in `selectBestRoute`; `onAccount` still answers 503 when every candidate account is unavailable.
 
-- 画像字段变了：`axis_demand`、`access`、`wants_fast`、`read_only_review` 必填；`context_scale`、`hallucination_risk`、`error_cost`、`divergence`、`realtime_loop` 不再存在，旧形状的画像会被拒绝（`invalid_caller_profile`），没有兼容读取。
-- `realtime_loop`（选项、请求字段、`why: "realtime_loop"` 的会话保持）整体删除。
-- 家族名和未知名（如 `claude-opus-9`）没有自己的分数：自动路由不会选它们，只有点名才派发，同时带数据错误的告警；不再按"通用行"或"同系列估计"自动打分。
-- 去掉的导出：`catalog.js` 的 `DEFAULT_MODELS`、`DEFAULT_SCORING_POLICY`、`KIND_TRAITS`、`CANONICAL_ROUTES`、`EFFORT_CURVES`、`resolveModelSpec`；`index.js` 的 `computeWindowCost`、`demandForecast`、`evaluateModelQuota`、`CANONICAL_ROUTES`、`healthOnlyQuotas`；`continuity.js` 的 `effectiveRealtimeLoop`。新增 `ROUTES`。
-- 会话保持里按 tier 抬档的那一支（`capability_outgrown` 中依任务难度的 tier 升级）已删除；GUI / 计算机操作超出轻量模型改按模型是否有图片输入判断。
-- `canonicalModel` 对家族名和未知名返回原名（它们是各自的模型，不折叠到旗舰）。
-- 候选池里的裸模型名：提供方有派发档位表而表里没有这个模型时，该行不带任何档位（与 `account_fleet.dispatch_allowed_efforts` 一致，降档不会落在未经验证的档位上）；没有表的网关仍按数据里计过时的档位展开。`antigravity` 与 `gemini` 提供方没有自己的表，不再借用 `antigravity-resilient` 的。导出名与签名没有变，变的是 `dispatchTable` 与 `bareEfforts` 的行为。
-- 坏掉超过 6 小时的 quotas 文件：在 `selectBestRoute` 里只是 `pool/quotas` 被排除并告警；没有账号依赖该文件时网关行照常路由（`onAccount` 路径仍按"所有候选账号不可用"返回 503）。
+Not ported, because Magpie only routes: launching workers, harness order, and the launch side of fast mode.
 
-**没有移植的部分**（Magpie 只做路由）：启动 worker、harness 顺序与 harness 位次（`harness_place` 恒为 0）、fast 变体与 `wants_fast` 的启动侧逻辑。
+The Linux sandbox script is rewritten for this engine and ran on real Magpie 0.1.4022 (2026-11-13, no real sign-in): scenarios 1–10, 12, 14 and 15 passed; scenario 13, against real upstream accounts, was not run. Details: [reference](reference.md#layout-and-tests) and `docs/linux-sandbox-e2e-report-0.1.4022.json`.
 
-**机器无关**
+## 0.1.6 - 2026-11-08
 
-固定版本文件 `test/fixtures/agentcompass-pin.json` 只写提交号。AgentCompass 检出目录用 `--agentcompass-repo <路径>` 或环境变量 `MAGPIE_AGENTCOMPASS_REPO` 给出；`npm run catalog:sync` / `catalog:check` 和 `test/fixtures/gen_routing_parity.py`（`--repo`）读它。没有检出时，核对生成文件的测试（`7.1`）跳过。
+- **Automatic routing needs a classifier or a caller's profile.** The plugin stopped guessing a profile from regular expressions, word lists or message length. Mode A cannot reach a classifier, so a request to `agentcompass` or `agentcompass/*` without `body.profile` is no longer routed (Magpie's log says `未路由：分类不可用`; a JSON reply carries `agentcompass: { routed: false, notice, reason }`). To keep routing: use Mode B with a scorer, send `body.profile` on every request, or set `defaultModel` for a fixed fallback. `scorerType: "heuristic"` and `prefer_local_heuristic` are gone and count as no classifier. See [Without a profile](reference.md#without-a-profile).
+- **Account states, plan-sized capacity and refusal codes.** States `ready`, `plan_inactive`, `usage_failing`, `auth_failed`, `disabled`; a `usage_failing` account keeps dispatching for 6 hours after its last good reading. A configured quotas file that cannot be read is reported as `pool/quotas`. When nothing can serve a request the plugin answers HTTP 503 with a code (`no_route`, `accounts_unavailable`, `pin_not_in_pool`, `model_unhealthy`, `pin_unavailable`, `invalid_caller_profile`) instead of picking an excluded candidate. See [Quotas and accounts](reference.md#quotas-and-accounts) and [refusals](reference.md#candidates-pins-and-refusals).
+- **`/v1/systemone` answers only the route** unless `decisionProviderDetails: true`; accounts, quotas, the profile and `warnings` go to the local log, and a refused pin is always `pin_unavailable`.
+- **Disabling an effort**: a row with `disabled: true` next to the bare name or `efforts[]` row turns off that effort for the model (and the account, when the row names one).
+- **Health and pins**: a failure of a family name no longer takes down the flagship, and naming a model matches only that model's rows.
+- **Session holds**: `affinityMode` accepts `cache`, `turn`, `session`, `strict` and `off`; a held effort that the pool no longer offers steps down or ends the hold (`effort_gone`); a session held 24 hours expires.
+- **Old model aliases are gone.** Names Magpie once aliased to the then-current flagships (`gpt-5.4`, `claude-3-5-sonnet`, ...) are no longer in the catalog: each logs `candidate name <name> is not in the catalog` once per runtime and is out of automatic routing. Use the names in AgentCompass's [`model-capabilities.md`](https://github.com/akiiwa-games/AgentCompass/blob/v0.6.0/skills/agent-compass/references/model-capabilities.md).
 
-**沙盒验收**：`test/linux-sandbox-e2e.mjs` 已按 v0.6.0 的画像与引擎改写，2026-11-13 在真实 Linux Magpie 0.1.4022 与 Bun 1.4.4 上运行（WSL2 `docker-desktop`，没有真实登录）：Scenario 1–10、12、14、15 通过，沙盒内 `bun test` 46 通过；Scenario 13（真实上游）跳过，未经实跑。第一次运行在 Scenario 9 失败，原因是测试替身对 Scenario 6c 超时调用的迟到计数，已在测试里修正，`src/` 没有改动（详见 `docs/RESEARCH_AND_SCHEME.md` §4.8 与 `docs/linux-sandbox-e2e-report-0.1.4022.json`）。期望的路由不再写死在文件里，而由插件自己的 `selectBestRoute` 给出。原来与删除文本规则之前的构建比较的 Scenario 9 和 `realtime_loop` 的 Scenario 10–11 已改写或去掉，`test/run-linux-sandbox.sh` 的路径改为运行时推导。
+## 0.1.5 - 2026-11-08
 
-## 移除内置的文本分类：自动路由需要分类模型
-
-插件不再用正则、词表或消息长度猜任务类型。任务画像只来自分类模型或调用方传入的 `body.profile`。
-
-**升级影响**：Mode A（中间件）访问不了分类模型，所以靠 `agentcompass/auto` 或 `routeAllModels` 走 Mode A 自动路由的用户，如果客户端不传 `body.profile`，请求会变成未路由，响应和日志里带 `未路由：分类不可用`。如果也没配 `defaultModel`，`agentcompass/auto` 这个名字没有对应的模型，通常得到 404。
-
-**处理办法**（任选其一）：
-
-- 改用 Mode B（`/v1/systemone` 路由组）并配分类模型：`allowExternalScorer: true` 加 `scorerBaseUrl`、`scorerCommand` 或 `scorer`。只配分类模型、继续走 Mode A 不会恢复路由。
-- 客户端每次请求都传 `body.profile`。
-- 只想要一个固定回退时配 `defaultModel`，这时请求不做路由。
-
-直接请求具体模型的用户不受影响。各入口的行为见 README 的 `Without a classifier` / `没有分类模型时`。
-
-## 路由与 AgentCompass 对齐（三仓契约 R1–R6）
-
-### 候选池里的旧模型名：去掉别名后的影响
-
-Magpie 之前有一批自有别名，例如 `gpt-5.4` 指向当时的旗舰。这些名字不在 AgentCompass 的 `accounts.json` 里，所以别名去掉了，共影响 **57 个名字**（下表列全）。还在用这些名字的配置不会报配置错误，但路由结果会变：
-
-- 打分下降，例如 `gpt-5.4` 以前按旗舰打分，现在按通用行（tier 2.8）。任务难度高于它们的能力时，这个候选池**选不出模型**。
-- `node test/nonrealtime-change-report.mjs` 按 20 个候选池 × 176 个画像（3520 行）对比 ab8baba：候选池含这些名字的有 752 行结果变了，其中 512 行现在选不出模型。
-- **处理办法**：按表换成"建议改用"的名字。
-
-现在的提示：
-
-- 路由结果的 `warnings` 里每次都带 `candidate name <名字> is not in the catalog: ...; use <替代名>`。日志里同一条提示每个运行时只打一次。Magpie 会同时开多个运行时，所以多打几次是正常的。去重最多记 1024 条，超过后最久没出现的那条会被挤掉，之后再出现时会再打一次。
-- 选不出模型时返回 503。客户端只看到原因码、点名的模型名和一句说明，看不到候选池和配额。明细只写本地日志，例如 `no candidate is available: gpt-5.4@low: ability 2.26 below the coupled floor 3.60; ...`。
-- 日志和 503 里的模型名会转义控制字符，超过 128 个字符的部分截断，单行日志最多 16384 个字符。
-
-| 503 原因码 | 文案（前缀 `agentcompass: `） | 什么时候出现 |
-|---|---|---|
-| `no_route` | `no_route: no candidate can serve this request` | 没有点名，候选池里选不出模型（所有候选都因能力/档位等非配额原因被排除，或因窗口余额耗尽被排除） |
-| `accounts_unavailable` | `accounts_unavailable: every candidate account is unavailable` | 没有点名，未被非配额原因排除的候选（至少有一个）全部因账户不可用而落选 |
-| `pin_not_in_pool` | `pin_not_in_pool: pinned model <名字> is not among the candidates` | 点名的模型不在候选池里 |
-| `model_unhealthy` | `model_unhealthy: pinned model <名字> is marked unhealthy` | 点名的模型不健康（旗舰，或点名的 family 名字） |
-| `model_unhealthy` | `model_unhealthy: the model of pinned bundle <名字> is marked unhealthy` | 点名的 bundle 所用的模型不健康 |
-| `pin_unavailable` | `pin_unavailable: pinned model <名字> cannot serve this request` | 点名的模型因其他原因不可用，例如档位不提供、能力不够 |
-| `invalid_caller_profile` | `invalid_caller_profile: the task profile is invalid` | 调用方给的任务画像不合法 |
-| 其他错误码 | `<错误码>: this request could not be routed` | 其他阻断，例如 `classifier_invalid_output` |
-
-其他原因码里，点名也可以是 `pinned bundle <名字>` 或 `pinned effort <档位>`。健康状态属于模型，所以只点名档位时不会出现 `model_unhealthy`，而是 `pin_unavailable`。
-
-下面第 3 组仍是目录里的条目，只是能力低，所以不给提示，分数按目录计算。
-
-#### 1. 不在目录里（34 个）：按通用行打分（tier 2.8）
-
-| 名字 | 建议改用 |
-|---|---|
-| `claude-3-5-haiku` | `claude-haiku-5-5` |
-| `claude-3-5-haiku-latest` | `claude-haiku-5-5` |
-| `claude-3-haiku` | `claude-haiku-5-5` |
-| `claude-3-opus` | `claude-opus-5-5` |
-| `claude-3-7-sonnet` | `claude-sonnet-5-5` |
-| `claude-3-7-sonnet-latest` | `claude-sonnet-5-5` |
-| `claude-3-5-sonnet` | `claude-sonnet-5-5` |
-| `claude-3-5-sonnet-latest` | `claude-sonnet-5-5` |
-| `gpt-5.5` | `gpt-6-astra` |
-| `gpt-5.4` | `gpt-6-astra` |
-| `gpt-5` | `gpt-6-astra` |
-| `o3` | `gpt-6-astra` |
-| `o1` | `gpt-6-astra` |
-| `gpt-5.4-mini` | `gpt-6-luna` |
-| `gpt-5.4-nano` | `gpt-6-luna` |
-| `gpt-5.5-mini` | `gpt-6-luna` |
-| `gpt-5.5-nano` | `gpt-6-luna` |
-| `gpt-5-mini` | `gpt-6-luna` |
-| `gpt-5-nano` | `gpt-6-luna` |
-| `gpt-4.1-mini` | `gpt-6-luna` |
-| `gpt-4.1-nano` | `gpt-6-luna` |
-| `gpt-4o-mini` | `gpt-6-luna` |
-| `gpt-5.5-pro` | `gpt-6-pro` |
-| `gpt-5.4-pro` | `gpt-6-pro` |
-| `o3-pro` | `gpt-6-pro` |
-| `o1-pro` | `gpt-6-pro` |
-| `gpt-5.3-codex` | `gpt-6.1-sol` |
-| `gpt-5.2-codex` | `gpt-6.1-sol` |
-| `gpt-5.1-codex` | `gpt-6.1-sol` |
-| `gpt-5-codex` | `gpt-6.1-sol` |
-| `gpt-4.1` | `gpt-6.1-sol` |
-| `gpt-4o` | `gpt-6.1-sol` |
-| `o3-mini` | `gpt-6.1-sol` |
-| `o4-mini` | `gpt-6.1-sol` |
-
-#### 2. 属于某个 family（20 个）：按目标模型估算，tier 减 0.3，不用目标的努力曲线
-
-| 名字 | 现在估算的目标 | 建议改用 |
-|---|---|---|
-| `claude-opus-4-5` | `claude-opus-5-5` | `claude-opus-5-5` |
-| `claude-opus-4-1` | `claude-opus-5-5` | `claude-opus-5-5` |
-| `claude-opus-4` | `claude-opus-5-5` | `claude-opus-5-5` |
-| `claude-sonnet-4-5` | `claude-sonnet-5-5` | `claude-sonnet-5-5` |
-| `claude-sonnet-4` | `claude-sonnet-5-5` | `claude-sonnet-5-5` |
-| `deepseek-r1` | `deepseek-v4-pro` | `deepseek-v4-pro` |
-| `deepseek-reasoner` | `deepseek-v4-pro` | `deepseek-v4-pro` |
-| `deepseek-v3` | `deepseek-v4-pro` | `deepseek-v4-pro` |
-| `deepseek-chat` | `deepseek-v4-pro` | `deepseek-v4.1-flash-free` |
-| `deepseek-v4.1-io` | `deepseek-v4-pro` | `deepseek-v4.1-flash-free` |
-| `gemini-3-flash` | `gemini-3.8-flash-high` | `gemini-3.8-flash-high` |
-| `gemini-2.5-flash` | `gemini-3.8-flash-high` | `gemini-3.8-flash-high` |
-| `gemini-2.5-flash-lite` | `gemini-3.8-flash-high` | `gemini-3.8-flash-high` |
-| `gemini-2.0-flash` | `gemini-3.8-flash-high` | `gemini-3.8-flash-high` |
-| `gemini-2.0-flash-lite` | `gemini-3.8-flash-high` | `gemini-3.8-flash-high` |
-| `gemini-3-pro` | `gemini-4-argon-high` | `gemini-4-argon-high` |
-| `gemini-2.5-pro` | `gemini-4-argon-high` | `gemini-4-argon-high` |
-| `gpt-5.6-sol-mini` | `gpt-5.6-sol` | `gpt-6-luna` |
-| `grok-3` | `grok-4.7` | `grok-4.7` |
-| `grok-3-mini` | `grok-4.7-build-fast` | `grok-4.7-build-fast` |
-
-#### 3. 目录里仍有自己的条目（3 个）：不再指向新模型
-
-| 名字 | 建议改用 |
-|---|---|
-| `claude-haiku-4-5` | `claude-haiku-5-5` |
-| `claude-opus-4-6` | `claude-opus-5-5` |
-| `claude-sonnet-4-6` | `claude-sonnet-5-5` |
-
-例如 `claude-opus-4-6` 以前等同当时的旗舰（tier 4.6），现在按它自己的条目（tier 2.74）打分。
-
-另有 6 个名字（`claude-opus-5-5-low|medium|high`、`claude-sonnet-5-5-low|medium|high`）也不再是 Magpie 的别名，但解析结果不变，不受影响。
-
-### 会话保持
-
-- 保持前先看当前候选池是否还提供这个档位（`model:effort`、`efforts[]`、provider 表都算）。不提供时，降到候选池提供、且新路由也能接受的最高档，并加警告。新路由能否接受看能力下限和实时响应下限。没有这样的档位，或者用户点名了档位，就结束保持，`why` 为 `effort_gone`，重新路由。
-- `effort_gone` 之后的重新路由沿用会话原来的任务画像，不按本轮文字（例如"继续"）重新判断，所以不会落回刚被拒绝的那一行。hooks 路径这时不调用分类器。这次路由的 `warnings` 带 `<模型>: effort <档位> is no longer offered; routed again`，选不出时这条写本地日志。
-- 上面的降档只在会话状态跨候选池保留时发生，例如通过 `continuityStore` 选项共享存储。在真实的 Magpie 宿主里改配置会重载运行时、清空存储，会话按新候选池从历史重放，所以结果和新路由相同：能选就按新路由选，选不出就返回 503，不会有"已降档"的警告。重放不经过 `effort_gone`：如果第一轮重放被拒，会话状态是空的，这一轮的文字（例如"继续"）会按新任务单独路由，可能选中第一轮被拒的档位。
-- 点名了裸模型名表外的档位（例如候选池 `grok-4.7`、点名 `grok-4.7:medium`）时，新路由接受这个档位，保持也接受，不会每轮重新路由。
-- 保持期间换点名立即生效，`gpt-6-astra-medium`、`gpt-6-astra:medium`、`claude-opus-9` 这些写法都按解析后的结果比较。
-
-### `/v1/systemone` 默认不返回明细
-
-开了 `enableDecisionProvider` 之后，`/v1/systemone` 是网关的公开路由，所有不限模型的网关 key 都能调用，所以这个回答默认只留路由结论：
-
-| 情况 | `agentcompass` 字段 |
-|---|---|
-| 选出模型 | `{ targetModel, targetEffort }` |
-| 选不出 | `{ targetModel: null, blocked: true, error, message }` |
-
-- 以前回答里的账号标识、配额、候选池名、健康状态、能力值、任务画像、`warnings` 现在默认都没有。`warnings` 写本地日志。成功回答里去掉的账号和配额不写日志；选不出时 `warnings` 可能带账号和配额，把日志发给别人之前要注意。
-- 带点名的拒绝统一成 `pin_unavailable`，文案不带名字，调用方不能借此探测某个名字是否在候选池里、是否健康。这和 middleware 的 503 不同，那边的 503 带原因码和点名的名字。
-- Magpie 只读 `model`、`answers`、`usage`，路由不受影响。如果运营者确实需要明细，比如自己的工具要读，就显式设置 `"decisionProviderDetails": true`（默认关闭，只认 `true`），回答恢复之前的字段，blocked 回答另外多一个 `refusal`。打开后，能调这个接口的 key 都能读到明细。
-
-### 禁用某个档位
-
-要禁用一个模型的某个档位，在候选池里加一行同模型的 `disabled: true`，和裸名或 `efforts[]` 行放在一起：
-
-```json
-["gpt-6.1-sol", { "model": "gpt-6.1-sol", "effort": "medium", "disabled": true }]
-```
-
-- 这一档不再被任何同账户、同模型的行派发。这个修复之前，裸名或 `efforts[]` 行展开出来的这一档仍可能被选中。
-- 点名这一档时返回 503（`pin_unavailable`），和 AgentCompass 相同。
-- 会话停在这一档时会离开它。
-- provider 自己的模型表（`modelsByProvider`）不用抄这一行，`onProvider` 重新路由时同样排除这一档。`/v1/systemone` 的短跟进在这一档被禁用时不走快路径，这一轮会调用分类器。
-- 只对这一个模型生效。family 行是另一个模型：禁用 `claude-opus-5-5` 的 high 不影响 `claude-opus-9`，反过来也一样。
-- 禁用行带 `account` 时只对该账户生效，其他账户和不带账户的裸名不受影响。
-- 手写了 `disabled_by_default` 的行也一样：点名能用它，但用不了被禁用的档位。
-
-### 模型健康状态
-
-- 名字有自己的条目或别名时，失败记在解析后的条目下，任何写法都会让这一行下线。
-- family 名字的失败只记在原名下。`gpt-6.2-sol-preview` 一次 502 不再让 `gpt-6.1-sol` 下线；反过来，不点名时，`gpt-6.1-sol` 不健康也不再排除 `gpt-6.2-sol-preview`。代价是上游整体故障时，返回 503 之前多几次失败请求，上限是池里的名字数。
-- 点名有自己条目或别名的模型时，只匹配这个模型的行。family 行是另一个模型，不算匹配，不能顶替点名被选，健康与否都一样。所以点名 `claude-opus-5-5` 时总是选它自己；它不健康时返回 503（`model_unhealthy`）；候选池里只有 `claude-opus-9` 时返回 503（`pin_not_in_pool`）。以前 family 行分数更高时可能被选中。停在 family 行上的会话收到点名后会离开它。点名 family 名字本身时，只看这个名字的健康状态。
-
-### 其他行为变化
-
-- 整个对话没有用户文字时（例如第一轮只发图片），只要有候选池或点名也照常路由（middleware 和 hooks 相同），所以禁用的档位、点名和不健康拒绝都生效。以前这种请求不路由：虚拟名默认返回 404，配了 `routeModelTriggers`、Routing Group 或 `routeAllModels` 时按原模型和默认的 `high` 或客户端自带的档位发出。现在虚拟名加无文字请求按候选池正常路由，候选池里的未知模型名选不出时返回 503。既没有候选池也没有点名时不变。
-- 候选名上的 `:auto`、`:off`、`:default` 不约束档位，路由时会去掉；`-off` 不是档位后缀（`gpt-6.1-sol-off` 按 family 处理）。
-- 点名时不一样：`:default` 算一个具体档位，点名 `gpt-6.1-sol:default` 找不到对应的行，返回 503（`pin_unavailable`），和 AgentCompass 相同。
-- 任务级 `multi_task`、`task_count` 的值原样校验。`multi_task:"false"`、`task_count:0` 这类值返回 `invalid_caller_profile`。
-- 不归本插件路由的请求也会去掉点名字段，不传给上游。
-- 保持的轮次带上候选池里那一行的 `modeId`、`draws`。
-- `when` 规则排除的行会写进 `warnings` 和 `excluded`，并给出原因。
-- `onProvider` 不能拒绝请求：Magpie 在这个阶段不理会 `ctx.reject`。provider 的模型表提供不了路由结果、且表内也选不出模型时，只告警，然后照发，由上游报错和网关的转试处理。
-- 分数按 Python 的方式取整（`0.7625` → `0.762`，恰好居中时取偶数），和 AgentCompass 保持一致。
-
-### 已知限制
-
-- `useColonEffort: false` 时，`onProvider` 选中的模型不在宿主选的模型上生效：宿主只认自己选的模型，档位却用 `onProvider` 选的。如果 `modelsByProvider` 的列表里没有宿主选的模型，可能发出该模型已禁用的档位。默认的冒号写法不受影响。
-- `modelsByProvider` 在真实网关（v0.1.3196）里改不了模型，默认写法下连档位也改不了。这是宿主行为，上一条的根因也在这里。
-- `/v1/systemone`：上一轮是 `max`、`xhigh` 被禁用、`criteria` 里没有 `max` 时，回答映射成 `xhigh`。
-- 带 `account` 的禁用行只对该账户生效。`useColonEffort: false` 且 `modelsByProvider` 是裸名列表时，这一档仍可能发出。这符合上面的规则，配置时留意。
+- A request that lands on a pooled `moejs` runtime that did not serve the earlier turn replays the anchor turn from the resent history (`replayedState`), so a session stays on its model across runtimes; a replayed state has no age, so in `cache` mode it holds only inside a tool loop.
