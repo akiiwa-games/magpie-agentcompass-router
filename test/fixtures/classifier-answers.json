@@ -1264,29 +1264,6 @@
    "tool_operation": 0
   }
  },
- "{\"objective\":\"Now audit the cross-module lock ordering invariants and fix the race condition in internal/gateway/affinit#5b5f7f1cc7edfca812830e736bed92e9f33e70b8281f665905213159c65290a4": {
-  "work_kind": "debug_review",
-  "reasoning_depth": 3,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 2,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 1,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
  "{\"objective\":\"Audit our multi-module distributed lock manager to find the root cause of the deadlock and race condition.\"}": {
   "work_kind": "debug_review",
   "reasoning_depth": 3,
@@ -1540,29 +1517,6 @@
    "tool_operation": 3
   }
  },
- "{\"objective\":\"# 任务：1970年代流行文化与时代器物调研及玩法母题提案\\n\\n- 工作目录：`E:/P4/ CatchCatch`\\n- 产出落盘：`docs/research/motif-notes/1970s_流行文化与#6bb6822a77816c14b06c8b39166864a981732e90bfa9914252ace3ec7bd2f29b": {
-  "work_kind": "exploration_analysis",
-  "reasoning_depth": 2,
-  "code_complexity": 0,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "read-only",
-  "interaction_style": "exploration",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 3,
-   "coding": 0,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
  "{\"objective\":\"Search official vendor documentation and public benchmarks to compare WebGPU compute shader subgroup support across Chrome, Edge, and Safari in 2026, and write a structured compatibility table.\"}": {
   "work_kind": "general_implementation",
   "reasoning_depth": 2,
@@ -1586,29 +1540,6 @@
    "tool_operation": 0
   }
  },
- "{\"objective\":\"# Task: Implement standalone weighted interval merger (`tools/interval_merger.py`)\\n\\n## Specification (Se#eb2278d5b4fa3c9c446576703200fbf9ec47a2b3c7985d45a9e25816c991a42e": {
-  "work_kind": "self_contained_code",
-  "reasoning_depth": 2,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
  "{\"objective\":\"# 任务：第二章嫌疑人私信与备忘录文案编写\\n\\n- 交付路径：`docs/narrative/ch2_suspect_dm.md`\\n\\n## 角色设定（已内联）\\n- 林夏（24岁，独立摄影师，表面客气但极度防备，说话简短带反问）\\n- 陈默（29岁，旧书店店主，习惯用账目和旧物打比方）\\n\\n## 任务要求\\n根据上述内联人设，编写林夏与陈默在案发当晚的 12 条熟人私信往来及 2 则手机备忘录，制造口供时间线上的微妙矛盾。\"}": {
   "work_kind": "text_in_text_out",
   "reasoning_depth": 1,
@@ -1616,190 +1547,6 @@
   "needs_visual": false,
   "needs_gui": false,
   "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "read-only",
-  "interaction_style": "text_only",
-  "expected_hours": 0.4,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 0,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"# Task: Fix stop race in `app/upload_queue.py`\\n\\n- Read rules: `AGENTS.md`, `docs/architecture.md`\\n- Tar#2a7ec88e16c144325f29c44332ad2103dd0acf2b405a882478ab56f9117a199c": {
-  "work_kind": "debug_review",
-  "reasoning_depth": 3,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 2,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"# 任务：向 makecindy/cindy-official-plugins 提交 AgentCompass 插件的上游 PR\\n\\n1. 克隆上游仓库 `https://github.com/makecind#e3ff0ae84295b3453afd716ba5c5bdc0ad0737b433c17c3e4063f694e55d81c8": {
-  "work_kind": "general_implementation",
-  "reasoning_depth": 2,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"# Task: Independent security & invariant review of commit `a81f3c2` (read-only)\\n\\nInspect `git show a81f3#85973f0f97c9a6b647af8b14e36522ad86b82fb50f28dc5f15913894fe2dc445": {
-  "work_kind": "debug_review",
-  "reasoning_depth": 2,
-  "code_complexity": 0,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "read-only",
-  "interaction_style": "engineering",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 0,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"Investigate intermittent high CPU and memory growth in the local tray process over 6 hours of uptime. Insp#8ccd404fbcd268e7c353af982a7fcefc9d6be71a81b5ed0db27ea50e212a272f": {
-  "work_kind": "exploration_analysis",
-  "reasoning_depth": 2,
-  "code_complexity": 0,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "read-only",
-  "interaction_style": "exploration",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 1,
-   "coding": 0,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"Refactor the quota reservation and ledger reconciliation pipeline across `allocator.py`, `route_judge.py`,#244f8f30868adb92aae1d0b3eb60ec674dcb0d433b84270fcca60fa7b700b13c": {
-  "work_kind": "general_implementation",
-  "reasoning_depth": 3,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 2,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"# Task: First-principles critique and redesign of multi-agent scoring utility\\n\\nGiven the following self-#297dcf3b114f047966501377d1493fa0048134e172bbd68f22ea67c28327e522": {
-  "work_kind": "direction_reasoning",
-  "reasoning_depth": 3,
-  "code_complexity": 0,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "read-only",
-  "interaction_style": "advisory",
-  "expected_hours": 2,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 3,
-   "coding": 0,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"Execute the local release verification checklist: run `python -X utf8 skills/agent-compass/scripts/test_al#d779ad49b79bfa8b9e6b92fff96640cd15b3f7781d68c0324c9599e83ff43771": {
-  "work_kind": "tool_execution",
-  "reasoning_depth": 1,
-  "code_complexity": 1,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 0.4,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 1,
-   "aesthetics": 0,
-   "tool_operation": 2
-  }
- },
- "{\"objective\":\"Please complete these two tasks: (1) Fix the SQLite lock timeout in `skills/agent-compass/scripts/dispatch#4125fcc672a7858cfd9ffe5b59f7f4b4f6f86bdf09056699d51e1fa470fa2740": {
-  "work_kind": "web_research",
-  "reasoning_depth": 1,
-  "code_complexity": 0,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": true,
   "wants_fast": false,
   "read_only_review": false,
   "access": "read-only",
@@ -2554,52 +2301,6 @@
  },
  "{\"objective\":\"实现实时刷新页面與修复页面轮询逻辑，并在前端设计盯盘看板、排查客户端循环等待异常。\"}": {
   "work_kind": "debug_review",
-  "reasoning_depth": 2,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"Implement the parser module and unit tests\\ncontext context context context context context context contex#52713970db56342cccbe7dd61b03cef3f448beaa0e3cefefcb51e4e912009ed9": {
-  "work_kind": "general_implementation",
-  "reasoning_depth": 2,
-  "code_complexity": 2,
-  "needs_visual": false,
-  "needs_gui": false,
-  "local_only": false,
-  "wants_fast": false,
-  "read_only_review": false,
-  "access": "write",
-  "interaction_style": "engineering",
-  "expected_hours": 1,
-  "hours_confidence": "medium",
-  "urgency": "unknown",
-  "multi_task": false,
-  "task_count": "1",
-  "axis_demand": {
-   "divergence": 0,
-   "coding": 2,
-   "aesthetics": 0,
-   "tool_operation": 0
-  }
- },
- "{\"objective\":\"Now enter the live game loop and click on spawn\\ncontext context context context context context context c#1b9e0c29c574a966eba14118e7fd3e2d256d2c3e813bbab6d5efe5bfb40db59f": {
-  "work_kind": "general_implementation",
   "reasoning_depth": 2,
   "code_complexity": 2,
   "needs_visual": false,

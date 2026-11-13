@@ -17,7 +17,7 @@ const WORDS = [
   "/compact", "<compact_instruction>", "Summarize the conversation so far", "Provide a detailed summary of the conversation so far",
   // needs_gui, needs_visual, local_only
   "screenshot", "image", "图片", "截图", "设计稿", "figma", "mockup", "visual diff", "click the", "点击", "用鼠标", "operate the browser",
-  "E:/PROJECTS/x", "localhost", "pytest", "worktree", "public web",
+  "D:/work/x", "localhost", "pytest", "worktree", "public web",
   // reasoning_depth and the demand on each category
   "prove", "formal proof", "形式化证明", "architecture", "架构", "refactor", "重构", "deadlock", "死锁", "race condition", "root cause", "根因",
   "brainstorm", "头脑风暴", "发散", "creative", "first principles", "whole repository", "cross-module", "跨模块", "分布式",

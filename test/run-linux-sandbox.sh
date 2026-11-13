@@ -2,6 +2,8 @@
 set -eu
 
 SANDBOX="/run/magpie-sandbox"
+# The system's temp directory, before TMPDIR is pointed into the sandbox below (which is removed when the run ends)
+SYSTEM_TMP="${TMPDIR:-/tmp}"
 
 # WSL appends Windows' directories to PATH. Magpie looks for agents there (claude, grok), and one found there runs on the
 # host, with the host's own sign-ins.
@@ -162,14 +164,42 @@ case "${1:-}" in
     ;;
 esac
 
-if [ -d "/mnt/c/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch" ]; then
-  WIN_HOST="/mnt/c"
-else
-  WIN_HOST="/mnt/host/c"
+# Nothing below names a person, a session or a machine: every location is asked of the system, or given in the environment.
+#
+# SCRATCH: where the Magpie build (magpie-linux-amd64) and the musl Bun (bun-linux-musl) are kept between runs. It is
+# given by the environment, else a directory of its own under the system's temp directory as it was before this script
+# pointed TMPDIR into the sandbox.
+SCRATCH="${SCRATCH:-$SYSTEM_TMP/magpie-sandbox-scratch}"
+mkdir -p "$SCRATCH"
+
+# WIN_PROFILE: the Windows user profile, as a path WSL can open. WIN_PROFILE in the environment says it; otherwise it is what
+# Windows reports for %USERPROFILE% (asked of cmd.exe through interop and translated by wslpath). The drive is mounted at
+# /mnt/c, or at /mnt/host/c when this runs in a namespace that moved it.
+if [ -z "${WIN_PROFILE:-}" ]; then
+  win_profile=""
+  for cmd in /mnt/c/Windows/System32/cmd.exe /mnt/host/c/Windows/System32/cmd.exe; do
+    [ -x "$cmd" ] || continue
+    win_profile=$(cd "$(dirname "$cmd")" && "$cmd" /c 'echo %USERPROFILE%' 2>/dev/null | tr -d '\r') || win_profile=""
+    break
+  done
+  if [ -n "$win_profile" ] && command -v wslpath >/dev/null 2>&1; then
+    WIN_PROFILE=$(wslpath -u "$win_profile" 2>/dev/null || true)
+  fi
 fi
-SCRATCH="$WIN_HOST/Users/tanwei/.gemini/antigravity-cli/brain/8d5cec5e-b7a5-4cc4-bb52-1d29bd1b8676/scratch"
-WIN_TMP="$WIN_HOST/Users/tanwei/AppData/Local/Temp"
-WSL_CRASH_DIR="${WSL_CRASH_DIR:-$WIN_TMP/wsl-crashes}"
+WIN_PROFILE="${WIN_PROFILE:-}"
+if [ -n "$WIN_PROFILE" ] && [ ! -d "$WIN_PROFILE" ] && [ -d "/mnt/host${WIN_PROFILE#/mnt}" ]; then
+  WIN_PROFILE="/mnt/host${WIN_PROFILE#/mnt}"
+fi
+# WIN_TMP: the Windows temp directory (%TEMP%), where /wsl-capture-crash writes its dumps; WSL_CRASH_DIR is that folder.
+# Neither is guessed: with no profile found they stay empty, and a run that needs them says so (below).
+if [ -z "${WIN_TMP:-}" ] && [ -n "$WIN_PROFILE" ]; then
+  WIN_TMP="$WIN_PROFILE/AppData/Local/Temp"
+fi
+WIN_TMP="${WIN_TMP:-}"
+if [ -z "${WSL_CRASH_DIR:-}" ] && [ -n "$WIN_TMP" ]; then
+  WSL_CRASH_DIR="$WIN_TMP/wsl-crashes"
+fi
+WSL_CRASH_DIR="${WSL_CRASH_DIR:-}"
 CRASH_DIR_EXISTED=0
 CRASHES_BEFORE=""
 if [ -d "$WSL_CRASH_DIR" ]; then
@@ -228,19 +258,13 @@ rm -rf "$SANDBOX"
 mkdir -p "$SANDBOX/home" "$SANDBOX/config" "$SANDBOX/cache" "$SANDBOX/data" "$SANDBOX/state" "$SANDBOX/tmp" "$SANDBOX/agentcompass"
 chmod 700 "$SANDBOX"
 
-# MAGPIE_LINUX_BIN: the Magpie build under test (a release's static magpie-cli-linux-amd64, e.g. 0.1.2891)
-cp "${MAGPIE_LINUX_BIN:-$SCRATCH/magpie-linux-amd64}" "$SANDBOX/magpie"
+# MAGPIE_LINUX_BIN: the Magpie build under test (a release's static magpie-cli-linux-amd64, e.g. 0.1.2891); else the one in SCRATCH
+MAGPIE_SRC="${MAGPIE_LINUX_BIN:-$SCRATCH/magpie-linux-amd64}"
+[ -f "$MAGPIE_SRC" ] || { echo "[ABORT] No Magpie build at $MAGPIE_SRC: set MAGPIE_LINUX_BIN to a static magpie-cli-linux-amd64 (or put it in SCRATCH)" >&2; exit 70; }
+cp "$MAGPIE_SRC" "$SANDBOX/magpie"
 chmod +x "$SANDBOX/magpie"
 cp -r "$REPO"/* "$SANDBOX/agentcompass/"
 cp "$0" "$SANDBOX/run.sh"
-
-# BASELINE_SRC: an export of the build non-realtime routing is compared with in Scenario 9, made outside the sandbox
-# (it has no git): `git archive origin/main | tar -x -C <dir>`. Without it Scenario 9 is reported as skipped.
-if [ -n "${BASELINE_SRC:-}" ]; then
-  mkdir -p "$SANDBOX/agentcompass-main"
-  cp -r "$BASELINE_SRC"/* "$SANDBOX/agentcompass-main/"
-  export BASELINE_PLUGIN_DIR="$SANDBOX/agentcompass-main"
-fi
 
 if [ -f "$SCRATCH/bun-linux-musl" ]; then
   cp "$SCRATCH/bun-linux-musl" "$SANDBOX/bun"
@@ -340,9 +364,11 @@ run_isolation_and_hash_selftest() {
 }
 run_isolation_and_hash_selftest
 
-export PLUGIN_COMMIT="${PLUGIN_COMMIT:-}" BASELINE_COMMIT="${BASELINE_COMMIT:-}"
+export PLUGIN_COMMIT="${PLUGIN_COMMIT:-}"
 
 if [ -n "${REAL_CODEX_AUTH:-}${REAL_CLAUDE_AUTH:-}${REAL_GROK_AUTH:-}" ]; then
+  # The crash-dump check below reads the Windows temp directory, so a real sign-in does not run without finding it
+  [ -d "$WIN_TMP" ] || { echo "[ABORT] The Windows temp directory was not found (WIN_PROFILE=${WIN_PROFILE:-unset}): set WIN_PROFILE or WIN_TMP to it as a path WSL can open" >&2; exit 70; }
   prlimit --pid $$ --core=1:1
   [ -x "$SANDBOX/bun" ] || { echo "[ABORT] Copying a real sign-in takes $SCRATCH/bun-linux-musl" >&2; exit 70; }
   mkdir -m 700 "$SANDBOX/sign-ins"

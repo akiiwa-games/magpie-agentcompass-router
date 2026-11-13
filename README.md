@@ -220,11 +220,13 @@ Set under `plugins.agentcompass` (or via `magpie plugin options`):
 npm test                       # or: bun test
 ```
 
-Against real Magpie builds, with fake credentials and a local mock upstream and classifier (`docs/RESEARCH_AND_SCHEME.md` §4.6):
+Against real Magpie builds, with fake credentials and a local mock upstream and classifier (`docs/RESEARCH_AND_SCHEME.md` §4.6). It runs under WSL2 and needs a static Linux Magpie build; the expected route of each request is the one `selectBestRoute` gives for its profile and pool, so there is no second build to compare with:
 
 ```sh
-BASELINE_SRC=<export of the commit to compare with> MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
+MAGPIE_LINUX_BIN=<magpie-cli-linux-amd64> sh test/run-linux-sandbox.sh
 ```
+
+Locations are derived at run time, never written into the script: `SCRATCH` (where the Magpie build and the musl Bun are kept between runs) defaults to a directory under the system temp directory, and `WIN_PROFILE` / `WIN_TMP` (the Windows user profile and temp directory, used only when a real sign-in is given through `REAL_CODEX_AUTH` / `REAL_CLAUDE_AUTH` / `REAL_GROK_AUTH`) are read from Windows through `cmd.exe` and `wslpath`, or taken from the environment.
 
 ---
 
