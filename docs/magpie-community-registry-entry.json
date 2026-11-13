@@ -4,7 +4,7 @@
   "kind": "middleware",
   "community": true,
   "summary": {
-    "en": "AgentCompass routing for Magpie: picks <model>:<effort> from candidateModels by task intent, Model DNA and session continuity, orders pool seats by subscription quota, and optionally serves /v1/systemone for Routing Groups.",
-    "zh": "AgentCompass 路由插件：按任务意图、模型能力与会话连续性从 candidateModels 选出 <model>:<effort>，按订阅配额排号池席位，并可选作为路由组 /v1/systemone 分类器。"
+    "en": "AgentCompass routing for Magpie: picks <model>:<effort> from candidateModels by a task profile's four capability categories, per-effort time and price, and session continuity, orders pool seats by subscription quota, and optionally serves /v1/systemone for Routing Groups.",
+    "zh": "AgentCompass 路由插件：按任务画像的四类能力需求、各档位的耗时与价格和会话连续性从 candidateModels 选出 <model>:<effort>，按订阅配额排号池席位，并可选作为路由组 /v1/systemone 分类器。"
   }
 }

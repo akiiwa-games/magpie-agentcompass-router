@@ -1,5 +1,36 @@
 # 发布说明
 
+## 0.2.0：对齐 AgentCompass v0.6.0（固定在 974eb49）
+
+评分引擎换成 AgentCompass v0.6.0 的实现，逐模块移植，与 `allocator.plan` 对拍一致：对拍网格 58,016 行里，抽取的 19,339 行（每三行取一行）上，选中的模型、档位和分数（1e-9 内）全部相同；仓库里提交的样本是 1,451 行（`npm test` 跑它）。
+
+**打分**
+
+- 四类能力：`divergence`、`coding`、`aesthetics`、`tool_operation`，画像里用 `axis_demand`（各 0..3 级）表示需求。每个 `<模型, 档位>` 行的净分 `N = fit + continuity + boost - quota_cost`，`fit = Σ w·(min(z, cap) − t1) / Σ w`。`tool_operation` 三级要求模型有图片输入。
+- 数据门禁（规则 B）：需求的类别没有数据、计费账号没有标价、图片输入未知、该档位没有 Time/Task、窗口容量未知，这一行不进自动路由；点名该模型仍可派发，并在 `warnings` 里带上数据错误。
+- 不再有能力下限、过度合格惩罚和实时降档：由 fit 与配额经济选档位。排序键依次是净分、等待小时、完成小时、美元、类别级别。
+- 配额经济 v3.1：5 小时窗口只做可行性闸门，24 小时及以上的窗口按机会成本定价；窗口确认耗尽或低于启动下限则排除。账号的 `plan` 未上报时容量未知，该账号不进自动路由，请在 `quotas` 里写上 `plan`。
+- 点名：`constraintModel` / `pinnedModel`（可带 `:档位` 或 `-档位`）、`constraintEffort` / `pinnedEffort`、`pinnedBundle`；点名不可用时返回原因码，不换别的模型。
+- 新选项 `userScores`：自己给某个模型的类别打分（1..3 级），优先于维护者数据和实测。
+
+**升级影响**
+
+- 画像字段变了：`axis_demand`、`access`、`wants_fast`、`read_only_review` 必填；`context_scale`、`hallucination_risk`、`error_cost`、`divergence`、`realtime_loop` 不再存在，旧形状的画像会被拒绝（`invalid_caller_profile`），没有兼容读取。
+- `realtime_loop`（选项、请求字段、`why: "realtime_loop"` 的会话保持）整体删除。
+- 家族名和未知名（如 `claude-opus-9`）没有自己的分数：自动路由不会选它们，只有点名才派发，同时带数据错误的告警；不再按"通用行"或"同系列估计"自动打分。
+- 去掉的导出：`catalog.js` 的 `DEFAULT_MODELS`、`DEFAULT_SCORING_POLICY`、`KIND_TRAITS`、`CANONICAL_ROUTES`、`EFFORT_CURVES`、`resolveModelSpec`；`index.js` 的 `computeWindowCost`、`demandForecast`、`evaluateModelQuota`、`CANONICAL_ROUTES`、`healthOnlyQuotas`；`continuity.js` 的 `effectiveRealtimeLoop`。新增 `ROUTES`。
+- 会话保持里按 tier 抬档的那一支（`capability_outgrown` 中依任务难度的 tier 升级）已删除；GUI / 计算机操作超出轻量模型改按模型是否有图片输入判断。
+- `canonicalModel` 对家族名和未知名返回原名（它们是各自的模型，不折叠到旗舰）。
+- 坏掉超过 6 小时的 quotas 文件：在 `selectBestRoute` 里只是 `pool/quotas` 被排除并告警；没有账号依赖该文件时网关行照常路由（`onAccount` 路径仍按"所有候选账号不可用"返回 503）。
+
+**没有移植的部分**（Magpie 只做路由）：启动 worker、harness 顺序与 harness 位次（`harness_place` 恒为 0）、fast 变体与 `wants_fast` 的启动侧逻辑。
+
+**机器无关**
+
+固定版本文件 `test/fixtures/agentcompass-pin.json` 只写提交号。AgentCompass 检出目录用 `--agentcompass-repo <路径>` 或环境变量 `MAGPIE_AGENTCOMPASS_REPO` 给出；`npm run catalog:sync` / `catalog:check` 和 `test/fixtures/gen_routing_parity.py`（`--repo`）读它。没有检出时，核对生成文件的测试（`7.1`）跳过。
+
+**未验证**：`test/linux-sandbox-e2e.mjs`（需要 WSL2 沙箱里的 Linux `magpie` 与 `bun`）这次没有迁移也没有运行，里面仍有 `realtime_loop` 与旧画像字段的场景，需要在有沙箱的机器上改完再跑。
+
 ## 移除内置的文本分类：自动路由需要分类模型
 
 插件不再用正则、词表或消息长度猜任务类型。任务画像只来自分类模型或调用方传入的 `body.profile`。
