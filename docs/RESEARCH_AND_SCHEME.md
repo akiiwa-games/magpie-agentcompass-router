@@ -6,7 +6,7 @@
 
 > **状态（0.2.0）**：引擎已换成 AgentCompass v0.6.0（固定在 `974eb49`）的四类能力打分、配额经济与数据门禁；0.1.x 的 6D/7D 能力向量、3D Model DNA、`realtime_loop`、`EFFORT_CURVES` 等都已被取代并从代码里删除。本文按下面的口径读：
 >
-> - **现行**：§1（Magpie 的局限，已按 v0.6.0 重写）、§2（双模式架构）、§3（打分，已重写为 v0.6.0）、§4.6（与 AgentCompass 的对拍）、§4.8（0.2.0 的沙盒场景）、§5。§4.4 里的隔离与凭据边界也仍然适用。
+> - **现行**：§1（Magpie 的局限，已按 v0.6.0 重写）、§2（双模式架构）、§3（打分，已重写为 v0.6.0）、§4.6（与 AgentCompass 的对拍）、§4.8（0.2.0 的沙盒场景，已在 Magpie 0.1.4022 上运行）、§5。§4.4 里的隔离与凭据边界也仍然适用。
 > - **历史记录**：§3.5、§4.1、§4.2、§4.3、§4.4 的运行结果、§4.5、§4.7 是 0.1.x 引擎上某一次（2026 年 10–11 月）运行的原始记录，标题里写明；其中的画像字段、路由结果与命令属于当时的引擎，不随引擎更新，也不是现行行为的说明。现行引擎见 README 的 "How it decides" 与 `docs/RELEASE_NOTES.md` 的 0.2.0。
 
 ---
@@ -372,9 +372,36 @@ Scenario 9 不再比较直接发文本的结果，因为新版本不读文本。
 - **短追问不再因为短而保持**：Scenario 9 里 `bundles with effort` 池的一行 `继续`，基线是 `claude-opus-5-5:xhigh`，新版本是 `claude-opus-5-5:medium`，和本会话第一个请求一致。这一行取决于落在哪个运行时（0.1.2891 这次没有差异，0.1.3196 有一行）。它单独记在报告的 `followupsRoutedAgainAsTheirFirstRequest` 里，并断言等于首个请求的路由，不算差异。
 - **沙盒内的单元测试**：`bun test` 是 121 通过、26 跳过、0 失败。跳过的是要和 git 基线比较的 parity 测试，沙盒里没有 git；宿主机上 `npm test` 147 项全部运行并通过。
 
-### 4.8 0.2.0 的沙盒场景（现行，尚未在沙盒里运行）
+### 4.8 0.2.0 的沙盒场景（现行；2026-11-13 已在真实 Magpie 0.1.4022 上运行）
 
-`test/linux-sandbox-e2e.mjs` 已按 v0.6.0 的画像与引擎改写，`test/run-linux-sandbox.sh` 的路径改为运行时推导（见 README）。**这次没有在真实 Magpie 上运行它**：它需要 WSL2 沙盒里的 Linux `magpie` 与 `bun`，开发这版的机器没有；下一次在有沙盒的机器上跑过之后，结果再补进来。目前做过的是静态检查：`node --check`；它向插件取的名字（`selectBestRoute`、`scoreTaskLive`、`hooks` 与 `middleware` 的 `onRequest`、`onAccount`）都在 `src/` 里；用同一份画像与候选池在本机对中间件和 `selectBestRoute` 各算一遍，输出一致（7 种候选池 × 9 种画像，0 处差异）。
+`test/linux-sandbox-e2e.mjs` 已按 v0.6.0 的画像与引擎改写，`test/run-linux-sandbox.sh` 的路径改为运行时推导（见 README）。
+
+**运行记录**：2026-11-13，WSL2 的 `docker-desktop` 发行版（Linux 6.18.40.1-microsoft-standard-WSL2，未启动 Docker Desktop），Magpie `v0.1.4022` 的 `magpie-cli-linux-amd64`（sha256 `46e96145537e52d39d286b17dee4b1366c96b6d9e6a287db45fc802da9128dd0`，与发布的 `SHA256SUMS` 一致）、Bun `1.4.4` 的 `bun-linux-x64-musl`（zip sha256 `a5a8ccc5e74dcb883fe974f125a7bdb3b41e5195ed1b870e73f17effd3eb2b2d`，解出的可执行文件 sha256 `29a31375a72f97c7e3fc25dd57d7dde88da5907aa8970808f57f91e0711bdad2`）。被测的是 `97c97e3`（`src/` 与 `ac494f3` 相同）。命令：
+
+```sh
+SCRATCH=<scratch> MAGPIE_LINUX_BIN=<scratch>/magpie-cli-linux-amd64 PLUGIN_COMMIT=97c97e3 REPORT_OUT=docs/linux-sandbox-e2e-report-0.1.4022.json sh test/run-linux-sandbox.sh
+```
+
+没有任何真实登录：脚本自带的假凭据自检（C1/C2/C5）通过，Scenario 13 跳过。完整记录：[`linux-sandbox-e2e-report-0.1.4022.json`](./linux-sandbox-e2e-report-0.1.4022.json)。
+
+| 场景 | 结果 |
+|---|---|
+| 沙盒内 `bun test`（router、no-hardcode、sign-in-copy） | 46 通过、0 失败 |
+| 1–2 | PASS |
+| 3 | PASS（带画像的请求 0 次分类调用，额外开销 9ms） |
+| 4–5 | PASS（四种画像各到 `ideation=gemini-4-argon-high:high`、`coding=gpt-6-astra:low`、`bulk=gpt-6.1-sol:low`、`debug=claude-opus-5-5:high`；`/v1/messages`、SSE） |
+| 6–7 | PASS（分类模型 500、超时约 306ms、未配置都不路由，走路由组兜底 `gpt-6-luna`） |
+| 8 | PASS（20 个会话，工具循环与短追问 0 次重路由） |
+| 9 | PASS（112 个请求 = 7 种候选池 × 4 种画像 × 4 种协议，14 个不同路由，全部与 `selectBestRoute` 一致） |
+| 10 | PASS（四类能力 3 级需求到不同的模型） |
+| 12 | PASS |
+| 14 | PASS（902 种措辞，路由不变） |
+| 15 | PASS |
+| 13 | 跳过（没有 `REAL_*_AUTH`：本次不做真实登录） |
+
+**跑出来的失败**：第一次运行 Scenario 1–8 通过，Scenario 9 断言 `Mode A must not call a classifier` 失败（8 !== 7），所有请求的路由都与引擎一致。原因在测试：Scenario 6c 里 Magpie 在 `scorerTimeoutMs`（300ms）后放弃了超时的分类调用，而测试替身在 2000ms 延迟后才应答并计数，这一次计数落在了 Scenario 9 里。`src/` 没有改动。6c 现在等这次调用到达并断言它恰好一次（`97c97e3`），之后全部通过。两轮测试修复内收敛。
+
+**局限**：Scenario 13（真实上游）与 13B 没有运行，仍未经实跑。`docker-desktop` 发行版每次启动都报 `distribution disk … mounted read-only as a fallback`，对本脚本（只用 tmpfs）无影响。
 
 场景与它们验证的事：
 

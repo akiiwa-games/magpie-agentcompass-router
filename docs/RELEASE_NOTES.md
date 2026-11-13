@@ -30,7 +30,7 @@
 
 固定版本文件 `test/fixtures/agentcompass-pin.json` 只写提交号。AgentCompass 检出目录用 `--agentcompass-repo <路径>` 或环境变量 `MAGPIE_AGENTCOMPASS_REPO` 给出；`npm run catalog:sync` / `catalog:check` 和 `test/fixtures/gen_routing_parity.py`（`--repo`）读它。没有检出时，核对生成文件的测试（`7.1`）跳过。
 
-**未验证**：`test/linux-sandbox-e2e.mjs`（需要 WSL2 沙箱里的 Linux `magpie` 与 `bun`）已按 v0.6.0 的画像与引擎改写，但这台机器没有沙箱，**没有运行过**：检查的只是 `node --check`、它向插件取的名字都在 `src/` 里，以及用同一份画像与候选池在本机对中间件和 `selectBestRoute` 各算一遍、输出一致。期望的路由不再写死在文件里，而由插件自己的 `selectBestRoute` 给出。原来与删除文本规则之前的构建比较的 Scenario 9 和 `realtime_loop` 的 Scenario 10–11 已改写或去掉（见 `docs/RESEARCH_AND_SCHEME.md` §4.8），`test/run-linux-sandbox.sh` 的路径改为运行时推导。需要在有沙箱的机器上跑一遍再记录结果。
+**沙盒验收**：`test/linux-sandbox-e2e.mjs` 已按 v0.6.0 的画像与引擎改写，2026-11-13 在真实 Linux Magpie 0.1.4022 与 Bun 1.4.4 上运行（WSL2 `docker-desktop`，没有真实登录）：Scenario 1–10、12、14、15 通过，沙盒内 `bun test` 46 通过；Scenario 13（真实上游）跳过，未经实跑。第一次运行在 Scenario 9 失败，原因是测试替身对 Scenario 6c 超时调用的迟到计数，已在测试里修正，`src/` 没有改动（详见 `docs/RESEARCH_AND_SCHEME.md` §4.8 与 `docs/linux-sandbox-e2e-report-0.1.4022.json`）。期望的路由不再写死在文件里，而由插件自己的 `selectBestRoute` 给出。原来与删除文本规则之前的构建比较的 Scenario 9 和 `realtime_loop` 的 Scenario 10–11 已改写或去掉，`test/run-linux-sandbox.sh` 的路径改为运行时推导。
 
 ## 移除内置的文本分类：自动路由需要分类模型
 
