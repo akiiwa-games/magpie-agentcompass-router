@@ -9,8 +9,15 @@
  * (no `magpie.hooks`, no async scorer): Mode A is `src/middleware.js` on the virtual models `agentcompass` /
  * `agentcompass/*`, Mode B is the decision provider's `/v1/systemone` (opt-in `enableDecisionProvider`).
  *
- * Routing rests on a task profile: from the request (`body.profile`) on Mode A, from a classifier or the state on Mode B.
- * Without one a request is not routed (README, "Without a classifier"). A task's words decide nothing.
+ * Routing rests on a task profile (v0.6.0: the work kind, the reasoning depth, `access`, the per-category `axis_demand` of
+ * divergence / coding / aesthetics / tool_operation at levels 0..3, hours and urgency): from the request (`body.profile`) on
+ * Mode A, from a classifier or the state on Mode B. Without one a request is not routed (README, "Without a classifier").
+ * A task's words decide nothing.
+ *
+ * What a route should be is not written into this file: the scores, the quota economy and the data gates are AgentCompass's
+ * (pinned in `test/fixtures/agentcompass-pin.json`) and move with the pin. The expected route of a request is what
+ * `selectBestRoute` of the plugin under test (`PLUGIN_DIR/src/allocator.js`) gives for the same profile and pool; what is
+ * checked here is that Magpie, the middleware and the decision provider deliver that route to the upstream.
  *
  * Scenarios:
  * - Scenario 1: CLI Plugin Lifecycle (`magpie plugin add`, `login`, `list`, `magpie.name`, `magpie.icon`)
@@ -24,13 +31,17 @@
  * - Scenario 7: Mode B Native Routing Group (`group/compass-group`) via `/v1/systemone` Decision Provider and a classifier
  *   (specific intent rules, `"none of these"` fallback rule, and `effort=auto` 4-level Jev logprobs scaling)
  * - Scenario 8: Mode A session affinity, mid-turn tool lock (`within: true`) & short follow-up hold, with a profile on each request
- * - Scenario 9: Given the answers the removed text rules gave, requests reach the upstream exactly as a second Magpie running
- *   the build before their removal sends them (`BASELINE_PLUGIN_DIR`; pools, name spellings, protocols, sessions)
- * - Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down, on every protocol
- * - Scenario 11: A realtime session's later turns hold, with no reroute and no effort ratchet
- * - Scenario 12: A pinned slow model is kept, with a warning in Magpie's log
- * - Scenario 13: Real upstreams (run-linux-sandbox.sh's `REAL_*_AUTH`): for each, no `realtime_loop` on
- *   the wire, routes as on the mock, and the `openai_compatible` classifier on 12 paired hard cases
+ * - Scenario 9: Pools, name spellings and protocols: for every pool shape Magpie takes (bare names, `{model}` and
+ *   `{id,provider,model}` objects, bundles with an effort, pin options) and every protocol, the upstream is sent the
+ *   route `selectBestRoute` gives for that profile and pool
+ * - Scenario 10: The four categories (divergence, coding, aesthetics, tool_operation) at demand level 3: each profile reaches
+ *   the route the engine gives it, and the categories do not all go to one place
+ * - (Scenarios 10 and 11 of the 0.1.x file covered `realtime_loop`, which AgentCompass v0.6.0 removed: there are no realtime
+ *   floors or step-downs, and a session holds as Scenario 8 checks.)
+ * - Scenario 12: A pin is kept (a pinned model, and a pinned model with its effort), in every request of a mode that honors pins
+ * - Scenario 13: Real upstreams (run-linux-sandbox.sh's `REAL_*_AUTH`): for each, no `profile` on the wire, routes as on
+ *   the mock, and the `openai_compatible` classifier on a few hard cases (access, the dominant category); then a single
+ *   priced account against invalid peers, and every account unavailable
  * - Scenario 14: A caller's profile routes, and rewording the task changes nothing (`test/task_text_corpus.mjs`)
  * - Scenario 15: No profile: not routed, said in Magpie's log and, where it can be, in the reply; what reaches the client
  */
@@ -46,7 +57,6 @@ import { redactSecrets } from "./sign-in-copy.mjs";
 const SANDBOX_ROOT = process.env.MAGPIE_SANDBOX_ROOT || "/run/magpie-sandbox";
 const MAGPIE_BIN = process.env.MAGPIE_BIN || path.join(SANDBOX_ROOT, "magpie");
 const PLUGIN_DIR = process.env.PLUGIN_DIR || path.join(SANDBOX_ROOT, "agentcompass");
-const BASELINE_PLUGIN_DIR = process.env.BASELINE_PLUGIN_DIR || "";
 const REAL_SIGN_INS_DIR = process.env.REAL_SIGN_INS_DIR || "";
 
 const ALL_MODELS = [
@@ -79,6 +89,42 @@ const VARIANT_MODELS = [
   "gemini-3.8-flash-high",
   "grok-4.7-build-fast",
 ];
+
+// A valid v0.6.0 task profile: what a classifier answers, with the per-category demand (`axis_demand`, levels 0..3).
+// `access` is "write" exactly when the task writes code (`code_complexity > 0`).
+function taskProfile(overrides = {}) {
+  const { axis_demand: axis, ...rest } = overrides;
+  const profile = {
+    work_kind: "general_implementation",
+    reasoning_depth: 2,
+    code_complexity: 2,
+    needs_visual: false,
+    needs_gui: false,
+    local_only: false,
+    wants_fast: false,
+    read_only_review: false,
+    access: "write",
+    interaction_style: "engineering",
+    expected_hours: 0.5,
+    hours_confidence: "medium",
+    urgency: "unknown",
+    multi_task: false,
+    task_count: "1",
+    ...rest,
+    axis_demand: { divergence: 0, coding: 2, aesthetics: 0, tool_operation: 0, ...(axis || {}) },
+  };
+  if (!("access" in rest)) profile.access = profile.code_complexity > 0 ? "write" : "read-only";
+  return profile;
+}
+
+// What a classifier answers for each kind of task the scenarios send (the request carries it, since moejs can't ask one)
+const PROFILE = {
+  ideation: taskProfile({ work_kind: "direction_reasoning", interaction_style: "advisory", reasoning_depth: 3, code_complexity: 0, axis_demand: { divergence: 3, coding: 0 } }),
+  coding: taskProfile({ work_kind: "self_contained_code" }),
+  bulk: taskProfile({ work_kind: "bounded_bulk_work", reasoning_depth: 1, code_complexity: 1, axis_demand: { coding: 1 } }),
+  debug: taskProfile({ work_kind: "debug_review", reasoning_depth: 3, axis_demand: { coding: 3 } }),
+  text: taskProfile({ work_kind: "text_in_text_out", interaction_style: "text_only", reasoning_depth: 1, code_complexity: 0, axis_demand: { coding: 0 } }),
+};
 
 function runMagpieCli(args, env, bin = MAGPIE_BIN) {
   return new Promise((resolve, reject) => {
@@ -125,7 +171,7 @@ function readJsonBody(req) {
   });
 }
 
-// The upstream provider and routing group a Magpie under test is given; Scenario 9 needs two identical ones.
+// The upstream provider and routing group a Magpie under test is given.
 async function configureGateway(env, upPort, pluginDir, pluginOptions, bin = MAGPIE_BIN) {
   const addProvOut = await runMagpieCli(
     [
@@ -238,7 +284,6 @@ async function main() {
     magpieVersion: null,
     magpieBinarySha256: process.env.MAGPIE_BINARY_SHA256 || null,
     pluginCommit: process.env.PLUGIN_COMMIT || null,
-    baselineCommit: process.env.BASELINE_COMMIT || null,
     scenarios: {},
     steps: [],
   };
@@ -474,87 +519,18 @@ async function main() {
         return;
       }
 
+      // v0.6.0 profiles, as the classifier answers them (module-level PROFILE)
       let profile;
       if (/deadlock|race condition|root cause|security audit/i.test(userPrompt)) {
-        profile = {
-          work_kind: "debug_review",
-          interaction_style: "engineering",
-          reasoning_depth: 4,
-          code_complexity: 3,
-          context_scale: 3,
-          divergence: 1,
-          hallucination_risk: 3,
-          error_cost: 3,
-          needs_visual: false,
-          needs_gui: false,
-          local_only: false,
-          multi_task: false,
-          task_count: "1",
-        };
+        profile = PROFILE.debug;
       } else if (/brainstorm|first-principles|creative|novel/i.test(userPrompt)) {
-        profile = {
-          work_kind: "direction_reasoning",
-          interaction_style: "advisory",
-          reasoning_depth: 3,
-          code_complexity: 1,
-          context_scale: 2,
-          divergence: 3,
-          hallucination_risk: 2,
-          error_cost: 2,
-          needs_visual: false,
-          needs_gui: false,
-          local_only: false,
-          multi_task: false,
-          task_count: "1",
-        };
+        profile = PROFILE.ideation;
       } else if (/standalone|self-contained|lru cache/i.test(userPrompt)) {
-        profile = {
-          work_kind: "self_contained_code",
-          interaction_style: "engineering",
-          reasoning_depth: 2,
-          code_complexity: 2,
-          context_scale: 1,
-          divergence: 1,
-          hallucination_risk: 2,
-          error_cost: 2,
-          needs_visual: false,
-          needs_gui: false,
-          local_only: false,
-          multi_task: false,
-          task_count: "1",
-        };
+        profile = PROFILE.coding;
       } else if (/translate|spanish|french/i.test(userPrompt)) {
-        profile = {
-          work_kind: "text_in_text_out",
-          interaction_style: "text_only",
-          reasoning_depth: 1,
-          code_complexity: 0,
-          context_scale: 1,
-          divergence: 1,
-          hallucination_risk: 1,
-          error_cost: 1,
-          needs_visual: false,
-          needs_gui: false,
-          local_only: false,
-          multi_task: false,
-          task_count: "1",
-        };
+        profile = PROFILE.text;
       } else {
-        profile = {
-          work_kind: "bounded_bulk_work",
-          interaction_style: "engineering",
-          reasoning_depth: 1,
-          code_complexity: 1,
-          context_scale: 1,
-          divergence: 1,
-          hallucination_risk: 1,
-          error_cost: 1,
-          needs_visual: false,
-          needs_gui: false,
-          local_only: false,
-          multi_task: false,
-          task_count: "1",
-        };
+        profile = PROFILE.bulk;
       }
 
       scorerCalls.push({
@@ -595,7 +571,6 @@ async function main() {
   const webCookie = `magpie_web_${webPort}=${webKey}`;
 
   let magpieProc = null;
-  let baselineProc = null;
   const magpieLogs = [];
 
   try {
@@ -830,29 +805,19 @@ async function main() {
     const BULK = "Perform a mechanical batch rename of foo_bar to fooBar across JSON fixtures.";
     const DEBUG = "Conduct a cross-module deadlock and race condition security audit across the distributed transaction coordinator.";
     const userMsg = (content) => ({ role: "user", content });
-    // What a classifier answered for each of those tasks: the request carries it, since moejs can't ask one
-    const answer = (work_kind, interaction_style, reasoning_depth, code_complexity, context_scale, divergence, hallucination_risk, error_cost) => ({
-      work_kind,
-      interaction_style,
-      reasoning_depth,
-      code_complexity,
-      context_scale,
-      divergence,
-      hallucination_risk,
-      error_cost,
-      needs_visual: false,
-      needs_gui: false,
-      local_only: false,
-      realtime_loop: false,
-      multi_task: false,
-      task_count: "1",
-    });
-    const PROFILE = {
-      ideation: answer("direction_reasoning", "advisory", 3, 0, 2, 3, 3, 1),
-      coding: answer("self_contained_code", "engineering", 2, 2, 1, 1, 1, 1),
-      bulk: answer("bounded_bulk_work", "engineering", 1, 1, 2, 1, 1, 1),
-      debug: answer("debug_review", "engineering", 3, 2, 2, 2, 3, 2),
+    // The expected route of a request is the engine's own: `selectBestRoute` of the plugin under test, for the profile and
+    // the pool the request is sent with. It reads no disk and no network (no quotas unless the options carry them), which
+    // is the state the middleware runs in inside Magpie, so the two agree; scenarios assert Magpie delivers it.
+    const { selectBestRoute } = await import(path.join(PLUGIN_DIR, "src", "allocator.js"));
+    const POOL = ALL_MODELS.map((m) => `upstream/${m}`);
+    const withoutProvider = (model) => String(model).replace(/^[^/]+\//, "");
+    const expectRoute = (profile, options = {}) => {
+      const d = selectBestRoute(profile, { candidateModels: POOL, ...options });
+      assert.equal(d.ok, true, `selectBestRoute must route ${profile.work_kind}: ${JSON.stringify(d.refusal ?? d.error ?? null)}`);
+      return `${withoutProvider(d.targetModel)}:${d.targetEffort}`;
     };
+    const expectModel = (profile, options) => expectRoute(profile, options).split(":")[0];
+    const expectEffort = (profile, options) => expectRoute(profile, options).split(":")[1];
     const NOT_ROUTED = "未路由：分类不可用";
     // `middleware <spec> [warn]: ...` from moejs, `plugin: ...` from the decision provider's Bun host
     const unroutedLogged = () => magpieLogs.join("").split("\n").filter((l) => l.includes(NOT_ROUTED));
@@ -890,6 +855,7 @@ async function main() {
       const up = upstreamCalls[upstreamCalls.length - 1];
       assert.ok(ALL_MODELS.includes(up.model), `Mode A must route agentcompass/auto to a catalog model, got ${up.model}`);
       assert.ok(up.reasoning_effort, "Mode A must set a reasoning effort on the routed request");
+      assert.equal(routedAs(up), expectRoute(PROFILE.debug), "Mode A must deliver the route the engine gives this profile");
       assert.equal(up.hasRouteCarrier, false, "middleware.js must not leave __agentcompass_route in the body");
       assert.ok(!("profile" in up.body), "profile is for the router; a real upstream rejects a field it does not know");
       assert.equal(scorerCalls.length, scorerBefore, "Mode A must not call an external scorer");
@@ -1004,15 +970,16 @@ async function main() {
         debug: up4.model,
       };
       assert.deepEqual(picked, {
-        ideation: "gemini-4-argon-high",
-        coding: "gpt-6.1-sol",
-        bulk: "gpt-6-luna",
-        debug: "claude-opus-5-5",
+        ideation: expectModel(PROFILE.ideation),
+        coding: expectModel(PROFILE.coding),
+        bulk: expectModel(PROFILE.bulk),
+        debug: expectModel(PROFILE.debug),
       });
-      assert.equal(up1.reasoning_effort, "high");
-      assert.equal(up2.reasoning_effort, "high");
-      assert.equal(up3.reasoning_effort, "high");
-      assert.equal(up4.reasoning_effort, "xhigh", "Frontier root-cause debugging selects claude-opus-5-5:xhigh");
+      assert.equal(up1.reasoning_effort, expectEffort(PROFILE.ideation));
+      assert.equal(up2.reasoning_effort, expectEffort(PROFILE.coding));
+      assert.equal(up3.reasoning_effort, expectEffort(PROFILE.bulk));
+      assert.equal(up4.reasoning_effort, expectEffort(PROFILE.debug));
+      assert.ok(new Set(Object.values(picked)).size >= 2, `The profile must decide the model: ${JSON.stringify(picked)}`);
       assert.equal(up2.path, "/v1/responses", "Self-contained coding sent on /v1/responses must stay on that protocol");
       for (const u of [up1, up2, up3, up4]) {
         assert.ok(ALL_MODELS.includes(u.model));
@@ -1061,7 +1028,7 @@ async function main() {
       assert.equal(anthResp.status, 200, `Anthropic /v1/messages failed: ${JSON.stringify(anthData)}`);
       assert.equal(anthData.type, "message", "Anthropic /v1/messages response must have type='message'");
       const anthUp = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(anthUp.model, "claude-opus-5-5", "Coupled deadlock audit on /v1/messages routes to claude-opus-5-5");
+      assert.equal(anthUp.model, expectModel(PROFILE.debug), "A coupled deadlock audit on /v1/messages routes as the engine routes its profile");
       assert.equal(anthUp.hasRouteCarrier, false);
       assert.ok(!("profile" in anthUp.body));
 
@@ -1081,8 +1048,8 @@ async function main() {
       assert.ok(sseText.includes("data: ") && sseText.includes("[DONE]"), "SSE stream must contain data chunks and [DONE]");
       const streamUp = upstreamCalls[upstreamCalls.length - 1];
       assert.equal(streamUp.stream, true, "stream: true must reach the upstream");
-      assert.equal(streamUp.model, "gpt-6.1-sol", "Self-contained coding over SSE routes to gpt-6.1-sol");
-      assert.equal(streamUp.reasoning_effort, "high");
+      assert.equal(streamUp.model, expectModel(PROFILE.coding), "Self-contained coding over SSE routes as the engine routes its profile");
+      assert.equal(streamUp.reasoning_effort, expectEffort(PROFILE.coding));
       assert.equal(streamUp.hasRouteCarrier, false);
       assert.ok(!("profile" in streamUp.body));
       // The routed model is the one the stream was served by
@@ -1172,7 +1139,7 @@ async function main() {
       const r6e = await postChat({ model: "agentcompass/auto", profile: PROFILE.bulk, messages: [userMsg(`${BULK} [6e]`)] });
       assert.equal(r6e.status, 200);
       const up6e = lastUp();
-      assert.equal(up6e.model, "gpt-6-luna");
+      assert.equal(routedAs(up6e), expectRoute(PROFILE.bulk), "Mode A routes the profile it was sent");
       assert.equal(scorerCalls.length, calls6e, "Mode A must not touch the classifier even when it is down");
 
       // Restore
@@ -1207,7 +1174,8 @@ async function main() {
       scorerForceStatus = 200;
       scorerDelayMs = 20;
 
-      // 7a. Matches `intent=direction_reasoning` rule + upgrades effort medium -> high
+      // 7a. Matches the `intent=direction_reasoning` rule (the classifier's work_kind names it); `effort=auto` takes the
+      // effort the engine gives that profile in place of the caller's `medium`
       const resp1 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
@@ -1225,9 +1193,9 @@ async function main() {
       assert.equal(resp1.status, 200);
       const up1 = upstreamCalls[upstreamCalls.length - 1];
       assert.equal(up1.model, "gemini-4-argon-high");
-      assert.equal(up1.reasoning_effort, "high");
+      assert.equal(up1.reasoning_effort, expectEffort(PROFILE.ideation));
 
-      // 7b. Matches `intent=debug_review` rule + upgrades effort low -> xhigh
+      // 7b. Matches the `intent=debug_review` rule; `effort=auto` takes the engine's effort in place of the caller's `low`
       const resp2 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: "Bearer sk-local-agent" },
@@ -1245,7 +1213,7 @@ async function main() {
       assert.equal(resp2.status, 200);
       const up2 = upstreamCalls[upstreamCalls.length - 1];
       assert.equal(up2.model, "claude-opus-5-5");
-      assert.equal(up2.reasoning_effort, "xhigh");
+      assert.equal(up2.reasoning_effort, expectEffort(PROFILE.debug));
 
       // 7c. Unmatched intent ("none of these") -> falls back to group's default first model (`gpt-6-luna`)
       const resp3 = await fetch(`http://127.0.0.1:${gwPort}/v1/chat/completions`, {
@@ -1322,8 +1290,7 @@ async function main() {
         const resp8a = await postChat({ model: "agentcompass/auto", profile: PROFILE.debug, messages: [stickyFirstMsg] }, sessionHeaders);
         assert.equal(resp8a.status, 200);
         const a = upstreamCalls[upstreamCalls.length - 1];
-        assert.equal(a.model, "claude-opus-5-5", `run ${i}: turn 1 routes to claude-opus-5-5`);
-        assert.equal(a.reasoning_effort, "xhigh", `run ${i}: turn 1 effort xhigh`);
+        assert.equal(routedAs(a), expectRoute(PROFILE.debug), `run ${i}: turn 1 routes as the engine routes its profile`);
 
         // 8b. Mid-turn tool result + agent `<system-reminder>` (`within: true`): hold model and effort
         const resp8b = await postChat(
@@ -1414,7 +1381,7 @@ async function main() {
       );
       assert.equal(resp8d.status, 200);
       const up8d = upstreamCalls[upstreamCalls.length - 1];
-      assert.equal(up8d.model, "gpt-6-luna", "A new session must be routed independently of another session's affinity");
+      assert.equal(routedAs(up8d), expectRoute(PROFILE.bulk), "A new session must be routed independently of another session's affinity");
 
       assert.equal(scorerCalls.length, scorerBefore8, "Mode A session handling must make zero scorer calls");
 
@@ -1441,517 +1408,151 @@ async function main() {
     }
 
     // =========================================================================
-    // SCENARIO 9: Given the answers the removed text rules gave, requests match a second real Magpie running the build that had them
+    // SCENARIO 9: Pools, name spellings and protocols: the upstream is sent the route the engine gives
     // =========================================================================
-    if (!BASELINE_PLUGIN_DIR) {
-      report.scenarios.scenario9_same_answers_match_baseline = { pass: null, skipped: "BASELINE_SRC not set" };
-      console.log("[SKIP] Scenario 9 (same answers vs baseline): BASELINE_SRC not set");
-    } else {
-      // The baseline decides from a request's text, and this build from a profile. So this build gets, with each request, what the
-      // baseline's own profiler says for it: what's left to differ is everything after the answer. The profiler stays in that build.
-      const { extractRequestFacts: baselineFacts, inferTaskProfile: baselineProfile } = await import(path.join(BASELINE_PLUGIN_DIR, "src", "profiler-core.js"));
-      const baselineAnswer = (body) => baselineProfile(baselineFacts(body, {}));
-      const root = path.join(SANDBOX_ROOT, "baseline");
-      const baseGw = 13427;
-      const baseWeb = 13428;
-      const baseCookie = `magpie_web_${baseWeb}=${webKey}`;
-      const baseEnv = {
-        ...env,
-        HOME: path.join(root, "home"),
-        TMPDIR: path.join(root, "tmp"),
-        XDG_CONFIG_HOME: path.join(root, "config"),
-        XDG_CACHE_HOME: path.join(root, "cache"),
-        XDG_DATA_HOME: path.join(root, "data"),
-        XDG_STATE_HOME: path.join(root, "state"),
-        MAGPIE_ADDR: `127.0.0.1:${baseGw}`,
-      };
-      for (const dir of ["home", "tmp", "config", "cache", "data", "state"]) fs.mkdirSync(path.join(root, dir), { recursive: true });
-      // A `data` folder beside the binary is where Magpie keeps everything (portable mode, whatever XDG says), so a
-      // second Magpie needs its own copy of the binary beside its own `data`.
-      const baseBin = path.join(root, "magpie");
-      fs.copyFileSync(MAGPIE_BIN, baseBin);
-      fs.chmodSync(baseBin, 0o755);
-      await runMagpieCli(["plugin", "add", BASELINE_PLUGIN_DIR], baseEnv, baseBin);
-      await runMagpieCli(["plugin", "options", BASELINE_PLUGIN_DIR, JSON.stringify({ enableDecisionProvider: true })], baseEnv, baseBin);
-      await runMagpieCli(["plugin", "login", "agentcompass"], baseEnv, baseBin);
-      await configureGateway(baseEnv, upPort, BASELINE_PLUGIN_DIR, basePluginOptions, baseBin);
-      const baselineLogs = [];
-      baselineProc = await startMagpieWeb(baseEnv, baseGw, baseWeb, baseCookie, baselineLogs, baseBin);
-      await awaitModelCatalog((body) => postTo(baseGw, "/v1/chat/completions", body, gwHeaders));
-
-      const instances = [
-        { name: "worktree", gw: gwPort, web: webPort, cookie: webCookie, spec: PLUGIN_DIR },
-        { name: "baseline", gw: baseGw, web: baseWeb, cookie: baseCookie, spec: BASELINE_PLUGIN_DIR },
-      ];
+    {
+      // Every way Magpie takes a pool, and every protocol a client speaks: what reaches the upstream is what `selectBestRoute`
+      // gives for that profile and that pool. Each request is its own session (the tag in its text), since a session holds
+      // its route. A /v1/messages request reaches this chat-only upstream without an effort (Scenario 5), so it is compared
+      // on the model alone.
       const up = (m) => `upstream/${m}`;
       const pools = {
-        default: { candidateModels: ALL_MODELS.map(up) },
+        default: { candidateModels: POOL },
         "README pool": { candidateModels: ["claude-opus-5-5", "claude-sonnet-5-5", "gpt-6-astra", "gemini-4-argon-high", "gemini-3.8-flash-high"].map(up) },
         "bare strings": { candidateModels: ALL_MODELS },
-        "dated/-latest/-preview/-chat": {
-          candidateModels: VARIANT_MODELS.slice(0, 6).map(up),
-        },
         "{model} objects": { candidateModels: ALL_MODELS.map((model) => ({ model: up(model) })) },
-        "{id,provider,model} objects": {
-          candidateModels: ALL_MODELS.map((model) => ({ id: up(model), provider: "upstream", model })),
-        },
+        "{id,provider,model} objects": { candidateModels: ALL_MODELS.map((model) => ({ id: up(model), provider: "upstream", model })) },
         "bundles with effort": {
           candidateModels: ["claude-opus-5-5:xhigh", "claude-opus-5-5:medium", "gpt-6.1-sol:high", "gemini-4-argon-high:high", "gemini-3.8-flash-high:low"].map(up),
         },
         "pin options, which every mode honors (contract R3)": {
-          candidateModels: ALL_MODELS.map(up),
+          candidateModels: POOL,
           pinnedModel: up("gemini-4-argon-high"),
           pinnedEffort: "high",
         },
       };
-      const TEXTS = [IDEATION, CODING, BULK, DEBUG, "Translate this short release greeting paragraph into Spanish and French.", "修复登录页的空指针崩溃并补上回归测试"];
-      const CHAT = "/v1/chat/completions";
-      // `askedAbout` is the request a classifier was asked about, for a later request of the same turn
-      const corpus = (salt) => {
-        const out = [];
-        for (const text of TEXTS) {
-          const first = userMsg(`${text} [${salt}]`);
-          const asked = { messages: [first] };
-          out.push({ path: CHAT, body: { model: "agentcompass/auto", messages: [first] } });
-          // Later requests of that session: a tool loop step and a short follow-up
-          out.push({
-            path: CHAT,
-            askedAbout: asked,
-            body: {
-              model: "agentcompass/auto",
-              messages: [
-                first,
-                { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }] },
-                { role: "tool", tool_call_id: "call_1", content: "ok" },
-              ],
-            },
-          });
-          out.push({ path: CHAT, askedAbout: asked, followupOf: out.length - 2, body: { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")] } });
-          out.push({ path: CHAT, body: { model: "agentcompass/auto", stream: true, messages: [userMsg(`${text} [stream ${salt}]`)] } });
-          out.push({
-            path: "/v1/responses",
-            body: { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${text} [responses ${salt}]` }] }] },
-          });
-          out.push({ path: "/v1/messages", body: { model: "agentcompass/auto", max_tokens: 1024, messages: [userMsg(`${text} [messages ${salt}]`)] } });
-          out.push({
-            path: CHAT,
-            body: {
-              model: "agentcompass/auto",
-              messages: [{ role: "user", content: [{ type: "text", text: `${text} [image ${salt}]` }, { type: "image_url", image_url: { url: "data:image/png;base64,iVBORw0KGgo=" } }] }],
-            },
-          });
-        }
-        out.push({ path: CHAT, body: { model: "agentcompass:low", messages: [userMsg(`${BULK} [suffix ${salt}]`)] } });
-        out.push({ path: CHAT, body: { model: "upstream/gpt-6-luna", messages: [userMsg(`${DEBUG} [direct ${salt}]`)] } });
-        return out;
+      const TASKS = { ideation: IDEATION, coding: CODING, bulk: BULK, debug: DEBUG };
+      const senders = {
+        chat: (text, profile) => postChat({ model: "agentcompass/auto", profile, messages: [userMsg(text)] }),
+        responses: (text, profile) =>
+          postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", profile, input: [{ role: "user", content: [{ type: "input_text", text }] }] }, gwHeaders),
+        messages: (text, profile) => postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", profile, max_tokens: 1024, messages: [userMsg(text)] }, anthropicHeaders),
+        stream: (text, profile) => postChat({ model: "agentcompass/auto", profile, stream: true, messages: [userMsg(text)] }),
       };
-      // The baseline reads the words; this build is told the answer
-      const asSentTo = (instance, body, askedAbout = body) => (instance === instances[0] ? { ...body, profile: baselineAnswer(askedAbout) } : body);
-      const applyPool = async (instance, poolOptions) => {
-        const r = await fetch(`http://127.0.0.1:${instance.web}/api/plugins/options`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Cookie: instance.cookie },
-          body: JSON.stringify({ Spec: instance.spec, Options: { ...basePluginOptions, ...poolOptions } }),
-        });
-        assert.equal(r.status, 200, `POST /api/plugins/options failed on ${instance.name}: ${r.status}`);
-      };
-      const send = async (instance, salt) => {
-        const seen = [];
-        for (const [at, req] of corpus(salt).entries()) {
-          const before = upstreamCalls.length;
-          const headers = req.path === "/v1/messages" ? anthropicHeaders : gwHeaders;
-          const resp = await postTo(instance.gw, req.path, asSentTo(instance, req.body, req.askedAbout), headers);
-          await resp.text();
-          const sent = upstreamCalls.slice(before).map((u) => ({
-            path: u.path,
-            model: u.model,
-            effort: u.reasoning_effort,
-            stream: u.stream,
-            body: u.body,
-          }));
-          seen.push({ request: `#${at} ${req.path} ${String(JSON.stringify(req.body.messages?.at(-1)?.content ?? req.body.input)).slice(0, 60)}`, followupOf: req.followupOf, status: resp.status, sent });
-        }
-        return seen;
-      };
-      // A new full turn of a session holds on the runtime that has the session's warm record and reroutes on one that
-      // has not, and Magpie picks the runtime from a pool: the baseline against itself flips on these requests. So they
-      // are sampled: the routes either build gives, which must be no more than those two.
-      const NEW_TURN_SAMPLES = 8;
-      const sampleNewTurn = async (instance, text, salt) => {
-        const held = new Set();
-        const rerouted = new Set();
-        const nextText = `Next, ${TEXTS[(TEXTS.indexOf(text) + 1) % TEXTS.length]}`;
-        for (let n = 0; n < NEW_TURN_SAMPLES; n++) {
-          const first = userMsg(`${text} [${salt} new turn ${n}]`);
-          const asked = { messages: [first] };
-          const a = await postTo(instance.gw, CHAT, asSentTo(instance, { model: "agentcompass/auto", messages: [first] }), gwHeaders);
-          await a.text();
-          const firstRoute = routedAs(upstreamCalls[upstreamCalls.length - 1]);
-          for (const later of [
-            [first, { role: "assistant", content: null, tool_calls: [{ id: "call_1", type: "function", function: { name: "read_file", arguments: "{}" } }] }, { role: "tool", tool_call_id: "call_1", content: "ok" }],
-            [first, { role: "assistant", content: "Done. Continue?" }, userMsg("继续")],
-          ]) {
-            await (await postTo(instance.gw, CHAT, asSentTo(instance, { model: "agentcompass/auto", messages: later }, asked), gwHeaders)).text();
-          }
-          const b = await postTo(
-            instance.gw,
-            CHAT,
-            asSentTo(instance, { model: "agentcompass/auto", messages: [first, { role: "assistant", content: "Done." }, userMsg(nextText)] }, { messages: [userMsg(nextText)] }),
-            gwHeaders
-          );
-          await b.text();
-          const nextRoute = routedAs(upstreamCalls[upstreamCalls.length - 1]);
-          (nextRoute === firstRoute ? held : rerouted).add(nextRoute);
-        }
-        return { held: [...held], rerouted: [...rerouted] };
-      };
-
-      let requests = 0;
-      let served = 0;
-      const routes = new Set();
-      const diffs = [];
-      const followupsRerouted = [];
+      const scorerBefore9 = scorerCalls.length;
       const perPool = {};
-      const newTurnDiffs = [];
-      let newTurnRows = 0;
-      let newTurnRowsThatFlip = 0;
-      let newTurnRowsThatReroute = 0;
+      const mismatches = [];
+      const routes = new Set();
+      let sent = 0;
       for (const [name, poolOptions] of Object.entries(pools)) {
-        const salt = `p${Object.keys(perPool).length}`;
-        for (const instance of instances) await applyPool(instance, poolOptions);
-        const [mine, theirs] = [await send(instances[0], salt), await send(instances[1], salt)];
-        for (const text of TEXTS) {
-          const [a, b] = [await sampleNewTurn(instances[0], text, salt), await sampleNewTurn(instances[1], text, salt)];
-          newTurnRows += 1;
-          if (b.held.length > 0 && b.rerouted.length > 0) newTurnRowsThatFlip += 1;
-          if (a.rerouted.length > 0 && b.rerouted.length > 0) newTurnRowsThatReroute += 1;
-          // The runtime's two states give two routes at most, whichever build serves them; a third is a change in routing
-          const clash = new Set([...a.held, ...a.rerouted, ...b.held, ...b.rerouted]).size > 2;
-          if (clash) newTurnDiffs.push({ pool: name, text: text.slice(0, 40), worktree: a, baseline: b });
-        }
-        let poolDiffs = 0;
-        const poolRoutes = new Set();
-        mine.forEach((row, i) => {
-          requests += 1;
-          if (row.status === 200) served += 1;
-          for (const s of row.sent) {
-            routes.add(`${s.model}:${s.effort}`);
-            poolRoutes.add(`${s.model}:${s.effort}`);
+        await setPluginOptions({ ...basePluginOptions, ...poolOptions });
+        perPool[name] = {};
+        for (const [kind, profile] of Object.entries({ ideation: PROFILE.ideation, coding: PROFILE.coding, bulk: PROFILE.bulk, debug: PROFILE.debug })) {
+          const expected = expectRoute(profile, poolOptions);
+          perPool[name][kind] = expected;
+          for (const [protocol, send] of Object.entries(senders)) {
+            const r = await send(`[9 ${name} ${kind} ${protocol}] ${TASKS[kind]}`, profile);
+            assert.equal(r.status, 200, `${name} / ${kind} / ${protocol}`);
+            await r.text();
+            const u = lastUp();
+            sent += 1;
+            assert.ok(!("profile" in u.body), "profile is for the router; a real upstream rejects a field it does not know");
+            const got = protocol === "messages" ? u.model : routedAs(u);
+            const want = protocol === "messages" ? expected.split(":")[0] : expected;
+            routes.add(routedAs(u));
+            if (got !== want) mismatches.push({ pool: name, task: kind, protocol, got, expected: want });
           }
-          if (JSON.stringify(row) !== JSON.stringify(theirs[i])) {
-            // The one difference the removal means to make: a short turn isn't held for being short. Routed again on the same
-            // answer it must land where this session's first request did, and wherever else it lands is a difference.
-            const asFirst = row.followupOf !== undefined && row.status === 200 && row.sent.length === 1 && routedAs(row.sent[0]) === routedAs(mine[row.followupOf].sent[0] || {});
-            if (asFirst) {
-              followupsRerouted.push({ pool: name, request: row.request, worktree: routedAs(row.sent[0]), baseline: theirs[i].sent.map((u) => routedAs(u)) });
-            } else {
-              poolDiffs += 1;
-              diffs.push({ pool: name, worktree: row, baseline: theirs[i] });
-            }
-          }
-        });
-        perPool[name] = { requests: mine.length, diffs: poolDiffs, routes: poolRoutes.size };
-      }
-      baselineProc.kill("SIGTERM");
-      const brief = diffs.slice(0, 5).map((d) => ({
-        pool: d.pool,
-        request: d.worktree.request,
-        worktree: [d.worktree.status, d.worktree.sent.map((s) => `${s.model}:${s.effort}`)],
-        baseline: [d.baseline.status, d.baseline.sent.map((s) => `${s.model}:${s.effort}`)],
-      }));
-      assert.equal(diffs.length, 0, `With the same answers, requests must reach the upstream as the baseline sends them: ${JSON.stringify(brief, null, 2)}`);
-      assert.deepEqual(newTurnDiffs, [], "A new turn must reroute to the same route as on the baseline");
-      assert.ok(newTurnRowsThatReroute > 0, "The new turn sampling compared nothing: no row rerouted on both builds");
-      assert.ok(served / requests >= 0.9, `Most of the corpus must be served for the comparison to mean anything: ${served}/${requests}`);
-      assert.ok(routes.size >= 10, `The corpus must exercise many routes: ${[...routes].join(", ")}`);
-      assert.ok(routes.has("gemini-4-argon-high:high"), "Non-realtime routing still uses Argon high");
-
-      report.scenarios.scenario9_same_answers_match_baseline = {
-        pass: true,
-        requests,
-        served,
-        diffs: diffs.length,
-        followupsRoutedAgainAsTheirFirstRequest: followupsRerouted,
-        distinctRoutes: routes.size,
-        perPool,
-        newTurnSampling: {
-          samplesPerRow: NEW_TURN_SAMPLES,
-          rows: newTurnRows,
-          diffs: newTurnDiffs.length,
-          rowsComparedOnBothBuilds: newTurnRowsThatReroute,
-          baselineRowsThatFlipOnThePool: newTurnRowsThatFlip,
-        },
-      };
-      report.steps.push({
-        test: "Scenario 9: given the answers the removed text rules gave, requests reach the upstream as a second real Magpie running the build that had them sends them (status, model, effort, full body)",
-        ...report.scenarios.scenario9_same_answers_match_baseline,
-      });
-      console.log(`[PASS] Scenario 9 (same answers vs baseline): ${requests} requests over ${Object.keys(pools).length} pools, ${served} served, ${routes.size} distinct routes, ${diffs.length} diffs, ${followupsRerouted.length} short turns routed again as their first request ${JSON.stringify(followupsRerouted)}; new turns: ${newTurnRows} rows x ${NEW_TURN_SAMPLES} samples, ${newTurnDiffs.length} diffs, ${newTurnRowsThatReroute} rows rerouted on both builds (the baseline flips on ${newTurnRowsThatFlip} rows)`);
-      await setPluginOptions(basePluginOptions);
-    }
-
-    // =========================================================================
-    // SCENARIO 10: `realtime_loop: true` excludes Argon high and steps efforts down
-    // =========================================================================
-    {
-      const rt = { realtime_loop: true };
-      const route = async (content, extra = {}) => {
-        const r = await postChat({ model: "agentcompass/auto", messages: [userMsg(content)], ...extra });
-        assert.equal(r.status, 200, `routing ${content} failed: ${r.status}`);
-        return lastUp();
-      };
-
-      // 10a. The same four tasks, off and on
-      const pairs = {
-        ideation: [IDEATION, "gemini-4-argon-high:high", "gpt-6-astra:medium"],
-        coding: [CODING, "gpt-6.1-sol:high", "gpt-6-sol:high"],
-        bulk: [BULK, "gpt-6-luna:high", "gpt-6-luna:high"],
-        debug: [DEBUG, "claude-opus-5-5:xhigh", "claude-opus-5-5:medium"],
-      };
-      const rtWith = (profile) => ({ ...rt, profile });
-      const routed = {};
-      const flagsForwarded = [];
-      for (const [name, [text, off, on]] of Object.entries(pairs)) {
-        const plain = await route(`${text} [10a off]`, { profile: PROFILE[name] });
-        const live = await route(`${text} [10a on]`, rtWith(PROFILE[name]));
-        assert.equal(routedAs(plain), off, `${name} without realtime_loop`);
-        assert.equal(routedAs(live), on, `${name} with realtime_loop`);
-        assert.notEqual(live.model, "gemini-4-argon-high", `${name}: realtime_loop must not reach Argon high`);
-        if ("realtime_loop" in live.body || "profile" in live.body) flagsForwarded.push(name);
-        routed[name] = { nonRealtime: routedAs(plain), realtime: routedAs(live) };
-      }
-      assert.deepEqual(flagsForwarded, [], "realtime_loop and profile are for the router; a real upstream rejects a field it does not know");
-
-      // 10b. A pool of one slow bundle steps down instead of sending the listed xhigh
-      await setPluginOptions({ ...basePluginOptions, candidateModels: [{ model: "upstream/claude-opus-5-5", effort: "xhigh" }] });
-      const steppedPlain = await route(`${DEBUG} [10b off]`, { profile: PROFILE.debug });
-      const stepped = await route(`${DEBUG} [10b on]`, rtWith(PROFILE.debug));
-      assert.equal(routedAs(steppedPlain), "claude-opus-5-5:xhigh");
-      assert.equal(routedAs(stepped), "claude-opus-5-5:medium");
-
-      // 10c. A pool of Argon high alone: excluded, so Argon is never called
-      await setPluginOptions({ ...basePluginOptions, candidateModels: ["upstream/gemini-4-argon-high"] });
-      const argonBefore = upstreamCalls.length;
-      const argonOnly = await postChat({ model: "agentcompass/auto", messages: [userMsg(`${IDEATION} [10c on]`)], ...rtWith(PROFILE.ideation) });
-      const argonOnlyBody = await argonOnly.text();
-      const argonOnlyCalls = upstreamCalls.slice(argonBefore).map((u) => u.model);
-      assert.ok(!argonOnlyCalls.includes("gemini-4-argon-high"), `Argon high alone must not be called under realtime_loop: ${argonOnlyBody}`);
-      await setPluginOptions(basePluginOptions);
-
-      // 10d. A model named directly is not routed, and the flag still stops at the gateway
-      const direct = await postChat({ model: "upstream/gemini-4-argon-high", messages: [userMsg(`${IDEATION} [10d direct]`)], ...rtWith(PROFILE.bulk) });
-      assert.equal(direct.status, 200);
-      assert.equal(lastUp().model, "gemini-4-argon-high");
-      assert.ok(!("realtime_loop" in lastUp().body));
-      assert.ok(!("profile" in lastUp().body));
-
-      // 10e. Every protocol, and the plugin-wide option
-      const responses = await postTo(gwPort, "/v1/responses", { model: "agentcompass/auto", input: [{ role: "user", content: [{ type: "input_text", text: `${CODING} [10e responses]` }] }], ...rtWith(PROFILE.coding) }, gwHeaders);
-      assert.equal(responses.status, 200);
-      const onResponses = lastUp();
-      assert.equal(routedAs(onResponses), "gpt-6-sol:high");
-      assert.equal(onResponses.path, "/v1/responses");
-      assert.ok(!("realtime_loop" in onResponses.body));
-
-      const messages = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [userMsg(`${DEBUG} [10e messages]`)], ...rtWith(PROFILE.debug) }, anthropicHeaders);
-      assert.equal(messages.status, 200);
-      const onMessages = lastUp();
-      // Magpie sends a /v1/messages request to this chat-only provider without an effort, realtime or not (Scenario 5)
-      assert.equal(onMessages.model, "claude-opus-5-5");
-      assert.ok(!("realtime_loop" in onMessages.body));
-
-      const streamed = await postChat({ model: "agentcompass/auto", stream: true, messages: [userMsg(`${CODING} [10e stream]`)], ...rtWith(PROFILE.coding) });
-      assert.equal(streamed.status, 200);
-      assert.ok((await streamed.text()).includes("[DONE]"));
-      const onStream = lastUp();
-      assert.equal(routedAs(onStream), "gpt-6-sol:high");
-      assert.ok(!("realtime_loop" in onStream.body));
-
-      await setPluginOptions({ ...basePluginOptions, realtime_loop: true });
-      const pluginWide = await route(`${IDEATION} [10e option]`, { profile: PROFILE.ideation });
-      assert.equal(routedAs(pluginWide), "gpt-6-astra:medium");
-      await setPluginOptions(basePluginOptions);
-
-      report.scenarios.scenario10_realtime_routing = {
-        pass: true,
-        routed,
-        slowBundleStepsDown: `${routedAs(steppedPlain)} -> ${routedAs(stepped)}`,
-        argonOnlyPool: { status: argonOnly.status, upstreamCalls: argonOnlyCalls, body: argonOnlyBody.slice(0, 300) },
-        responses: routedAs(onResponses),
-        messages: routedAs(onMessages),
-        stream: routedAs(onStream),
-        pluginWideOption: routedAs(pluginWide),
-        flagForwardedUpstream: false,
-      };
-      report.steps.push({
-        test: "Scenario 10: `realtime_loop: true` excludes Argon high and steps efforts down on chat, responses, messages and streams",
-        ...report.scenarios.scenario10_realtime_routing,
-      });
-      console.log(
-        `[PASS] Scenario 10 (realtime routing): ${Object.entries(routed).map(([k, v]) => `${k} ${v.nonRealtime} -> ${v.realtime}`).join("; ")}; bundle ${routedAs(steppedPlain)} -> ${routedAs(stepped)}; Argon-only pool -> HTTP ${argonOnly.status}, upstream calls ${JSON.stringify(argonOnlyCalls)}`
-      );
-    }
-
-    // =========================================================================
-    // SCENARIO 11: A realtime session's later turns hold: no reroute, no effort ratchet
-    // =========================================================================
-    {
-      const repeats = Math.max(1, Number(process.env.SCENARIO8_REPEATS || 20));
-      const rt = { realtime_loop: true };
-      const send = async (messages, extra = rt, profile = PROFILE.debug) => {
-        const r = await postChat({ model: "agentcompass/auto", messages, profile, ...extra });
-        assert.equal(r.status, 200);
-        return lastUp();
-      };
-      let reroutes = 0;
-      let flaglessDrift = 0;
-      const rerouted = [];
-      const flaglessRoutes = {};
-      const otherAnswerRoutes = {};
-      let first;
-      let ended;
-      for (let i = 0; i < repeats; i++) {
-        const opening = userMsg(`${DEBUG} [session ${i}]`);
-        const a = await send([opening]);
-        assert.equal(routedAs(a), "claude-opus-5-5:medium", `run ${i}: turn 1`);
-        // Tool loop step
-        const b = await send([
-          opening,
-          { role: "assistant", content: null, tool_calls: [{ id: "call_rt", type: "function", function: { name: "read_screen", arguments: "{}" } }] },
-          { role: "tool", tool_call_id: "call_rt", content: "frame 1" },
-        ]);
-        // Short follow-up
-        const c = await send([opening, { role: "assistant", content: "Acted. Continue?" }, userMsg("继续")]);
-        // Whole new turns in words that would once have routed elsewhere and raised effort, with the session's answer
-        const d = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)]);
-        const e = await send([
-          opening,
-          { role: "assistant", content: "Acted." },
-          userMsg(`Next, ${IDEATION}`),
-          { role: "assistant", content: "Acted again." },
-          userMsg("Now find the root cause of the deadlock across every module and prove the fix formally."),
-        ]);
-        const turns = { a, b, c, d, e };
-        const moved = Object.entries(turns).filter(([, u]) => routedAs(u) !== routedAs(a));
-        if (moved.length > 0) {
-          reroutes += moved.length;
-          rerouted.push({ run: i, moved: moved.map(([k, u]) => `${k}=${routedAs(u)}`) });
         }
-        // A client that stops sending the flag: the gateway's pooled runtimes only know it from the body. Recorded, not asserted.
-        const f = await send([opening, { role: "assistant", content: "Acted." }, userMsg("继续")], {});
-        flaglessRoutes[routedAs(f)] = (flaglessRoutes[routedAs(f)] || 0) + 1;
-        if (routedAs(f) !== routedAs(a)) flaglessDrift += 1;
-        // A new turn with another answer: a request carries this turn's answer and no earlier one's, so a runtime that hasn't
-        // seen the session can only go by it, where one that has holds. Recorded, and those are the only two routes it may take.
-        const g = await send([opening, { role: "assistant", content: "Acted." }, userMsg("Another turn.")], rt, PROFILE.ideation);
-        otherAnswerRoutes[routedAs(g)] = (otherAnswerRoutes[routedAs(g)] || 0) + 1;
-        if (i === 0) first = Object.fromEntries(Object.entries(turns).map(([k, u]) => [k, routedAs(u)]));
       }
-      assert.equal(reroutes, 0, `Later turns of a realtime session must hold turn 1's route: ${JSON.stringify(rerouted)}`);
-      const otherAnswerAllowed = ["claude-opus-5-5:medium", "gpt-6-astra:medium"];
-      assert.deepEqual(Object.keys(otherAnswerRoutes).filter((r) => !otherAnswerAllowed.includes(r)), [], `A new answer holds or goes where it says: ${JSON.stringify(otherAnswerRoutes)}`);
+      await setPluginOptions(basePluginOptions);
+      assert.deepEqual(mismatches, [], `Every request must reach the upstream as the engine routes it: ${JSON.stringify(mismatches.slice(0, 5), null, 2)}`);
+      assert.ok(routes.size >= 4, `The pools must exercise several routes: ${[...routes].join(", ")}`);
+      assert.equal(scorerCalls.length, scorerBefore9, "Mode A must not call a classifier");
 
-      // An explicit realtime_loop:false ends the session's realtime routing
-      const opening = userMsg(`${IDEATION} [session end]`);
-      const live = await send([opening], rt, PROFILE.ideation);
-      const off = await send([opening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], { realtime_loop: false }, PROFILE.ideation);
-      ended = { realtime: routedAs(live), afterFalse: routedAs(off) };
-      assert.equal(ended.realtime, "gpt-6-astra:medium");
-      assert.ok(!("realtime_loop" in off.body), "realtime_loop:false is for the router too");
-
-      // Anthropic protocol, turn 1 and a new turn
-      const anthOpening = userMsg(`${DEBUG} [session messages]`);
-      const anth1 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening], profile: PROFILE.debug, ...rt }, anthropicHeaders);
-      assert.equal(anth1.status, 200);
-      const anthA = lastUp();
-      const anth2 = await postTo(gwPort, "/v1/messages", { model: "agentcompass/auto", max_tokens: 1024, messages: [anthOpening, { role: "assistant", content: "Acted." }, userMsg(`Next, ${IDEATION}`)], profile: PROFILE.debug, ...rt }, anthropicHeaders);
-      assert.equal(anth2.status, 200);
-      const anthB = lastUp();
-      assert.equal(anthA.model, "claude-opus-5-5");
-      assert.equal(routedAs(anthB), routedAs(anthA), "/v1/messages: the next turn holds");
-
-      report.scenarios.scenario11_realtime_session_hold = {
-        pass: true,
-        repeats,
-        reroutes,
-        turns: first,
-        flaglessFollowups: { routes: flaglessRoutes, differFromTurn1: flaglessDrift, asserted: false },
-        newTurnWithAnotherAnswer: { routes: otherAnswerRoutes, holdsOnlyOnARuntimeThatSawTheSession: true },
-        explicitFalse: ended,
-        anthropic: [routedAs(anthA), routedAs(anthB)],
-      };
+      report.scenarios.scenario9_pools_names_and_protocols = { pass: true, requests: sent, distinctRoutes: routes.size, expectedPerPool: perPool };
       report.steps.push({
-        test: "Scenario 11: a realtime session's later turns hold (tool loop, short follow-up, new turns), repeated on pooled runtimes",
-        ...report.scenarios.scenario11_realtime_session_hold,
+        test: "Scenario 9: pools, name spellings and protocols: the upstream is sent the route `selectBestRoute` gives for the profile and the pool (chat, responses, messages, streams)",
+        ...report.scenarios.scenario9_pools_names_and_protocols,
       });
-      console.log(
-        `[PASS] Scenario 11 (realtime session hold): ${repeats} sessions, ${reroutes} reroutes, turns ${JSON.stringify(first)}; flagless follow-ups ${JSON.stringify(flaglessRoutes)}; new turn with another answer ${JSON.stringify(otherAnswerRoutes)}; explicit false ${JSON.stringify(ended)}; /v1/messages ${routedAs(anthA)} -> ${routedAs(anthB)}`
-      );
+      console.log(`[PASS] Scenario 9 (pools and protocols): ${sent} requests over ${Object.keys(pools).length} pools, ${routes.size} distinct routes, all as the engine routes them`);
     }
 
     // =========================================================================
-    // SCENARIO 12: A pinned slow model is kept, with a warning in Magpie's log
+    // SCENARIO 10: The four categories: each demand profile reaches the route the engine gives it
     // =========================================================================
     {
-      const rt = { realtime_loop: true };
-      const warningsLogged = () => magpieLogs.join("").split("\n").filter((l) => l.includes("[warn]") && l.includes("agentcompass: pinned"));
-      const awaitWarnings = async (n) => {
-        for (let i = 0; i < 25 && warningsLogged().length < n; i++) await new Promise((r) => setTimeout(r, 200));
-        return warningsLogged();
-      };
-      const route = async (content, extra = {}) => {
-        const r = await postChat({ model: "agentcompass/auto", messages: [userMsg(content)], ...extra });
+      // A profile whose only demand is one category at level 3 (v0.6.0's `axis_demand`: divergence, coding, aesthetics,
+      // tool_operation). The model must be the engine's; the effort is recorded, since Magpie fits it to its own catalog.
+      const demanding = (category) => taskProfile({ code_complexity: 0, reasoning_depth: 2, axis_demand: { coding: 0, [category]: 3 } });
+      const seen = {};
+      for (const category of ["divergence", "coding", "aesthetics", "tool_operation"]) {
+        const profile = demanding(category);
+        const r = await postChat({ model: "agentcompass/auto", profile, messages: [userMsg(`[10 ${category}] Do the next task.`)] });
+        assert.equal(r.status, 200, category);
+        await r.text();
+        const expected = expectRoute(profile);
+        assert.equal(lastUp().model, expected.split(":")[0], `${category} at level 3 must route as the engine routes it`);
+        assert.ok(!("profile" in lastUp().body));
+        seen[category] = { expected, sent: routedAs(lastUp()) };
+      }
+      const models = new Set(Object.values(seen).map((s) => s.sent.split(":")[0]));
+      assert.ok(models.size >= 2, `The demanded category must decide the model: ${JSON.stringify(seen)}`);
+
+      report.scenarios.scenario10_four_categories = { pass: true, routes: seen };
+      report.steps.push({
+        test: "Scenario 10: the four categories at demand level 3 each reach the route the engine gives their profile",
+        ...report.scenarios.scenario10_four_categories,
+      });
+      console.log(`[PASS] Scenario 10 (four categories): ${Object.entries(seen).map(([k, v]) => `${k} -> ${v.sent}`).join(", ")}`);
+    }
+
+    // =========================================================================
+    // SCENARIO 12: A pin is kept
+    // =========================================================================
+    {
+      // Pins are honored in every mode (contract R3): the pinned model wins whatever the profile prefers, with the effort the
+      // engine gives it, or the pinned effort when there is one. Without the pin the same request routes freely again.
+      const route = async (content, profile) => {
+        const r = await postChat({ model: "agentcompass/auto", messages: [userMsg(content)], profile });
         assert.equal(r.status, 200);
+        await r.text();
         return lastUp();
       };
-      const before = warningsLogged().length;
 
-      // 12a. Argon high pinned: kept on a task it would win, and on one it would not
-      await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/gemini-4-argon-high" });
-      const argonIdeation = await route(`${IDEATION} [12a]`, { ...rt, profile: PROFILE.ideation });
-      assert.equal(routedAs(argonIdeation), "gemini-4-argon-high:high");
-      const argonDebug = await route(`${DEBUG} [12a]`, { ...rt, profile: PROFILE.debug });
-      assert.equal(routedAs(argonDebug), "gemini-4-argon-high:high");
-      const argonLines = await awaitWarnings(before + 2);
-      assert.equal(argonLines.length, before + 2, `A pinned slow model must warn in Magpie's log on each route:\n${magpieLogs.join("").slice(-2000)}`);
-      assert.ok(argonLines[argonLines.length - 1].includes("gemini-4-argon-high"));
-      assert.ok(argonLines[argonLines.length - 1].includes("below the realtime_loop floor"));
+      // 12a. A pinned model, on a task it would win and on one it would not
+      const argonPin = { pinnedModel: "upstream/gemini-4-argon-high" };
+      await setPluginOptions({ ...basePluginOptions, ...argonPin });
+      const argonIdeation = await route(`${IDEATION} [12a]`, PROFILE.ideation);
+      assert.equal(routedAs(argonIdeation), expectRoute(PROFILE.ideation, argonPin));
+      const argonDebug = await route(`${DEBUG} [12a]`, PROFILE.debug);
+      assert.equal(routedAs(argonDebug), expectRoute(PROFILE.debug, argonPin));
+      assert.equal(argonDebug.model, "gemini-4-argon-high", "A pinned model is kept on a task another model would win");
 
-      // 12b. Pinned without realtime_loop: under Contract R3 pins are honored in every mode, with no realtime slow-model warning
-      const pinnedPlain = await route(`${DEBUG} [12b]`, { profile: PROFILE.debug });
-      assert.equal(routedAs(pinnedPlain), "gemini-4-argon-high:high");
-      await new Promise((r) => setTimeout(r, 300));
-      assert.equal(warningsLogged().length, before + 2, "Without realtime_loop a pin routes without a slow-model warning");
-
-      // 12c. A pinned slow effort is not stepped down
-      await setPluginOptions({ ...basePluginOptions, pinnedModel: "upstream/claude-opus-5-5", pinnedEffort: "xhigh" });
-      const opusPinned = await route(`${DEBUG} [12c]`, { ...rt, profile: PROFILE.debug });
+      // 12b. A pinned model with its effort: the effort is kept too
+      const opusPin = { pinnedModel: "upstream/claude-opus-5-5", pinnedEffort: "xhigh" };
+      await setPluginOptions({ ...basePluginOptions, ...opusPin });
+      const opusPinned = await route(`${IDEATION} [12b]`, PROFILE.ideation);
       assert.equal(routedAs(opusPinned), "claude-opus-5-5:xhigh");
-      const opusLines = await awaitWarnings(before + 3);
-      assert.equal(opusLines.length, before + 3);
-      assert.ok(opusLines[opusLines.length - 1].includes("claude-opus-5-5"));
+      assert.equal(routedAs(opusPinned), expectRoute(PROFILE.ideation, opusPin));
 
-      // 12d. No pin: the same request is excluded and stepped down again (Scenario 10)
+      // 12c. No pin: the same request routes freely again
       await setPluginOptions(basePluginOptions);
-      const unpinned = await route(`${IDEATION} [12d]`, { ...rt, profile: PROFILE.ideation });
-      assert.equal(routedAs(unpinned), "gpt-6-astra:medium");
-      assert.equal(warningsLogged().length, before + 3);
+      const unpinned = await route(`${IDEATION} [12c]`, PROFILE.ideation);
+      assert.equal(routedAs(unpinned), expectRoute(PROFILE.ideation));
 
-      report.scenarios.scenario12_pinned_slow_model = {
+      report.scenarios.scenario12_pins_are_kept = {
         pass: true,
         pinnedArgonIdeation: routedAs(argonIdeation),
         pinnedArgonDebug: routedAs(argonDebug),
-        pinWithoutRealtime: routedAs(pinnedPlain),
         pinnedOpusXhigh: routedAs(opusPinned),
         withoutPin: routedAs(unpinned),
-        warningLines: warningsLogged().slice(before),
       };
       report.steps.push({
-        test: "Scenario 12: a pinned slow model is kept with a warning in Magpie's log; without the pin it is excluded or stepped down",
-        ...report.scenarios.scenario12_pinned_slow_model,
+        test: "Scenario 12: a pinned model, and a pinned model with its effort, are kept; without the pin the request routes freely",
+        ...report.scenarios.scenario12_pins_are_kept,
       });
       console.log(
-        `[PASS] Scenario 12 (pinned slow model): Argon ${routedAs(argonIdeation)} / ${routedAs(argonDebug)}, opus ${routedAs(opusPinned)}, no pin ${routedAs(unpinned)}; log: ${warningsLogged()[before]}`
+        `[PASS] Scenario 12 (pins): Argon ${routedAs(argonIdeation)} / ${routedAs(argonDebug)}, opus ${routedAs(opusPinned)}, no pin ${routedAs(unpinned)}`
       );
     }
 
@@ -2089,7 +1690,7 @@ async function main() {
       const after15e = await postChat({ model: named, profile: PROFILE.debug, messages: [session] });
       assert.equal(after15e.status, 200);
       await after15e.text();
-      assert.equal(routedAs(lastUp()), "claude-opus-5-5:xhigh", "A request that wasn't routed must leave nothing a later turn would hold");
+      assert.equal(routedAs(lastUp()), expectRoute(PROFILE.debug), "A request that wasn't routed must leave nothing a later turn would hold");
 
       // 15f. defaultModel: the operator's own choice for a virtual name, with no effort
       await setPluginOptions({ ...basePluginOptions, defaultModel: named });
@@ -2310,7 +1911,19 @@ async function main() {
           });
           assert.equal(r.status, 200, `POST /api/plugins/${route} failed: ${r.status}`);
         };
-        const pairs = JSON.parse(fs.readFileSync(path.join(PLUGIN_DIR, "test", "fixtures", "realtime-classifier-pairs.json"), "utf8")).cases;
+        // Hard cases for the real classifier: what a sound answer says about `access` and about the category that dominates
+        // the demand (`axis_demand`). Agreement is recorded, since a model may differ on a borderline case; what is asserted is
+        // that the real classifier answered each one with a valid profile, not a fallback.
+        const pairs = [
+          { id: "write-code", task: "Implement a standalone self-contained LRU cache module in TypeScript with unit tests.", access: "write", dominant: "coding" },
+          { id: "read-only-audit", task: "Conduct a read-only security audit and cross-module deadlock / race condition root-cause review across the gateway subsystem. Do not edit code.", access: "read-only", dominant: "coding" },
+          { id: "ideation", task: "Brainstorm and formulate a novel creative gameplay scheme and first-principles roadmap for an AI agent simulation game.", access: "read-only", dominant: "divergence" },
+          { id: "gui-operation", task: "Open the local settings window, click Save, and take a verification screenshot.", access: null, dominant: "tool_operation" },
+          { id: "bulk-rename", task: "Perform a mechanical batch rename of `foo_bar` to `fooBar` across the JSON fixtures using a uniform rule.", access: "write", dominant: "coding" },
+          { id: "layout-review", task: "Inspect the supplied screenshot `artifacts/login_actual.png` against `artifacts/login_mockup.png` and list every spacing, typography, and alignment discrepancy. Do not edit code.", access: "read-only", dominant: "aesthetics" },
+        ];
+        const dominantOf = (demand = {}) =>
+          Object.entries(demand).sort((x, y) => Number(y[1]) - Number(x[1]))[0]?.[0] ?? null;
         const { scoreTaskLive } = await import(path.join(PLUGIN_DIR, "src", "scorer-live.js"));
         const { onRequest: hookOnRequest } = await import(path.join(PLUGIN_DIR, "src", "hooks.js"));
         const { onRequest: mwOnRequest, onAccount: mwOnAccount } = await import(path.join(PLUGIN_DIR, "src", "middleware.js"));
@@ -2335,29 +1948,29 @@ async function main() {
           const mockPlain = await postChat({ model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText}`)] });
           assert.equal(mockPlain.status, 200);
           const mockPlainRoute = routedAs(lastUp());
-          const mockLive = await postChat({ model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText} `)], realtime_loop: true });
-          assert.equal(mockLive.status, 200);
-          const mockLiveRoute = routedAs(lastUp());
+          const mockDebug = await postChat({ model: "agentcompass/auto", profile: PROFILE.debug, messages: [userMsg(`${realText} `)] });
+          assert.equal(mockDebug.status, 200);
+          const mockDebugRoute = routedAs(lastUp());
           await setPluginOptions(basePluginOptions);
 
           const namedModel = `${a.name}/${a.named}`;
           const plain = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(realText)] });
-          const live = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText} `)], realtime_loop: true });
-          const liveResponses = await callReal("/v1/responses", {
+          const debugChat = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.debug, messages: [userMsg(`${realText} `)] });
+          const responses = await callReal("/v1/responses", {
             model: "agentcompass/auto",
             profile: PROFILE.coding,
             input: [{ role: "user", content: [{ type: "input_text", text: `${realText}  ` }] }],
-            realtime_loop: true,
           });
-          const named = await callReal("/v1/chat/completions", { model: namedModel, messages: [userMsg(`Say OK.${REPLY}`)], realtime_loop: true });
+          // The router's `profile` on a request for a model the client named: Magpie's plugin claims it, and it must not go on
+          const named = await callReal("/v1/chat/completions", { model: namedModel, profile: PROFILE.coding, messages: [userMsg(`Say OK.${REPLY}`)] });
 
-          // Control: with AgentCompass off the flag does go on, so the observer's false above means something
+          // Control: with AgentCompass off nothing removes the field, so it does go on, and the observer's false above means something
           await realWebPost("off", { Off: true });
-          const control = await callReal("/v1/chat/completions", { model: namedModel, messages: [userMsg(`Say OK.${REPLY}`)], realtime_loop: true });
+          const control = await callReal("/v1/chat/completions", { model: namedModel, profile: PROFILE.coding, messages: [userMsg(`Say OK.${REPLY}`)] });
           await realWebPost("off", { Off: false });
 
-          // The classifier on a real endpoint: scoreTaskLive through this gateway, on the 12 paired hard cases
-          // (If namedModel itself failed upstream, still probe pair[0] to capture the exact classifier error without hanging 12x)
+          // The classifier on a real endpoint: scoreTaskLive through this gateway, on the hard cases above
+          // (If namedModel itself failed upstream, still probe the first case to capture the exact classifier error without hanging on every one)
           const pairsToRun = named.status === 200 ? pairs : pairs.slice(0, 1);
           const scored = [];
           for (const c of pairsToRun) {
@@ -2375,19 +1988,19 @@ async function main() {
             );
             scored.push({
               id: c.id,
-              expected: c.realtime_loop,
-              got: profile?.realtime_loop === true,
-              expectedKind: c.work_kind,
-              gotKind: profile?.work_kind,
+              expectedAccess: c.access,
+              gotAccess: profile?.access ?? null,
+              expectedDominant: c.dominant,
+              gotDominant: profile?.axis_demand ? dominantOf(profile.axis_demand) : null,
               source: meta.source,
               error: meta.reason ? redactSecrets(meta.reason) : null,
               ms: meta.durationMs ?? null,
             });
           }
           const answered = scored.filter((s) => s.source === "system_one_live");
-          const agree = answered.filter((s) => s.got === s.expected);
-          const kindAgree = answered.filter((s) => s.gotKind === s.expectedKind);
-          const missed = scored.filter((s) => s.got !== s.expected || s.source !== "system_one_live");
+          const accessAgree = answered.filter((s) => s.expectedAccess === null || s.gotAccess === s.expectedAccess);
+          const dominantAgree = answered.filter((s) => s.gotDominant === s.expectedDominant);
+          const missed = scored.filter((s) => s.source !== "system_one_live");
           const acctDiagLines = realLogs
             .join("")
             .split("\n")
@@ -2396,48 +2009,52 @@ async function main() {
             .slice(-12)
             .map((l) => redactSecrets(l));
 
+          // What the engine itself gives each profile for this account's pool, under the sign-in's own provider name
+          const expectedHere = (profile) => expectRoute(profile, { candidateModels: a.pool.map((m) => `${a.name}/${m}`) });
           accountsReport[a.name] = {
             pass: false,
             upstream: `${a.name} sign-in, only the fields test/sign-in-copy.mjs lists`,
             signInFields: a.fields,
             routes: {
-              nonRealtime: { real: asRoute(plain.sent), mock: mockPlainRoute, ms: plain.ms, status: plain.status, ...(plain.error ? { error: plain.error } : {}) },
-              realtime: { real: asRoute(live.sent), mock: mockLiveRoute, ms: live.ms, status: live.status, ...(live.error ? { error: live.error } : {}) },
-              realtimeResponses: { real: asRoute(liveResponses.sent), ms: liveResponses.ms, status: liveResponses.status, ...(liveResponses.error ? { error: liveResponses.error } : {}) },
+              coding: { real: asRoute(plain.sent), mock: mockPlainRoute, engine: expectedHere(PROFILE.coding), ms: plain.ms, status: plain.status, ...(plain.error ? { error: plain.error } : {}) },
+              debug: { real: asRoute(debugChat.sent), mock: mockDebugRoute, engine: expectedHere(PROFILE.debug), ms: debugChat.ms, status: debugChat.status, ...(debugChat.error ? { error: debugChat.error } : {}) },
+              codingResponses: { real: asRoute(responses.sent), ms: responses.ms, status: responses.status, ...(responses.error ? { error: responses.error } : {}) },
               namedDirectly: { real: asRoute(named.sent), ms: named.ms, status: named.status, ...(named.error ? { error: named.error } : {}) },
             },
-            flagSentOn: Boolean(plain.sent?.flag || live.sent?.flag || liveResponses.sent?.flag || named.sent?.flag),
-            controlWithPluginOff: { observerSawFlag: control.sent?.flag, status: control.status, error: control.error },
+            profileSentOn: Boolean(plain.sent?.flag || debugChat.sent?.flag || responses.sent?.flag || named.sent?.flag),
+            controlWithPluginOff: { observerSawProfile: control.sent?.flag, status: control.status, error: control.error },
             classifier: {
               model: namedModel,
               cases: pairs.length,
               answered: answered.length,
               msPerCase: answered.length > 0 ? [Math.min(...answered.map((s) => s.ms)), Math.max(...answered.map((s) => s.ms))] : null,
-              realtimeLoopAgreement: `${agree.length}/${pairs.length}`,
-              workKindAgreement: `${kindAgree.length}/${pairs.length}`,
+              accessAgreement: `${accessAgree.length}/${pairs.length}`,
+              dominantCategoryAgreement: `${dominantAgree.length}/${pairs.length}`,
               disagreements: scored
-                .filter((s) => s.got !== s.expected || s.gotKind !== s.expectedKind)
-                .map(({ id, expected, got, expectedKind, gotKind, source, error }) => ({ id, expected, got, expectedKind, gotKind, ...(source !== "system_one_live" ? { source, error } : {}) })),
+                .filter((s) => (s.expectedAccess !== null && s.gotAccess !== s.expectedAccess) || s.gotDominant !== s.expectedDominant)
+                .map(({ id, expectedAccess, gotAccess, expectedDominant, gotDominant, source, error }) => ({ id, expectedAccess, gotAccess, expectedDominant, gotDominant, ...(source !== "system_one_live" ? { source, error } : {}) })),
             },
           };
 
           try {
             for (const m of wanted) assert.ok(served.includes(m), `the ${a.name} sign-in must serve ${m}`);
-            for (const [name, call] of Object.entries({ plain, live, liveResponses, named })) {
+            for (const [name, call] of Object.entries({ plain, debugChat, responses, named })) {
               assert.equal(call.status, 200, `${a.name} ${name} on the real upstream: ${call.error}`);
               assert.ok(call.replied, `${a.name} ${name}: the real upstream must answer with text`);
-              assert.equal(call.sent?.flag, false, `${a.name} ${name}: realtime_loop must not go on to the real upstream`);
+              assert.equal(call.sent?.flag, false, `${a.name} ${name}: the router's profile must not go on to the real upstream`);
               assert.equal(call.sent?.provider, a.name, `${a.name} ${name}: served by this sign-in`);
             }
-            assert.equal(asRoute(plain.sent), mockPlainRoute, `${a.name} non-realtime: the real upstream's route must be the mock's`);
-            assert.equal(asRoute(live.sent), mockLiveRoute, `${a.name} realtime: the real upstream's route must be the mock's`);
-            assert.notEqual(mockPlainRoute, mockLiveRoute, `${a.name}: the pair must show realtime routing doing something`);
-            assert.equal(control.sent?.flag, true, `${a.name}: with AgentCompass off the observer must see the flag`);
-            assert.equal(answered.length, pairs.length, `${a.name}: every pair must be answered by the real classifier, not a fallback: ${JSON.stringify(missed)}`);
+            assert.equal(asRoute(plain.sent), mockPlainRoute, `${a.name} coding: the real upstream's route must be the mock's`);
+            assert.equal(asRoute(debugChat.sent), mockDebugRoute, `${a.name} debug: the real upstream's route must be the mock's`);
+            assert.equal(mockPlainRoute, expectedHere(PROFILE.coding), `${a.name} coding: the route must be the engine's`);
+            assert.equal(mockDebugRoute, expectedHere(PROFILE.debug), `${a.name} debug: the route must be the engine's`);
+            assert.notEqual(mockPlainRoute, mockDebugRoute, `${a.name}: the pair must show the profile deciding the route`);
+            assert.equal(control.sent?.flag, true, `${a.name}: with AgentCompass off the observer must see the profile`);
+            assert.equal(answered.length, pairsToRun.length, `${a.name}: every case must be answered by the real classifier, not a fallback: ${JSON.stringify(missed)}`);
 
             accountsReport[a.name].pass = true;
             console.log(
-              `[PASS] Scenario 13 (real upstream, ${a.name}): non-realtime ${asRoute(plain.sent)} (mock ${mockPlainRoute}) ${plain.status} in ${plain.ms}ms; realtime ${asRoute(live.sent)} (mock ${mockLiveRoute}) ${live.status} in ${live.ms}ms; /v1/responses ${asRoute(liveResponses.sent)} ${liveResponses.status}; named ${asRoute(named.sent)} ${named.status}; flag on the wire: none (plugin off control: observer ${control.sent?.flag}, HTTP ${control.status}); classifier ${namedModel}: realtime_loop ${agree.length}/${pairs.length}, work_kind ${kindAgree.length}/${pairs.length}`
+              `[PASS] Scenario 13 (real upstream, ${a.name}): coding ${asRoute(plain.sent)} (mock ${mockPlainRoute}) ${plain.status} in ${plain.ms}ms; debug ${asRoute(debugChat.sent)} (mock ${mockDebugRoute}) ${debugChat.status} in ${debugChat.ms}ms; /v1/responses ${asRoute(responses.sent)} ${responses.status}; named ${asRoute(named.sent)} ${named.status}; profile on the wire: none (plugin off control: observer ${control.sent?.flag}, HTTP ${control.status}); classifier ${namedModel}: access ${accessAgree.length}/${pairs.length}, dominant category ${dominantAgree.length}/${pairs.length}`
             );
           } catch (acctErr) {
             accountsReport[a.name].pass = false;
@@ -2458,8 +2075,11 @@ async function main() {
         // =====================================================================
         const workingAcct =
           REAL_ACCOUNTS.find((a) => accountsReport[a.name]?.pass === true) ||
-          REAL_ACCOUNTS.find((a) => accountsReport[a.name]?.routes?.nonRealtime?.status === 200) ||
+          REAL_ACCOUNTS.find((a) => accountsReport[a.name]?.routes?.coding?.status === 200) ||
           REAL_ACCOUNTS[0];
+        // 13B needs an account the community data prices (Rule B): a codex or claude plan has capacity in dollars, a grok plan
+        // has none, so a lone grok account is out of automatic routing by the data gate, not by its sign-in
+        const pricedAcct = REAL_ACCOUNTS.find((a) => a.name !== "grok" && accountsReport[a.name]?.pass === true) || REAL_ACCOUNTS.find((a) => a.name !== "grok") || null;
         const scorerModelId = `${workingAcct.name}/${workingAcct.named}`;
         const classifierCandidatePool = [
           ...workingAcct.pool.map((m) => `${workingAcct.name}/${m}`),
@@ -2590,121 +2210,136 @@ async function main() {
           `[PASS] Scenario 13A (real classifier routing via ${scorerModelId}): text -> source=${realClassifierRouting.textRequest.profileSource}, needs_visual=${realClassifierRouting.textRequest.needsVisual}, final=${realClassifierRouting.textRequest.finalModel} (upstream ${realClassifierRouting.textRequest.upstreamObserved}, HTTP ${textRoutedCall.status}); screenshot+text -> source=${realClassifierRouting.screenshotPlusTextRequest.profileSource}, needs_visual=${realClassifierRouting.screenshotPlusTextRequest.needsVisual}, final=${realClassifierRouting.screenshotPlusTextRequest.finalModel} (upstream ${realClassifierRouting.screenshotPlusTextRequest.upstreamObserved}, HTTP ${visRoutedCall.status})`
         );
 
-        // 13B: Single available account while other accounts' credentials are invalid: warn & do not dispatch invalid accounts
-        const nowIso13 = new Date().toISOString();
-        const winLater13 = new Date(Date.now() + 4 * 3600_000).toISOString();
-        const winWeek13 = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
-        const invalidProviders13b = ["codex", "claude", "grok"].filter((p) => p !== workingAcct.name);
-        const singleValidQuotas = [
-          {
-            provider: workingAcct.name,
-            account: `${workingAcct.name}-valid`,
-            plan: workingAcct.name === "claude" ? "max20" : "pro",
-            status: "ok",
-            updated_at: nowIso13,
-            windows: [
+        // 13B needs an account the data prices: skipped, and said so, when the only account is grok's
+        if (!pricedAcct) {
+          singleValidAccountWithInvalidPeers = { pass: null, skipped: "no priced (codex or claude) account among the sign-ins: a grok plan has no capacity in the community data (Rule B)" };
+          console.log(`[SKIP] Scenario 13B: ${singleValidAccountWithInvalidPeers.skipped}`);
+        } else {
+          // 13B: Single available account while other accounts' credentials are invalid: warn & do not dispatch invalid accounts
+          const nowIso13 = new Date().toISOString();
+          const winLater13 = new Date(Date.now() + 4 * 3600_000).toISOString();
+          const winWeek13 = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
+          // A plan the community data prices, with the windows that plan has: a quota reading the data gate would refuse
+          // (an unrecognized plan, or windows its plan lacks) leaves the account out of automatic routing for a reason that is not
+          // the one this scenario is about
+          const PLAN_13 = { codex: "pro", claude: "max20", grok: "free" };
+          const WINDOWS_13 = {
+            codex: [{ name: "usage", remaining: 85, resets_at: winWeek13 }],
+            claude: [
               { name: "five_hour", remaining: 85, resets_at: winLater13 },
               { name: "seven_day", remaining: 90, resets_at: winWeek13 },
             ],
-          },
-          ...invalidProviders13b.map((p, idx) => ({
-            provider: p,
-            account: `${p}-invalid`,
-            plan: idx === 0 ? "max20" : "free",
-            status: idx === 0 ? "auth_failed" : "expired",
-            http_status: idx === 0 ? 401 : 403,
-            error: idx === 0 ? "OAuth token expired (401 Unauthorized)" : "API key invalid or plan inactive",
-            updated_at: nowIso13,
-            windows: [{ name: "five_hour", remaining: 90, resets_at: winLater13 }],
-          })),
-        ];
-        const singleValidQuotasPath = path.join(root, "quotas-single-valid.json");
-        fs.writeFileSync(singleValidQuotasPath, JSON.stringify(singleValidQuotas, null, 2));
-        const multiProviderPool13 = [
-          "claude/claude-opus-5-5",
-          "claude/claude-sonnet-5-5",
-          "codex/gpt-6.1-sol",
-          "codex/gpt-6-astra",
-          "grok/grok-4.7-build-fast",
-        ];
-        const singleValidOpts = {
-          enableDecisionProvider: true,
-          decisionProviderDetails: true,
-          injectProtocolEffort: true,
-          useCache: false,
-          quotas: singleValidQuotas,
-          quotasPath: singleValidQuotasPath,
-          candidateModels: multiProviderPool13,
-        };
-        await realWebPost("options", { Options: singleValidOpts });
+          };
+          const invalidProviders13b = ["codex", "claude", "grok"].filter((p) => p !== pricedAcct.name);
+          const singleValidQuotas = [
+            {
+              provider: pricedAcct.name,
+              account: `${pricedAcct.name}-valid`,
+              plan: PLAN_13[pricedAcct.name],
+              status: "ok",
+              updated_at: nowIso13,
+              windows: WINDOWS_13[pricedAcct.name],
+            },
+            ...invalidProviders13b.map((p, idx) => ({
+              provider: p,
+              account: `${p}-invalid`,
+              plan: PLAN_13[p],
+              status: idx === 0 ? "auth_failed" : "expired",
+              http_status: idx === 0 ? 401 : 403,
+              error: idx === 0 ? "OAuth token expired (401 Unauthorized)" : "API key invalid or plan inactive",
+              updated_at: nowIso13,
+              windows: [{ name: "five_hour", remaining: 90, resets_at: winLater13 }],
+            })),
+          ];
+          const singleValidQuotasPath = path.join(root, "quotas-single-valid.json");
+          fs.writeFileSync(singleValidQuotasPath, JSON.stringify(singleValidQuotas, null, 2));
+          const multiProviderPool13 = [
+            "claude/claude-opus-5-5",
+            "claude/claude-sonnet-5-5",
+            "codex/gpt-6.1-sol",
+            "codex/gpt-6-astra",
+            "grok/grok-4.7-build-fast",
+          ];
+          const singleValidOpts = {
+            enableDecisionProvider: true,
+            decisionProviderDetails: true,
+            injectProtocolEffort: true,
+            useCache: false,
+            quotas: singleValidQuotas,
+            quotasPath: singleValidQuotasPath,
+            candidateModels: multiProviderPool13,
+          };
+          await realWebPost("options", { Options: singleValidOpts });
 
-        const logsBefore13b = realLogs.join("").split("\n").length;
-        const sysSingleResp = await fetch(`http://127.0.0.1:${realGw}/v1/systemone`, {
-          method: "POST",
-          headers: gwHeaders,
-          body: JSON.stringify({
-            model: "agentcompass/agentcompass-systemone",
-            profile: PROFILE.debug,
-            messages: [userMsg(`${DEBUG} [13B-sys]`)],
-          }),
-          signal: AbortSignal.timeout(REAL_TIMEOUT_MS),
-        });
-        assert.equal(sysSingleResp.status, 200);
-        const sysSingleJson = await sysSingleResp.json();
-        assert.equal(sysSingleJson.agentcompass?.ok, true, "13B: single valid account must still route");
-        assert.ok(
-          sysSingleJson.agentcompass?.targetModel?.startsWith(`${workingAcct.name}/`),
-          `13B: must route to the single valid account (${workingAcct.name}), got ${sysSingleJson.agentcompass?.targetModel}`
-        );
-        for (const invProv of invalidProviders13b) {
+          const logsBefore13b = realLogs.join("").split("\n").length;
+          const sysSingleResp = await fetch(`http://127.0.0.1:${realGw}/v1/systemone`, {
+            method: "POST",
+            headers: gwHeaders,
+            body: JSON.stringify({
+              model: "agentcompass/agentcompass-systemone",
+              profile: PROFILE.debug,
+              messages: [userMsg(`${DEBUG} [13B-sys]`)],
+            }),
+            signal: AbortSignal.timeout(REAL_TIMEOUT_MS),
+          });
+          assert.equal(sysSingleResp.status, 200);
+          const sysSingleJson = await sysSingleResp.json();
+          assert.equal(sysSingleJson.agentcompass?.ok, true, "13B: single valid account must still route");
           assert.ok(
-            sysSingleJson.agentcompass?.warnings?.some((w) => w.includes(`${invProv}/${invProv}-invalid`) && w.includes("excluded from dispatch")),
-            `13B: must warn that ${invProv}/${invProv}-invalid is excluded from dispatch: ${JSON.stringify(sysSingleJson.agentcompass?.warnings)}`
+            sysSingleJson.agentcompass?.targetModel?.startsWith(`${pricedAcct.name}/`),
+            `13B: must route to the single valid account (${pricedAcct.name}), got ${sysSingleJson.agentcompass?.targetModel}`
           );
-          const acctRow = sysSingleJson.agentcompass?.accounts?.find((r) => r.key === `${invProv}/${invProv}-invalid`);
-          assert.equal(acctRow?.dispatchable, false, `13B: ${invProv}/${invProv}-invalid must have dispatchable=false`);
-          assert.deepEqual(
-            mwOnAccount({ provider: invProv, name: `${invProv}-invalid` }, { options: singleValidOpts, state: {} }),
-            { skip: true },
-            `13B: onAccount must skip invalid account ${invProv}/${invProv}-invalid`
+          for (const invProv of invalidProviders13b) {
+            assert.ok(
+              sysSingleJson.agentcompass?.warnings?.some((w) => w.includes(`${invProv}/${invProv}-invalid`) && w.includes("excluded from dispatch")),
+              `13B: must warn that ${invProv}/${invProv}-invalid is excluded from dispatch: ${JSON.stringify(sysSingleJson.agentcompass?.warnings)}`
+            );
+            const acctRow = sysSingleJson.agentcompass?.accounts?.find((r) => r.key === `${invProv}/${invProv}-invalid`);
+            assert.equal(acctRow?.dispatchable, false, `13B: ${invProv}/${invProv}-invalid must have dispatchable=false`);
+            assert.deepEqual(
+              mwOnAccount({ provider: invProv, name: `${invProv}-invalid` }, { options: singleValidOpts, state: {} }),
+              { skip: true },
+              `13B: onAccount must skip invalid account ${invProv}/${invProv}-invalid`
+            );
+          }
+          assert.equal(
+            mwOnAccount({ provider: pricedAcct.name, name: `${pricedAcct.name}-valid` }, { options: singleValidOpts, state: {} }),
+            undefined,
+            `13B: onAccount must allow valid account ${pricedAcct.name}/${pricedAcct.name}-valid`
           );
+
+          const singleValidCall = await callReal("/v1/chat/completions", {
+            model: "agentcompass/auto",
+            profile: PROFILE.debug,
+            messages: [userMsg(`${DEBUG} [13B-chat] Reply with exactly: OK`)],
+          });
+          assert.equal(singleValidCall.status, 200, `13B singleValidCall failed: ${singleValidCall.error}`);
+          assert.ok(singleValidCall.replied, "13B singleValidCall must reply");
+          assert.equal(singleValidCall.sent?.provider, pricedAcct.name, "13B singleValidCall must dispatch only to the valid provider");
+          const warnLines13b = realLogs
+            .join("")
+            .split("\n")
+            .slice(logsBefore13b)
+            .filter((l) => l.includes("excluded from dispatch"))
+            .map((l) => redactSecrets(l));
+          assert.ok(warnLines13b.length >= invalidProviders13b.length, "13B: Magpie log must record excluded-from-dispatch warnings for invalid accounts");
+
+          singleValidAccountWithInvalidPeers = {
+            pass: true,
+            validAccount: `${pricedAcct.name}/${pricedAcct.name}-valid`,
+            invalidAccounts: invalidProviders13b.map((p) => `${p}/${p}-invalid`),
+            accounts: sysSingleJson.agentcompass.accounts,
+            warnings: sysSingleJson.agentcompass.warnings,
+            routedModel: asRoute(singleValidCall.sent),
+            dispatchedProvider: singleValidCall.sent?.provider,
+            status: singleValidCall.status,
+            logWarningsCount: warnLines13b.length,
+          };
+          console.log(
+            `[PASS] Scenario 13B (single valid account, invalid peers skipped): routed ${singleValidAccountWithInvalidPeers.routedModel} via ${singleValidAccountWithInvalidPeers.dispatchedProvider} (HTTP ${singleValidCall.status}); warnings=${JSON.stringify(singleValidAccountWithInvalidPeers.warnings)}`
+          );
+
         }
-        assert.equal(
-          mwOnAccount({ provider: workingAcct.name, name: `${workingAcct.name}-valid` }, { options: singleValidOpts, state: {} }),
-          undefined,
-          `13B: onAccount must allow valid account ${workingAcct.name}/${workingAcct.name}-valid`
-        );
-
-        const singleValidCall = await callReal("/v1/chat/completions", {
-          model: "agentcompass/auto",
-          profile: PROFILE.debug,
-          messages: [userMsg(`${DEBUG} [13B-chat] Reply with exactly: OK`)],
-        });
-        assert.equal(singleValidCall.status, 200, `13B singleValidCall failed: ${singleValidCall.error}`);
-        assert.ok(singleValidCall.replied, "13B singleValidCall must reply");
-        assert.equal(singleValidCall.sent?.provider, workingAcct.name, "13B singleValidCall must dispatch only to the valid provider");
-        const warnLines13b = realLogs
-          .join("")
-          .split("\n")
-          .slice(logsBefore13b)
-          .filter((l) => l.includes("excluded from dispatch"))
-          .map((l) => redactSecrets(l));
-        assert.ok(warnLines13b.length >= invalidProviders13b.length, "13B: Magpie log must record excluded-from-dispatch warnings for invalid accounts");
-
-        singleValidAccountWithInvalidPeers = {
-          pass: true,
-          validAccount: `${workingAcct.name}/${workingAcct.name}-valid`,
-          invalidAccounts: invalidProviders13b.map((p) => `${p}/${p}-invalid`),
-          accounts: sysSingleJson.agentcompass.accounts,
-          warnings: sysSingleJson.agentcompass.warnings,
-          routedModel: asRoute(singleValidCall.sent),
-          dispatchedProvider: singleValidCall.sent?.provider,
-          status: singleValidCall.status,
-          logWarningsCount: warnLines13b.length,
-        };
-        console.log(
-          `[PASS] Scenario 13B (single valid account, invalid peers skipped): routed ${singleValidAccountWithInvalidPeers.routedModel} via ${singleValidAccountWithInvalidPeers.dispatchedProvider} (HTTP ${singleValidCall.status}); warnings=${JSON.stringify(singleValidAccountWithInvalidPeers.warnings)}`
-        );
 
         // 13C: All accounts unavailable: HTTP 503 with account warnings and zero upstream dispatch
         const allInvalidQuotas = [
@@ -2822,7 +2457,7 @@ async function main() {
           allAccountsUnavailable503,
         };
         report.steps.push({
-          test: "Scenario 13: real upstreams, one per sign-in: no realtime_loop on the wire, routes as on the mock, classifier on 12 paired hard cases, real classifier routing (text + screenshot), single valid account vs invalid peers, all accounts unavailable 503",
+          test: "Scenario 13: real upstreams, one per sign-in: no profile on the wire, routes as on the mock and as the engine gives them, the classifier on hard cases (access, dominant category), real classifier routing (text + screenshot), single valid account vs invalid peers, all accounts unavailable 503",
           ...report.scenarios.scenario13_real_upstream,
         });
         if (accountFailures.length > 0) {
@@ -2875,9 +2510,6 @@ ${magpieLogs.join("").slice(-6000)}`);
   } finally {
     if (magpieProc && !magpieProc.killed) {
       magpieProc.kill("SIGTERM");
-    }
-    if (baselineProc && !baselineProc.killed) {
-      baselineProc.kill("SIGTERM");
     }
     upstreamServer.close();
     scorerServer.close();
