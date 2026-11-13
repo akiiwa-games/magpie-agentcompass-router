@@ -1,10 +1,13 @@
 # 为 Magpie 制作纯意图路由插件：源码级调研与新方案设计
 
-> **项目仓库**：`E:\PROJECTS\magpie-agentcompass-router`  
+> **项目仓库**：[`akiiwa-games/magpie-agentcompass-router`](https://github.com/akiiwa-games/magpie-agentcompass-router)  
 > **核心算法来源**：[**AgentCompass (`akiiwa-games/AgentCompass`)**](https://github.com/akiiwa-games/AgentCompass) (`skills/agent-compass/scripts/route_judge.py` & `allocator.py`)  
 > **目标网关**：[**Magpie (`yetone/magpie`)**](https://github.com/yetone/magpie)
 
-> **状态（0.2.0）**：本文记录的是 0.1.x 的调研与方案：6D/7D 能力向量、3D Model DNA、`realtime_loop`、`EFFORT_CURVES` 等都已被 AgentCompass v0.6.0 的四类能力打分取代并从代码里删除；现行引擎见 README 的 "How it decides" 与 `docs/RELEASE_NOTES.md` 的 0.2.0。下文保留作历史记录，4.6 一节已更新为当前的对拍。
+> **状态（0.2.0）**：引擎已换成 AgentCompass v0.6.0（固定在 `974eb49`）的四类能力打分、配额经济与数据门禁；0.1.x 的 6D/7D 能力向量、3D Model DNA、`realtime_loop`、`EFFORT_CURVES` 等都已被取代并从代码里删除。本文按下面的口径读：
+>
+> - **现行**：§1（Magpie 的局限，已按 v0.6.0 重写）、§2（双模式架构）、§3（打分，已重写为 v0.6.0）、§4.6（与 AgentCompass 的对拍）、§4.8（0.2.0 的沙盒场景）、§5。§4.4 里的隔离与凭据边界也仍然适用。
+> - **历史记录**：§3.5、§4.1、§4.2、§4.3、§4.4 的运行结果、§4.5、§4.7 是 0.1.x 引擎上某一次（2026 年 10–11 月）运行的原始记录，标题里写明；其中的画像字段、路由结果与命令属于当时的引擎，不随引擎更新，也不是现行行为的说明。现行引擎见 README 的 "How it decides" 与 `docs/RELEASE_NOTES.md` 的 0.2.0。
 
 ---
 
@@ -24,9 +27,9 @@
      - `askChat`（`classify.go:191`）仅把用户在 UI 手写的几条 `Intent` 字符串编号为 `1..N`，让分类模型输出一个整数 `0..N`，另起一个请求输出 `1..4` 的 `effort`。
      - 匹配成功后，仅能**静态映射**到该规则预设的固定模型列表 `Use`。
    - **局限（对比 AgentCompass 核心算法）**：
-     - **缺乏多维任务画像（10-Field Task Profile）**：无法同时解耦任务类型（16 类 `work_kind`）、推理深度（`reasoning_depth` 1..4）、生产代码复杂度（`code_complexity` 0..3，区分只读代码审查与实际写代码）、上下文耦合规模（`context_scale` 1..3）、发散度（`divergence` 1..3，区分收敛实现、多假设排查与开放式方案创意）、防幻觉严格度（`hallucination_risk` 1..3）与错误代价（`error_cost` 1..3）。
-     - **缺乏模型基因（Model DNA）与 6 维客观能力向量匹配**：无法像 AgentCompass 那样自动根据 `divergence`（Argon `0.96`）、`global_rigor`（Opus `0.98` / Astra `0.82`）、`module_precision`（Sol 6.1 `0.95`）和 GUI 能力（Astra `0.95`）做连续空间匹配。
-     - **缺乏能力底线门禁（Ability Floor）与大材小用惩罚（Overqualification Penalty）**：Magpie 的 1D 规则不会计算任务的连续所需能力 `required_ability`，也无法在简单任务（`routine`）上对高价旗舰模型施加 `overqualification` 惩罚，极易出现“杀鸡用牛刀”或“复杂跨模块审计选了轻量模型”的失配。
+     - **缺乏结构化任务画像（Task Profile）**：无法同时解耦任务类型（16 类 `work_kind`）、推理深度（`reasoning_depth` 1..4）、生产代码复杂度与读写方式（`code_complexity` 0..3、`access`：区分只读代码审查与实际写代码）、对四类能力的需求等级（`axis_demand`：`divergence`、`coding`、`aesthetics`、`tool_operation`，各 0..3 级）、模态与环境需求（`needs_visual`、`needs_gui`、`local_only`）、预计时长与紧迫度（`expected_hours`、`urgency`、`wants_fast`）。
+     - **缺乏按类别的能力数据与数据门禁（Rule B）**：无法像 AgentCompass 那样用每个模型在四类能力上、按努力档位给出的有出处评分（以面板标准差计）与任务的需求等级做拟合；需求的类别没有数据、计费账号没有标价、图片输入未知、该档位没有 Time/Task 时，该 `<模型, 档位>` 不进自动路由，而不是猜一个分数。
+     - **缺乏配额经济（Quota Economy）**：Magpie 的 1D 规则看不到各账号的订阅窗口：5 小时窗口决定任务能否启动，24 小时及以上的窗口按机会成本定价，净分 `N = fit + continuity + boost − quota_cost` 才能在“把贵的旗舰留给真正需要的任务”与“快用完的额度别再开新活”之间取舍；没有这一层，极易出现“杀鸡用牛刀”或“复杂跨模块审计选了轻量模型”的失配。
 
 ---
 
@@ -52,14 +55,14 @@ flowchart TD
     Client["客户端请求 (Claude Code / Codex / OpenCode / Cursor)"] --> Handle["Magpie Gateway: handle() -> serveAgent()"]
     
     subgraph ModeA["模式 A：两阶段串联直改模型 (Two-Stage Tandem, 预算高达 10,000 ms)"]
-        Hook["Stage 1: Bun 异步 Hook (src/hooks.js)\n预算: gatewayTimeoutMs = 8,000~10,000 ms\n1. 提取多协议 Prompt / 视觉模态 / 工具\n2. 查 SHA-256 LRU 缓存 (命中 0ms)\n3. 调 System-One 10 维画像器 (Jev / Fast LLM / <1ms 确定性回退)\n4. 运行 AgentCompass 核心分配算法 (selectBestRoute)\n5. 写入临时载体 body.__agentcompass_route\n(不触碰 body.model，完美通过 host.js:1411 校验)"]
+        Hook["Stage 1: Bun 异步 Hook (src/hooks.js)\n预算: gatewayTimeoutMs = 8,000~10,000 ms\n1. 提取多协议 Prompt / 视觉模态 / 工具\n2. 查 SHA-256 LRU 缓存 (命中 0ms)\n3. 取任务画像（调用方带来，或 System-One 分类模型给出；没有则不路由）\n4. 运行 AgentCompass 核心分配算法 (selectBestRoute)\n5. 写入临时载体 body.__agentcompass_route\n(不触碰 body.model，完美通过 host.js:1411 校验)"]
         MW["Stage 2: moejs 同步中间件 (src/middleware.js)\n预算: 250 ms (实际耗时 < 0.2 ms)\n1. 读取并删除 body.__agentcompass_route\n2. 将 body.model 重写为 <targetModel>:<targetEffort>\n3. 按协议注入 reasoning_effort / output_config.effort"]
         Hook -->|"传递 body.__agentcompass_route"| MW
     end
 
     subgraph ModeB["模式 B：原生路由组决策插件 (Decision Provider, 预算 8,000~60,000 ms)"]
         Serve["Magpie Gateway: s.serve() -> ruleFor() -> askJev()"]
-        Decide["Bun 决策插件 (src/index.js)\n注册 agentcompass/agentcompass-systemone (decide: true)\n预算: ClassifyTimeout = 8,000~60,000 ms\n拦截 POST /v1/systemone (支持 jevLevelled 与 jevBody)\n运行 10 维画像 + AgentCompass 评分\n返回精准 intent 概率分布 + effort 档位 (0..3)"]
+        Decide["Bun 决策插件 (src/index.js)\n注册 agentcompass/agentcompass-systemone (decide: true)\n预算: ClassifyTimeout = 8,000~60,000 ms\n拦截 POST /v1/systemone (支持 jevLevelled 与 jevBody)\n取任务画像 + 运行 AgentCompass 四类能力评分\n返回精准 intent 概率分布 + effort 档位 (0..3)"]
         Serve -->|"/v1/systemone"| Decide
     end
 
@@ -69,11 +72,13 @@ flowchart TD
 
 ### 2.1 模式 A：两阶段串联架构（`magpie.hooks` [Bun 10s] + `magpie.middleware` [`moejs` 250ms]）
 
+> **现状（0.2.0）**：包的 `package.json` 不声明 `magpie.hooks`，随包只发 `magpie.middleware`；模式 A 的画像随请求带来（`body.profile`），`moejs` 没有网络，问不了分类模型（README 的 "Known limitations"）。下面两阶段串联描述的是 `src/hooks.js` 被宿主启用时的行为，该文件仍在 `src/` 里，并与中间件、决策 provider 路由同一画像得到同一结果（`test/router.test.mjs`）。
+
 在 `internal/gateway/middleware.go` 的 `serveAgent` 中，Magpie 的执行顺序是严格固定的：
 1. **第 39 行**：先执行 `w, body, hooked := gatewayHooks(w, r, from, body)`（即 Bun 进程中的 `magpie.hooks`）。
    - 我们在插件配置中设置 `"gatewayTimeoutMs": 8000`（最高支持 `10000` ms = 10 秒）。
    - 虽然 `internal/plugin/host.js:1411` 禁止 `magpie.hooks` 直接修改 `body.model`、`body.tools`、`body.stream`，但 **`host.js` 完全允许在 `body` 上挂载其他自定义 JSON 属性**！
-   - 因此，`src/hooks.js` 在 Bun 充裕的 10 秒异步预算内完成 **System-One 10 维任务画像 + AgentCompass 多维能力分配计算**，并将决策结果写入 `body.__agentcompass_route` 临时载体字段。
+   - 因此，`src/hooks.js` 在 Bun 充裕的 10 秒异步预算内完成 **取任务画像（调用方带来或分类模型给出）+ AgentCompass 四类能力评分与配额经济计算**，并将决策结果写入 `body.__agentcompass_route` 临时载体字段。
 2. **第 42–74 行**：紧接着执行 `mw := gwmw.Agent(r.Context(), string(from), agentOf(r), body)`（即 `moejs` 中的 `magpie.middleware`）。
    - `magpie.middleware` 的 `onRequest(body, ctx)` **被 Magpie 官方设计为允许自由重写 `body.model` 和推理强度**（第 52 行 `next, model, err = requestModel(next)` 会重新解析中间件返回的 `model`）。
    - `src/middleware.js` 读取 `body.__agentcompass_route`，**立即删除该临时字段**（确保绝不泄露给上游厂商 API），并将 `body.model` 改写为 `<targetModel>:<targetEffort>`（Magpie 的 `gateway.go:1560` `askedAt()` 原生支持 `<model>:<effort>` 语法，会自动拆解模型名与推理强度）！
@@ -89,56 +94,57 @@ flowchart TD
 
 ---
 
-## 3. AgentCompass 纯意图路由核心算法移植说明
+## 3. AgentCompass v0.6.0 打分移植说明
 
-本插件在 [`src/catalog.js`](../src/catalog.js)、[`src/profiler-core.js`](../src/profiler-core.js) 和 [`src/allocator.js`](../src/allocator.js) 中完整移植了 AgentCompass 的纯意图与能力匹配核心算法（剔除了特定宿主会话耦合，保留全部模型能力、基因与难度门禁数学模型）：
+评分逐模块移植自 AgentCompass（固定在 `test/fixtures/agentcompass-pin.json` 里的提交 `974eb49`，数据取自该提交，不读任何工作区）：`src/axis-scores.js`、`candidate-eval.js`、`candidate-ranking.js`、`quota-economy.js`、`quota-pools.js`、`task-intake.js`、`fleet.js`、`plans.js`、`user-scores.js`，数据在 `src/reference-data.js` 与 `src/catalog.js` 的生成段。移植是否一致由 §4.6 的对拍判定：两边有差异时，改的是移植，不是对拍。
 
-### 3.1 10 维任务画像（System-One Task Profile）
+### 3.1 任务画像（Task Profile）
 
-对每个新用户轮次提取以下结构化特征：
-- **`work_kind`（16 类标准路由）**：`general_implementation`、`frontend_implementation`、`debug_review`、`complex_build_plan`、`direction_reasoning`、`exploration_analysis`、`research_packet`、`self_contained_code`、`visual_analysis`、`computer_use`、`bounded_bulk_work`、`tool_execution`、`text_in_text_out`、`web_research`、`dot_execution`、`other_or_mixed`。
-- **6 个连续难度整数维度**：
-  - `reasoning_depth` ($1..4$)：1 = `routine`（日常机械操作），2 = `hard`（标准模块开发/排障/审查），3 = `coupled`（跨模块架构重构/并发死锁审计），4 = `frontier`（形式化数学证明/前沿理论推导）。
-  - `code_complexity` ($0..3$)：Worker 实际编写的生产代码复杂度（只读审查/审计强制为 $0$）。
-  - `context_scale` ($1..3$)：单模块 ($1$)、多模块耦合 ($2$)、全仓/跨系统 ($3$)。
-  - `divergence` ($1..3$)：收敛已知目标 ($1$)、多假设根因排查 ($2$)、开放式创意/新方案设计 ($3$)。
-  - `hallucination_risk` ($1..3$)：编译器/单测自验证 ($1$)、混合 ($2$)、无单测兜底的高严格度审查/指标报告 ($3$)。
-  - `error_cost` ($1..3$)：低风险只读 ($1$)、常规代码变更 ($2$)、高危生产发布 ($3$)。
-- **模态与环境布尔标记**：`needs_visual`、`needs_gui`、`local_only`、`realtime_loop`（Worker 自身处于运行中系统的实时「观察 → 决策 → 动作」闭环；仅由外部 System-One 分类模型或调用方显式指定，确定性 `inferTaskProfile` 绝不通过关键词猜测、缺省恒为 `false`）以及 `interaction_style`（`engineering` / `exploration` / `text_only` / `advisory`）。
+画像只来自分类模型或调用方（`body.profile`）；`src/` 里没有任何一处读任务的字词（`test/no-hardcode.test.mjs` 把这一点锁住）。字段：
 
-### 3.2 连续能力需求（Continuous `taskDemand`）与供给侧努力曲线（`effortAbility`）
+- **`work_kind`**（16 类标准路由）：`general_implementation`、`frontend_implementation`、`debug_review`、`complex_build_plan`、`direction_reasoning`、`exploration_analysis`、`research_packet`、`self_contained_code`、`visual_analysis`、`computer_use`、`bounded_bulk_work`、`tool_execution`、`text_in_text_out`、`web_research`、`dot_execution`、`other_or_mixed`。
+- **难度**：`reasoning_depth`（1..4：日常机械操作、标准模块开发/排障/审查、跨模块架构重构/并发死锁审计、形式化证明/前沿推导）、`code_complexity`（0..3：Worker 实际写的生产代码；只读审查为 0）。
+- **读写方式**：`access`（`write` / `read-only`）与 `read_only_review`。
+- **对四类能力的需求**：`axis_demand`，`divergence`（发散创意）、`coding`（写代码）、`aesthetics`（审美/视觉设计）、`tool_operation`（操作工具与界面）各 0..3 级。
+- **模态与环境**：`needs_visual`、`needs_gui`、`local_only`、`interaction_style`。
+- **时间**：`expected_hours`、`hours_confidence`、`urgency`、`wants_fast`；以及 `multi_task`、`task_count`。
 
-1. **任务侧连续能力需求**：
-   $$\text{required\_ability} = \text{ability\_floor}[\text{difficulty}] + \text{critical\_headroom} + \text{precision\_headroom} + \text{property\_span} \times \frac{\text{depth}}{4} \times \text{property\_load}$$
-   其中难度底线为：`routine: 3.0`、`hard: 3.3`、`coupled: 3.6`、`frontier: 4.2`。
-2. **供给侧有效能力**：
-   $$\text{effective\_ability}(m, e) = \text{tier}(m) + \Delta\text{ability}(m, e)$$
-   低于难度门限 $\text{gate}$ 的 $(m, e)$ 组合直接淘汰；高于 `high` 的努力档位（`xhigh` / `max`）仅在 $\text{required\_ability} > \text{high\_ability}$ 时获得额外能力加分。
+0.1.x 的 `context_scale`、`hallucination_risk`、`error_cost`、`divergence`（作为单独字段）与 `realtime_loop` 不再存在；旧形状的画像会被拒绝（`invalid_caller_profile`），不会被修补。
 
-### 3.3 三维拟合度融合（Route Fit + 6D Capability Vector + 3D Model DNA）
+### 3.2 四类能力的拟合度（fit）
 
-$$\text{fit} = w_r \cdot \text{route\_fit} + w_v \cdot \text{vector\_fit} + w_s \cdot \text{subjective\_fit}$$
+每个 `<模型, 档位>` 行在四个类别上各有一个评分（以面板标准差计，每个分数带出处：维护者数据、实测或估计）。任务对某类别的需求等级定出目标（等级 1 和 2 取 `t1`，等级 3 取该类别的上限），拟合在上限处封顶：
 
-- **`route_fit`**：模型在 16 类 `work_kind` 路由上的先验偏好排序与能力向量回退。
-- **`vector_fit`**：模型在 6 个客观能力维度（`reasoning`、`coding`、`exploration`、`anti_hallucination`、`visual`、`gui`）上对任务需求 `profileRequirements` 的满足率 $\min(1, \text{cap}_d / \text{need}_d)$ 加权均值。
-- **`subjective_fit`（模型基因 Model DNA）**：
-  - `divergence`（发散创意）：`gemini-4-argon-high` ($0.96$) 在开放式方案设计（`divergence = 3`）中胜出；
-  - `global_rigor`（全局严密性）：`claude-opus-5-5` ($0.98$) 与 `gpt-6-astra` ($0.82$) 在跨模块审查、死锁排查与架构规划中胜出；
-  - `module_precision`（模块精准度）：`gpt-6.1-sol` ($0.95$) 在单模块高内聚代码实现中胜出。
+$$\text{fit} = \frac{\sum_a w_a \cdot \big(\min(z_a, \text{cap}_a) - t1_a\big)}{\sum_a w_a}$$
 
-### 3.4 综合得分与大材小用惩罚（Overqualification Penalty）
+其中 $a$ 取任务有需求的类别，$w_a$ 为需求等级。`tool_operation` 按分项读取：2 级要求响应速度，3 级另外要求图片输入。没有按模型分别给出分数的家族名和未知名（如 `claude-opus-9`）不参与自动路由，只在点名时派发。
 
-$$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \text{ability\_score} + \text{quality\_bonus} - \text{effort\_penalty} - \text{overqualification} - \text{shortfall}$$
+### 3.3 数据门禁（Rule B）
 
-- 在常规任务（`minimum_sufficient`）上，当模型有效能力超出 $\text{required\_ability} + \text{saturation\_span}$ 时，按该模型的小时费率 $\text{usd\_per\_hour} \times \text{effort\_burn}$ 施加 `overqualification` 惩罚，从而确保日常批量/简单任务自动落到 `gemini-3.8-flash-high` / `claude-haiku-5-5` / `gpt-6-luna`，而把 `claude-opus-5-5` / `gpt-6-astra` 留给真正需要高阶推理的任务。
+需求的类别没有数据、计费账号没有标价（`usd_per_hour` 无出处）、3 级需求下图片输入未知、该档位没有 Time/Task、或窗口容量未知，该行退出自动路由，并在 `warnings` 里写明数据错误；点名该模型仍可派发。提供方有自己的派发档位表、而表里没有列出的裸模型名（例如候选池 `codex/claude-opus-5-5`）不提供任何档位，该行不带档位地参与路由（`account_fleet.dispatch_allowed_efforts`：降档不会落在未经验证的档位上）；没有表的网关则按数据里计过时的档位展开。
 
+### 3.4 配额经济与排序
+
+- **净分**：$N = \text{fit} + \text{continuity} + \text{boost} - \text{quota\_cost}$。
+- **窗口**：5 小时窗口只做可行性闸门（任务要放得进窗口，留 `safety_margin_pct = 5%` 的余量），不定价；24 小时及以上的窗口按机会成本定价（`quota_cost`），窗口确认耗尽或低于启动下限的行被排除。额度剩得越多，成本从不升高。
+- **容量**：窗口的美元容量来自账号的 `plan`（固定的 `plan-templates.json` 与社区数据）；`plan` 未上报或不认识时容量未知，账号退出自动路由，直到上报。
+- **排序键**：净分，然后依次是等待小时、完成小时、美元、类别级别。
+- **没有**：能力下限（ability floor）、过度合格惩罚（overqualification）、实时降档。档位由拟合与配额经济共同选出。
+
+### 3.5 历史：0.1.x 的方案（已被取代）
+
+> 这一节是 0.1.x 当时的设计记录，现已从代码里删除，不描述现行行为。
+
+0.1.x 用 10 维画像（`reasoning_depth`、`code_complexity`、`context_scale`、`divergence`、`hallucination_risk`、`error_cost` 六个连续整数，加 `needs_visual`、`needs_gui`、`local_only`、`realtime_loop`）算任务侧连续能力需求 `required_ability = ability_floor[difficulty] + critical_headroom + precision_headroom + property_span × depth/4 × property_load`（难度底线 `routine 3.0`、`hard 3.3`、`coupled 3.6`、`frontier 4.2`），与供给侧 `effective_ability = tier + Δability(m, e)` 比较，低于难度门限的组合淘汰；再把路由先验 `route_fit`、6 维客观能力向量 `vector_fit`（`reasoning`、`coding`、`exploration`、`anti_hallucination`、`visual`、`gui`）与 3 维模型基因 `subjective_fit`（`divergence`、`global_rigor`、`module_precision`）加权融合；综合得分 $\text{score} = w_{fit}\cdot\text{fit} + w_{ability}\cdot\text{ability\_score} + \text{quality\_bonus} - \text{effort\_penalty} - \text{overqualification} - \text{shortfall}$，并在日常任务上按小时费率对过度合格的旗舰施加 `overqualification` 惩罚。`realtime_loop` 为真时排除响应慢的档位并逐档降级。AgentCompass v0.6.0 用四类能力的 `axis_demand` 与配额经济替换了整套机制（见 `docs/RELEASE_NOTES.md` 的 0.2.0）。
 ---
 
 ## 4. Linux 沙盒真实网关实测报告（Real Linux Sandbox E2E Verification）
 
+> **读法**：§4.1、§4.2、§4.3、§4.4 的运行结果、§4.5、§4.7 是 0.1.x 引擎上的运行记录（2026 年 10–11 月），标题标了“历史记录”；其中的路由结果、画像字段与命令（含已删除的 `BASELINE_SRC`）是当时的，保持原样。现行的对拍见 §4.6，现行的沙盒场景见 §4.8。`docs/linux-sandbox-e2e-report*.json` 同样是那几次运行的产物，不随引擎更新。
+
 为验证三层异构运行时（Go Gateway 主进程 + Bun OpenCode 插件宿主 + 嵌入式 `moejs` 引擎）与四条协议边界的真实端到端行为，我们在 WSL2 Linux 沙盒（`Linux 6.18.40.1-microsoft-standard-WSL2 x86_64`，`/run/magpie-sandbox` tmpfs）中编译并运行了真实 Linux `magpie` 守护进程（`magpie serve`）与 Linux `bun` v1.4.2 宿主（完整脚本见 [`test/run-linux-sandbox.sh`](../test/run-linux-sandbox.sh) 与 [`test/linux-sandbox-e2e.mjs`](../test/linux-sandbox-e2e.mjs)，实测产物见 [`docs/linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)）：
 
-### 4.1 插件注册与扩展点验证（`magpie plugin list`）
+### 4.1 插件注册与扩展点验证（`magpie plugin list`）（0.1.x 历史记录：当时的包还带 `magpie.hooks`，现在只有中间件）
 
 ```text
 ✓ added /run/magpie-sandbox/agentcompass
@@ -149,7 +155,7 @@ $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \tex
   agentcompass (AgentCompass, 1 models)  signed in
 ```
 
-### 4.2 7 大场景真实网关与插件市场 E2E 测试矩阵
+### 4.2 7 大场景真实网关与插件市场 E2E 测试矩阵（0.1.x 历史记录）
 
 | 场景 | 模式与协议 | 输入请求与测试动作 | 实测结果 | 关键契约验证 | 结果 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -161,7 +167,7 @@ $$\text{score} = w_{\text{fit}} \cdot \text{fit} + w_{\text{ability}} \cdot \tex
 | **Scenario 6** | **Mode A** · 故障注入与优雅降级 | 远程 System-One 评分器返回 `HTTP 500` 及 `2000ms > 300ms` 超时 | `HTTP 500` $\rightarrow$ `claude-opus-5-5`<br/>`Timeout (354ms)` $\rightarrow$ `gemini-4-argon-high` | 远程评分器故障或超时自动中断并无缝回退至本地 `<1ms` `profileTask` 启发式画像 | **PASS** |
 | **Scenario 7** | **Mode B** · `/v1/chat/completions` (`model="group/compass-group"`, `classifier=agentcompass/agentcompass-systemone`) | 命中 `direction_reasoning`、命中 `debug_review`、以及未命中任何规则的纯文本翻译请求 | `direction_reasoning` $\rightarrow$ `gemini-4-argon-high:high`<br/>`debug_review` $\rightarrow$ `claude-opus-5-5:xhigh`<br/>`"none of these"` $\rightarrow$ `gpt-6-luna` | `/v1/systemone`（`jevLevelled` + `jevBody`）规则命中、`"none of these"` 兜底回退首模型、以及 `effort=auto` 四档升级全部通过 | **PASS** |
 
-### 4.3 `realtime_loop` 真实 Magpie 验收（Scenario 9–12）
+### 4.3 `realtime_loop` 真实 Magpie 验收（Scenario 9–12）（0.1.x 历史记录：`realtime_loop` 已在 v0.6.0 删除）
 
 运行环境：WSL2 docker-desktop，静态 Linux 二进制 `magpie-cli-linux-amd64`（官方 release，与 SHA256SUMS 一致）。上游与市场是本地 mock，网关、插件宿主与 `moejs` 是真实的。被测插件提交 `c5d59e8`，对比基线 `origin/main` `ab8baba`（第二个真实 Magpie 进程，独立二进制副本与 `data` 目录）。完整记录：[`linux-sandbox-e2e-report.json`](./linux-sandbox-e2e-report.json)（0.1.2891）、[`linux-sandbox-e2e-report-0.1.3196.json`](./linux-sandbox-e2e-report-0.1.3196.json)（0.1.3196）。
 
@@ -189,7 +195,7 @@ BASELINE_SRC=<git archive origin/main 的导出目录> MAGPIE_LINUX_BIN=<magpie-
 - **`/v1/messages` 上看不到 effort**：本场景的上游只有 OpenAI 协议，Magpie 把 `/v1/messages` 转成 chat 后未携带 effort，`origin/main` 同样如此（Scenario 5），所以这条路径只验证了模型选择，没有验证降档。
 - **Argon 单独成池时**：候选全部被排除，请求不改写，虚拟模型名由 Magpie 返回 HTTP 404，上游未被调用。
 
-### 4.4 真实上游验收（Scenario 13）
+### 4.4 真实上游验收（Scenario 13）（运行结果为 0.1.x 历史记录；凭据与隔离的边界仍适用）
 
 一个 Magpie 实例同时登录 Codex、Claude 订阅和 Grok 三个账户，每个账户各跑一组：非实时、实时、`/v1/responses` 实时、直连点名、关掉插件的对照，以及 12 条成对难例。被测提交 `c5d59e8`。
 
@@ -305,7 +311,7 @@ REAL_CODEX_AUTH=<auth.json> REAL_CLAUDE_AUTH=<.credentials.json> REAL_GROK_AUTH=
 
 凭据残留检查（只统计命中数，不输出值）：工作区文件、`origin/main..HEAD` 的补丁、工作区 diff、测试日志以及 `%TEMP%\wsl-crashes` 中，三个登录文件里长度 16 以上的字符串（全文、前 32 字符、JWT 的中段和签名段）以及 Codex `id_token` 里的邮箱，令牌和账户标识的命中数都是 0。唯一的命中是公开地址 `https://auth.x.ai`（`oidc_issuer` 的值），在单元测试的假账户键里。这一检查在提交前还发现过 Grok 的 OAuth client ID 混进了这个测试夹具，已换成虚构值，没有进入任何提交。
 
-### 4.5 `gpt-5.3-codex-spark` 的目录条目
+### 4.5 `gpt-5.3-codex-spark` 的目录条目（0.1.x 历史记录：该条目随 v0.6.0 的目录一并删除）
 
 AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 实现的规范名就是它自己，responsiveness 用默认值 `[0.52, "default"]`。而 `origin/main` 的 `resolveModelSpec` 因名字含 `codex` 把它解析成 `gpt-6.1-sol`（tier 3.6）。现在它有独立条目：所有数值都是不高于 `gpt-6-luna` 的保守占位，并在 `basis` 中注明；`disabled_by_default: true` 使默认候选池不变，只有候选池点名时才参与路由。其他含 `codex` 的名字仍走原有的家族回退。
 
@@ -333,7 +339,9 @@ AgentCompass 的 `accounts.json` 与脚本里都没有这个模型，其 Python 
 
 当两边出现差异时，`test/routing-parity-lib.mjs` 只认两类原因：同分（顺序不同：Magpie 按候选池顺序，AgentCompass 按账户遍历）和契约 R1（点名只匹配本模型的行，family 行是另一个模型）；其余一律是"无法解释"，测试失败。当前网格上没有差异。
 
-### 4.7 删除文本规则后的真实 Magpie 验收（Scenario 1–12、14、15）
+裸模型名另有一组对拍行（夹具里的 `bare_rows`，280 行）：候选池里的裸名（`claude`、`codex`、`grok`、`pi`、`opencode`、`omp`、`antigravity-resilient`、`antigravity`、`claude-2`、`openrouter` 等提供方下的模型），AgentCompass 一侧用 `account_fleet.dispatch_allowed_efforts` 决定提供什么档位：没有表的网关按数据里计过时的档位展开，有表的提供方只给表里列出的档位，表里没有这个模型时不给任何档位（“降档不会落在未经验证的档位上”）。Magpie 照此处理；此前移植对表外的裸名展开数据里计过时的档位，与上游不一致，按“有差异时改移植”改正，`test/routing-parity.test.mjs` 与 `test/routing-contract.test.mjs` 各有一条测试把它锁住。
+
+### 4.7 删除文本规则后的真实 Magpie 验收（Scenario 1–12、14、15）（0.1.x 历史记录）
 
 §4.2–4.4 记录的是删除文本规则之前的提交。删除之后路由只看结构化画像，这里是重写后的场景在真实 Magpie 上的结果。
 
@@ -364,8 +372,29 @@ Scenario 9 不再比较直接发文本的结果，因为新版本不读文本。
 - **短追问不再因为短而保持**：Scenario 9 里 `bundles with effort` 池的一行 `继续`，基线是 `claude-opus-5-5:xhigh`，新版本是 `claude-opus-5-5:medium`，和本会话第一个请求一致。这一行取决于落在哪个运行时（0.1.2891 这次没有差异，0.1.3196 有一行）。它单独记在报告的 `followupsRoutedAgainAsTheirFirstRequest` 里，并断言等于首个请求的路由，不算差异。
 - **沙盒内的单元测试**：`bun test` 是 121 通过、26 跳过、0 失败。跳过的是要和 git 基线比较的 parity 测试，沙盒里没有 git；宿主机上 `npm test` 147 项全部运行并通过。
 
+### 4.8 0.2.0 的沙盒场景（现行，尚未在沙盒里运行）
+
+`test/linux-sandbox-e2e.mjs` 已按 v0.6.0 的画像与引擎改写，`test/run-linux-sandbox.sh` 的路径改为运行时推导（见 README）。**这次没有在真实 Magpie 上运行它**：它需要 WSL2 沙盒里的 Linux `magpie` 与 `bun`，开发这版的机器没有；下一次在有沙盒的机器上跑过之后，结果再补进来。目前做过的是静态检查：`node --check`；它向插件取的名字（`selectBestRoute`、`scoreTaskLive`、`hooks` 与 `middleware` 的 `onRequest`、`onAccount`）都在 `src/` 里；用同一份画像与候选池在本机对中间件和 `selectBestRoute` 各算一遍，输出一致（7 种候选池 × 9 种画像，0 处差异）。
+
+场景与它们验证的事：
+
+| 场景 | 验证什么 |
+|---|---|
+| 1–2 | 插件生命周期、市场与 Web API |
+| 3 | 带画像的请求不等 1600ms 的分类模型；没有 `candidateModels` 和 `defaultModel` 时返回 400 |
+| 4–5 | 四种画像（发散、写代码、批量、排障）各自到引擎给出的模型与档位；`/v1/responses`、`/v1/messages`、SSE；`profile` 不发往上游 |
+| 6–7 | 分类模型故障、超时、未配置时不路由；模式 B 的路由组规则与 `none of these` |
+| 8 | 会话保持（工具循环与短追问）在池化运行时上不重路由 |
+| 9 | 每种候选池写法 × 每种协议：上游收到的就是 `selectBestRoute` 给出的路由 |
+| 10 | 四类能力各取 3 级需求：到引擎给出的模型，且不是全去同一处 |
+| 12 | 点名（模型，或模型加档位）被保持 |
+| 13 | 真实上游：画像不上线、路由与 mock 和引擎一致、分类模型对难例的 `access` 与主导类别；单个有标价的账号对失效的同伴；全部账号不可用时 503 |
+| 14–15 | 同一画像换措辞不改路由；没有画像时不路由并写明原因 |
+
+原来的 Scenario 9（与删除文本规则之前的构建比较）和 10–11（`realtime_loop`）随被比较的引擎和该功能一起去掉：引擎换成了 v0.6.0，两个构建的路由本来就不该一样，改由 `selectBestRoute` 给出期望。13B 要求一个 codex 或 claude 账号：AgentCompass 的社区数据给 codex 和 claude 的套餐标了价，没有给 grok 的，所以只有 grok 的账号会被数据门禁挡出自动路由。
+
 ## 5. 与 [AgentCompass 本体 (`akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass) 的生态协同
 
 本插件提供 Magpie 网关层面的**单轮纯意图路由（Turn-Level Micro-Router）**。在生产多 Agent 研发工作流中，推荐与 **[AgentCompass 本体 (`https://github.com/akiiwa-games/AgentCompass`)](https://github.com/akiiwa-games/AgentCompass)**、**[Magpie](https://github.com/yetone/magpie)**、**[Cindy](https://github.com/yetone/cindy)** 及 **Paseo** 配合使用：
 - **AgentCompass 本体**：负责跨宿主子 Agent 任务拆解与派发（`agentcompass roll`）、结合 Cindy 实时配额的 5h/7d 窗口机会成本精算、2M 累计未压缩上下文强制交接换人、以及 `PreToolUse` 路由门禁；
-- **Magpie + `agentcompass` 插件（本仓库）**：负责本地多订阅网关代理、协议转换与单次请求的 10D × (7D+3D) 自动模型/思考档位路由。
+- **Magpie + `agentcompass` 插件（本仓库）**：负责本地多订阅网关代理、协议转换与单次请求的自动模型/思考档位路由（任务画像 × 四类能力评分 × 配额经济）。

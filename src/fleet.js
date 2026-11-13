@@ -123,7 +123,11 @@ const withoutUnconstrainingTag = (raw) => raw.replace(/:(?:auto|off|default)$/i,
 /** The name of a pool entry: a string, or the object's `model`. */
 export const entryModel = (entry) => (typeof entry === "string" ? entry.trim() : entry && typeof entry === "object" ? String(entry.model || "").trim() : "");
 
-/** The efforts a bare model (no effort in its name or entry) is offered at: the launch table's, else those the data times. */
+/**
+ * The efforts a bare model (no effort in its name or entry) is offered at: the provider's launch table's when it lists the model;
+ * none (`[null]`: the row has no effort of its own) when the provider has a table that does not list it, as
+ * `account_fleet.dispatch_allowed_efforts` does; else, for a gateway with no table, those the data times.
+ */
 export function bareEfforts(provider, model, fleet) {
   const info = modelInfo(fleet, model);
   if (info.fixed_effort) return [null];

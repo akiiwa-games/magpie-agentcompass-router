@@ -21,6 +21,7 @@
 - 去掉的导出：`catalog.js` 的 `DEFAULT_MODELS`、`DEFAULT_SCORING_POLICY`、`KIND_TRAITS`、`CANONICAL_ROUTES`、`EFFORT_CURVES`、`resolveModelSpec`；`index.js` 的 `computeWindowCost`、`demandForecast`、`evaluateModelQuota`、`CANONICAL_ROUTES`、`healthOnlyQuotas`；`continuity.js` 的 `effectiveRealtimeLoop`。新增 `ROUTES`。
 - 会话保持里按 tier 抬档的那一支（`capability_outgrown` 中依任务难度的 tier 升级）已删除；GUI / 计算机操作超出轻量模型改按模型是否有图片输入判断。
 - `canonicalModel` 对家族名和未知名返回原名（它们是各自的模型，不折叠到旗舰）。
+- 候选池里的裸模型名：提供方有派发档位表而表里没有这个模型时，该行不带任何档位（与 `account_fleet.dispatch_allowed_efforts` 一致，降档不会落在未经验证的档位上）；没有表的网关仍按数据里计过时的档位展开。`antigravity` 与 `gemini` 提供方没有自己的表，不再借用 `antigravity-resilient` 的。导出名与签名没有变，变的是 `dispatchTable` 与 `bareEfforts` 的行为。
 - 坏掉超过 6 小时的 quotas 文件：在 `selectBestRoute` 里只是 `pool/quotas` 被排除并告警；没有账号依赖该文件时网关行照常路由（`onAccount` 路径仍按"所有候选账号不可用"返回 503）。
 
 **没有移植的部分**（Magpie 只做路由）：启动 worker、harness 顺序与 harness 位次（`harness_place` 恒为 0）、fast 变体与 `wants_fast` 的启动侧逻辑。
@@ -29,7 +30,7 @@
 
 固定版本文件 `test/fixtures/agentcompass-pin.json` 只写提交号。AgentCompass 检出目录用 `--agentcompass-repo <路径>` 或环境变量 `MAGPIE_AGENTCOMPASS_REPO` 给出；`npm run catalog:sync` / `catalog:check` 和 `test/fixtures/gen_routing_parity.py`（`--repo`）读它。没有检出时，核对生成文件的测试（`7.1`）跳过。
 
-**未验证**：`test/linux-sandbox-e2e.mjs`（需要 WSL2 沙箱里的 Linux `magpie` 与 `bun`）这次没有迁移也没有运行，里面仍有 `realtime_loop` 与旧画像字段的场景，需要在有沙箱的机器上改完再跑。
+**未验证**：`test/linux-sandbox-e2e.mjs`（需要 WSL2 沙箱里的 Linux `magpie` 与 `bun`）已按 v0.6.0 的画像与引擎改写，但这台机器没有沙箱，**没有运行过**：检查的只是 `node --check`、它向插件取的名字都在 `src/` 里，以及用同一份画像与候选池在本机对中间件和 `selectBestRoute` 各算一遍、输出一致。期望的路由不再写死在文件里，而由插件自己的 `selectBestRoute` 给出。原来与删除文本规则之前的构建比较的 Scenario 9 和 `realtime_loop` 的 Scenario 10–11 已改写或去掉（见 `docs/RESEARCH_AND_SCHEME.md` §4.8），`test/run-linux-sandbox.sh` 的路径改为运行时推导。需要在有沙箱的机器上跑一遍再记录结果。
 
 ## 移除内置的文本分类：自动路由需要分类模型
 
