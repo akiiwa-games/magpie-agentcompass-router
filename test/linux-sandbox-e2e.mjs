@@ -1951,18 +1951,22 @@ async function main() {
           // text, so that no route is held over from the account before
           const REPLY = `${" ".repeat(index * 3)} Reply with exactly: OK`;
           const realText = `${CODING}${REPLY}`;
+          // A session is keyed by the trimmed first words of the user's message, and v0.6.0 holds a session's route across a
+          // follow-up: a debug request that only adds a space to the coding text is the same session and gets the coding route
+          // held (as the mock did). A task of its own is a session of its own.
+          const realDebugText = `${DEBUG}${REPLY}`;
           await setPluginOptions({ ...basePluginOptions, candidateModels: a.pool.map((m) => `upstream/${m}`) });
           const mockPlain = await postChat({ model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(`${realText}`)] });
           assert.equal(mockPlain.status, 200);
           const mockPlainRoute = routedAs(lastUp());
-          const mockDebug = await postChat({ model: "agentcompass/auto", profile: PROFILE.debug, messages: [userMsg(`${realText} `)] });
+          const mockDebug = await postChat({ model: "agentcompass/auto", profile: PROFILE.debug, messages: [userMsg(realDebugText)] });
           assert.equal(mockDebug.status, 200);
           const mockDebugRoute = routedAs(lastUp());
           await setPluginOptions(basePluginOptions);
 
           const namedModel = `${a.name}/${a.named}`;
           const plain = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.coding, messages: [userMsg(realText)] });
-          const debugChat = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.debug, messages: [userMsg(`${realText} `)] });
+          const debugChat = await callReal("/v1/chat/completions", { model: "agentcompass/auto", profile: PROFILE.debug, messages: [userMsg(realDebugText)] });
           const responses = await callReal("/v1/responses", {
             model: "agentcompass/auto",
             profile: PROFILE.coding,
@@ -2217,26 +2221,34 @@ async function main() {
           `[PASS] Scenario 13A (real classifier routing via ${scorerModelId}): text -> source=${realClassifierRouting.textRequest.profileSource}, needs_visual=${realClassifierRouting.textRequest.needsVisual}, final=${realClassifierRouting.textRequest.finalModel} (upstream ${realClassifierRouting.textRequest.upstreamObserved}, HTTP ${textRoutedCall.status}); screenshot+text -> source=${realClassifierRouting.screenshotPlusTextRequest.profileSource}, needs_visual=${realClassifierRouting.screenshotPlusTextRequest.needsVisual}, final=${realClassifierRouting.screenshotPlusTextRequest.finalModel} (upstream ${realClassifierRouting.screenshotPlusTextRequest.upstreamObserved}, HTTP ${visRoutedCall.status})`
         );
 
+        // Shared by 13B and 13C (13C runs outside 13B's block)
+        const nowIso13 = new Date().toISOString();
+        const winLater13 = new Date(Date.now() + 4 * 3600_000).toISOString();
+        const winWeek13 = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
+        // A plan the community data prices, with the windows that plan has: a quota reading the data gate would refuse
+        // (an unrecognized plan, or windows its plan lacks) leaves the account out of automatic routing for a reason that is not
+        // the one this scenario is about
+        const PLAN_13 = { codex: "pro", claude: "max20", grok: "free" };
+        const WINDOWS_13 = {
+          codex: [{ name: "usage", remaining: 85, resets_at: winWeek13 }],
+          claude: [
+            { name: "five_hour", remaining: 85, resets_at: winLater13 },
+            { name: "seven_day", remaining: 90, resets_at: winWeek13 },
+          ],
+        };
+        const multiProviderPool13 = [
+          "claude/claude-opus-5-5",
+          "claude/claude-sonnet-5-5",
+          "codex/gpt-6.1-sol",
+          "codex/gpt-6-astra",
+          "grok/grok-4.7-build-fast",
+        ];
         // 13B needs an account the data prices: skipped, and said so, when the only account is grok's
         if (!pricedAcct) {
           singleValidAccountWithInvalidPeers = { pass: null, skipped: "no priced (codex or claude) account among the sign-ins: a grok plan has no capacity in the community data (Rule B)" };
           console.log(`[SKIP] Scenario 13B: ${singleValidAccountWithInvalidPeers.skipped}`);
         } else {
           // 13B: Single available account while other accounts' credentials are invalid: warn & do not dispatch invalid accounts
-          const nowIso13 = new Date().toISOString();
-          const winLater13 = new Date(Date.now() + 4 * 3600_000).toISOString();
-          const winWeek13 = new Date(Date.now() + 6 * 24 * 3600_000).toISOString();
-          // A plan the community data prices, with the windows that plan has: a quota reading the data gate would refuse
-          // (an unrecognized plan, or windows its plan lacks) leaves the account out of automatic routing for a reason that is not
-          // the one this scenario is about
-          const PLAN_13 = { codex: "pro", claude: "max20", grok: "free" };
-          const WINDOWS_13 = {
-            codex: [{ name: "usage", remaining: 85, resets_at: winWeek13 }],
-            claude: [
-              { name: "five_hour", remaining: 85, resets_at: winLater13 },
-              { name: "seven_day", remaining: 90, resets_at: winWeek13 },
-            ],
-          };
           const invalidProviders13b = ["codex", "claude", "grok"].filter((p) => p !== pricedAcct.name);
           const singleValidQuotas = [
             {
@@ -2260,13 +2272,6 @@ async function main() {
           ];
           const singleValidQuotasPath = path.join(root, "quotas-single-valid.json");
           fs.writeFileSync(singleValidQuotasPath, JSON.stringify(singleValidQuotas, null, 2));
-          const multiProviderPool13 = [
-            "claude/claude-opus-5-5",
-            "claude/claude-sonnet-5-5",
-            "codex/gpt-6.1-sol",
-            "codex/gpt-6-astra",
-            "grok/grok-4.7-build-fast",
-          ];
           const singleValidOpts = {
             enableDecisionProvider: true,
             decisionProviderDetails: true,
@@ -2358,7 +2363,7 @@ async function main() {
             http_status: 401,
             error: "OAuth token expired (401 Unauthorized)",
             updated_at: nowIso13,
-            windows: [{ name: "five_hour", remaining: 80, resets_at: winLater13 }],
+            windows: WINDOWS_13.codex,
           },
           {
             provider: "claude",
@@ -2368,7 +2373,7 @@ async function main() {
             http_status: 401,
             error: "OAuth token revoked (401 Unauthorized)",
             updated_at: nowIso13,
-            windows: [{ name: "five_hour", remaining: 80, resets_at: winLater13 }],
+            windows: WINDOWS_13.claude,
           },
           {
             provider: "grok",

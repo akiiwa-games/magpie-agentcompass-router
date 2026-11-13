@@ -21,7 +21,7 @@ The engine is AgentCompass v0.6.0 (pinned at `974eb49`, the `v0.6.0` tag), porte
 
 Not ported, because Magpie only routes: launching workers, harness order, and the launch side of fast mode.
 
-The Linux sandbox script is rewritten for this engine and ran on real Magpie 0.1.4022 (2026-11-13, no real sign-in): scenarios 1–10, 12, 14 and 15 passed; scenario 13, against real upstream accounts, was not run. Details: [reference](reference.md#layout-and-tests) and `docs/linux-sandbox-e2e-report-0.1.4022.json`.
+The Linux sandbox script is rewritten for this engine. It ran on real Magpie 0.1.4022 (2026-11-13, no real sign-in: scenario 13 was not run) and then on real Magpie 0.1.4026 with the Codex and Claude sign-ins: scenarios 1–10 and 12–15 passed, scenario 13 for both accounts (no `profile` on the wire, the routes the engine gives, the classifier on six hard cases, a single priced account against invalid peers, every account unavailable). Details: [reference](reference.md#layout-and-tests) and `docs/linux-sandbox-e2e-report-0.1.4026.json`.
 
 ## 0.1.6 - 2026-11-08
 
