@@ -47,3 +47,25 @@ export function classifyRow(fixture, row) {
   else if (js && pyRow && Math.abs(pyRow.score - js[2]) < SCORE_TOLERANCE) reason = REASONS.tie;
   return { reason, js, py, ranked };
 }
+
+/**
+ * A row of the bare-name grid: every catalog model as a bare pool entry on one provider (no effort in the entry). What the
+ * provider offers is `account_fleet.dispatch_allowed_efforts`'s: its table's efforts for a listed model, none for a model a
+ * table does not list, the efforts the data times for a provider with no table.
+ */
+export function routeBareRow(fixture, row) {
+  const [caseIndex, profileIndex, pinModel] = row;
+  const provider = fixture.bare_providers[caseIndex];
+  const options = { candidateModels: fixture.bare_models.map((model) => ({ id: model, provider, model })), now: Date.parse(fixture.now) };
+  if (pinModel) options.constraintModel = pinModel;
+  const ranked = rankCandidates(fixture.profiles[profileIndex], options);
+  const top = ranked.selected;
+  return { ranked, result: top ? [top.model, top.effort ?? null, top.score] : null };
+}
+
+export function classifyBareRow(fixture, row) {
+  const py = row[3];
+  const { result: js } = routeBareRow(fixture, row);
+  const same = py && js ? py[0] === js[0] && (py[1] ?? null) === js[1] && Math.abs(py[2] - js[2]) <= SCORE_TOLERANCE : !py && !js;
+  return { same, js, py };
+}

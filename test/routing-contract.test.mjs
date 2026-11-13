@@ -324,6 +324,13 @@ test("a provider whose table lists the model offers those efforts; a gateway off
   const listed = rankCandidates(PROFILE, { candidateModels: [{ id: "x", provider: "codex", account: "codex", model: "gpt-6-astra" }] });
   for (const c of listed.allCandidates) assert.ok(catalog.DISPATCH_EFFORTS.codex["gpt-6-astra"].includes(c.effort), c.effort);
   assert.equal(new Set(listed.allCandidates.map((c) => c.effort)).size, catalog.DISPATCH_EFFORTS.codex["gpt-6-astra"].length);
+  // A table that does not list the model offers it at no effort (account_fleet.dispatch_allowed_efforts): one row, no flag to land on
+  const unlisted = rankCandidates(PROFILE, { candidateModels: [{ id: "u", provider: "codex", account: "codex", model: "claude-opus-5-5" }] });
+  assert.equal(unlisted.allCandidates.length, 1);
+  assert.equal(unlisted.allCandidates[0].effort ?? null, null);
+  // ...unless the entry itself lists efforts: those are what the row offers
+  const own = rankCandidates(PROFILE, { candidateModels: [{ id: "o", provider: "codex", account: "codex", model: "claude-opus-5-5", efforts: ["medium", "high"] }] });
+  assert.deepEqual(own.allCandidates.map((c) => c.effort).sort(), ["high", "medium"]);
   // A gateway has no table at all: the data's timed efforts are offered
   const gateway = rankCandidates(PROFILE, { candidateModels: [{ id: "g", provider: "openrouter", account: "openrouter", model: "claude-opus-5-5" }] });
   assert.ok(new Set(gateway.allCandidates.map((c) => c.effort)).size > 1);

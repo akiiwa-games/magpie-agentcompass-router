@@ -128,8 +128,12 @@ export function bareEfforts(provider, model, fleet) {
   const info = modelInfo(fleet, model);
   if (info.fixed_effort) return [null];
   const allowed = dispatchAllowedEfforts({ provider, model }, fleet, model);
+  // A provider whose table does not list the model offers it at no effort ("a step-down never lands on an unverified flag",
+  // `account_fleet.dispatch_allowed_efforts`): one row with no effort of its own. Only a provider with no table (a gateway) offers
+  // the efforts the data times.
+  if (allowed !== null && allowed.length === 0) return [null];
   const timed = Object.keys((((info.five_axis || {}).duration) || {}).by_effort || {});
-  const pool = allowed !== null && allowed.length > 0 ? allowed : timed;
+  const pool = allowed !== null ? allowed : timed;
   const known = EFFORT_ORDER.filter((e) => pool.includes(e));
   return known.length > 0 ? known : [null];
 }

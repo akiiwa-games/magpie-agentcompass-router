@@ -98,13 +98,18 @@ export function hasFixedEffort(bundle, fleet) {
 
 // ---------------------------------------------------------------------------- the effort rows a model offers
 
-/** The launch table of a provider (`dispatch_efforts`), or null for a gateway the table does not describe. */
+/**
+ * The launch table of a provider (`dispatch_efforts`), or null for a provider the table does not describe (a gateway), as
+ * `account_fleet.dispatch_table` reads it: the provider's own name, then a numbered account's main family (`claude-2` -> `claude`).
+ * `antigravity` has no row of its own: only the launch provider `antigravity-resilient` does.
+ */
 export function dispatchTable(provider, fleet) {
-  // A numbered account of a provider (Magpie's `claude-2`) reads that provider's table.
-  const family = String(provider || "").trim().toLowerCase().replace(/[-_][0-9]+$/, "");
-  const key = family === "antigravity" || family === "gemini" ? "antigravity-resilient" : family;
-  const table = (fleet.dispatch_efforts || {})[key];
-  return table && typeof table === "object" ? table : null;
+  const name = String(provider || "").trim();
+  const tables = fleet.dispatch_efforts || {};
+  for (const candidate of [name, name.replace(/[-_][0-9]+$/, "")]) {
+    if (candidate && tables[candidate] && typeof tables[candidate] === "object") return tables[candidate];
+  }
+  return null;
 }
 
 /** Names a table may hold this model under: its resolved key, then its raw spellings. */

@@ -12,6 +12,7 @@ the winner and its score. Without --sample the whole grid is written, for a loca
 Reads AgentCompass only through `git archive <commit>`, never a working tree.
 """
 import argparse
+import copy
 import io
 import json
 import os
@@ -49,6 +50,8 @@ sys.path.insert(0, scripts)
 import accounts_override  # noqa: E402
 import allocator  # noqa: E402
 import account_fleet  # noqa: E402
+import axis_scores  # noqa: E402
+import quota_economy  # noqa: E402
 import task_intake  # noqa: E402
 from capability_catalog import compose  # noqa: E402
 
@@ -208,6 +211,49 @@ for pool_index, pool in enumerate(POOLS):
 for profile_index in range(len(PROFILES)):
     emit(len(SPELLINGS) + len(POOLS), len(EFFORT_SUBSETS) - 1, profile_index, 0, EVERY_ROW)
 
+# Bare names on a provider: a pool entry with no effort, as a gateway user writes it. The launch table decides what a provider offers
+# (`account_fleet.dispatch_allowed_efforts`): the listed efforts when it lists the model, nothing when it has a table that does not
+# list it (one row with no effort of its own), and, with no table at all (a gateway), the efforts the data times. Each case puts
+# every catalog model on one provider; both sides get the same rows (Python spells out the efforts the table or the data gives).
+BARE_PROVIDERS = ["claude", "codex", "grok", "pi", "opencode", "omp", "antigravity-resilient", "antigravity", "claude-2", "openrouter"]
+scored = axis_scores.five_axis_overlay(copy.deepcopy(base), read_local_state=False)
+
+
+def timed_efforts(name):
+    key = account_fleet.row_key(name, base)
+    by_effort = ((((scored["models"].get(key) or {}).get("five_axis") or {}).get("duration") or {}).get("by_effort") or {})
+    return [e for e in quota_economy.EFFORT_ORDER if e in by_effort]
+
+
+def bare_bundles(provider, models):
+    out = {}
+    for name in models:
+        allowed = account_fleet.dispatch_allowed_efforts({"provider": provider, "model": name}, base, name)
+        fixed = bool(((scored["models"].get(account_fleet.row_key(name, base)) or {}).get("fixed_effort")))
+        if fixed or (allowed is not None and len(allowed) == 0):
+            out[name] = {"provider": provider, "model": name}
+            continue
+        efforts = [e for e in quota_economy.EFFORT_ORDER if e in (allowed if allowed is not None else timed_efforts(name))]
+        if not efforts:
+            out[name] = {"provider": provider, "model": name}
+        for effort in efforts:
+            out[f"{name}:{effort}"] = {"provider": provider, "model": name, "effort": effort}
+    return out
+
+
+bare_rows = []
+for case, provider in enumerate(BARE_PROVIDERS):
+    bundles = bare_bundles(provider, EVERY_ROW)
+    for profile_index in SINGLE_MODEL_PROFILES:
+        if not VALID.get(profile_index, valid(PROFILES[profile_index])):
+            continue
+        for pin_model in (None, EVERY_ROW[(profile_index * 7 + case) % len(EVERY_ROW)]):
+            try:
+                result = route(bundles, PROFILES[profile_index], "none" if pin_model is None else "model", pin_model, None)
+            except Exception as err:  # noqa: BLE001
+                result = ["!" + type(err).__name__, None, None]
+            bare_rows.append([case, profile_index, pin_model, result])
+
 fixture = {
     "source": {"repo": "AgentCompass", "commit": args.commit, "file": "skills/agent-compass/scripts/allocator.py"},
     "now": NOW.isoformat(),
@@ -220,7 +266,10 @@ fixture = {
     "pin_modes": PIN_MODES,
     "profiles": PROFILES,
     "rows": rows,
+    "bare_providers": BARE_PROVIDERS,
+    "bare_models": EVERY_ROW,
+    "bare_rows": bare_rows,
 }
 with open(args.out, "w", encoding="utf-8", newline="\n") as fh:
     json.dump(fixture, fh, ensure_ascii=False, separators=(",", ":"))
-print(f"{len(rows)} of {seen} rows -> {args.out}")
+print(f"{len(rows)} of {seen} rows, {len(bare_rows)} bare-name rows -> {args.out}")

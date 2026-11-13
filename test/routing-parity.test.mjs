@@ -9,7 +9,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { classifyRow } from "./routing-parity-lib.mjs";
+import { classifyBareRow, classifyRow } from "./routing-parity-lib.mjs";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const FIXTURE = JSON.parse(
@@ -36,4 +36,18 @@ test("every difference from allocator.py on the parity grid has a named reason, 
   t.diagnostic(`${same} of ${FIXTURE.rows.length} rows alike (${((100 * same) / FIXTURE.rows.length).toFixed(2)}%)`);
   for (const [reason, count] of [...byReason].sort((a, b) => b[1] - a[1])) t.diagnostic(`${count}: ${reason}`);
   assert.deepEqual(unexplained.slice(0, 5), []);
+});
+
+test("bare pool entries on a provider offer what account_fleet.dispatch_allowed_efforts offers, and score as allocator.plan does", () => {
+  assert.ok(FIXTURE.bare_rows.length > 100);
+  const offTable = new Set();
+  const different = [];
+  for (const row of FIXTURE.bare_rows) {
+    const { same, js, py } = classifyBareRow(FIXTURE, row);
+    if (!same) different.push({ row: row.slice(0, 3), js, py });
+    if (py && row[3] && py[1] === null) offTable.add(FIXTURE.bare_providers[row[0]]);
+  }
+  assert.deepEqual(different.slice(0, 5), []);
+  // The case is in the grid: a provider with a table that does not list a model is routed at no effort of the model's own
+  assert.ok(offTable.size > 0, "the grid holds a row routed at no effort");
 });
